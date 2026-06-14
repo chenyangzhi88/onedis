@@ -1,0 +1,180 @@
+[package]
+name = "onedis-server"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+tcp-integration-tests = []
+
+[dependencies]            
+bytes = "1.3.0"
+regex = "1.5.4"
+anyhow = "1.0.59"
+dashmap = "5.4"
+bincode = "2.0.0-rc.3"
+clap = { version = "4.2.1", features = ["derive"] }
+tokio = { version = "1.48.0", features = ["full"] }
+indicatif = "0.15.0"
+tempfile = "3.3.0"
+log = "0.4"
+serde_json = "1.0"
+hnsw_rs = "0.3.4"
+mlua = { version = "0.11.4", features = ["lua51", "vendored", "send"] }
+sha1_smol = "1.0"
+kv_engine = { path = "../uni5db-kv-engine/kv_engine" }
+common = { path = "../uni5db-kv-engine/common" }
+tantivy = { path = "../tantivy", default-features = false }
+wasmtime = { version = "43.0.0", default-features = false, features = ["anyhow", "async", "runtime", "cranelift", "std"] }
+
+[dev-dependencies]
+redis = "0.32.7"
+
+[[test]]
+name = "command_semantics_high_coverage"
+path = "tests/command_semantics/command_semantics_high_coverage.rs"
+
+[[test]]
+name = "command_dispatch_command_semantics"
+path = "tests/command_semantics/command_dispatch_command_semantics.rs"
+
+[[test]]
+name = "db_error_command_semantics"
+path = "tests/command_semantics/db_error_command_semantics.rs"
+
+[[test]]
+name = "frame_command_semantics"
+path = "tests/command_semantics/frame_command_semantics.rs"
+
+[[test]]
+name = "full_text_lifecycle_command_semantics"
+path = "tests/command_semantics/full_text_lifecycle_command_semantics.rs"
+
+[[test]]
+name = "full_text_compat_matrix_command_semantics"
+path = "tests/command_semantics/full_text_compat_matrix_command_semantics.rs"
+
+[[test]]
+name = "full_text_index_management_command_semantics"
+path = "tests/command_semantics/full_text_index_management_command_semantics.rs"
+
+[[test]]
+name = "full_text_mutation_indexing_command_semantics"
+path = "tests/command_semantics/full_text_mutation_indexing_command_semantics.rs"
+
+[[test]]
+name = "full_text_schema_create_command_semantics"
+path = "tests/command_semantics/full_text_schema_create_command_semantics.rs"
+
+[[test]]
+name = "full_text_query_parser_command_semantics"
+path = "tests/command_semantics/full_text_query_parser_command_semantics.rs"
+
+[[test]]
+name = "full_text_search_results_command_semantics"
+path = "tests/command_semantics/full_text_search_results_command_semantics.rs"
+
+[[test]]
+name = "full_text_json_indexing_command_semantics"
+path = "tests/command_semantics/full_text_json_indexing_command_semantics.rs"
+
+[[test]]
+name = "full_text_vector_search_command_semantics"
+path = "tests/command_semantics/full_text_vector_search_command_semantics.rs"
+
+[[test]]
+name = "full_text_aggregate_command_semantics"
+path = "tests/command_semantics/full_text_aggregate_command_semantics.rs"
+
+[[test]]
+name = "full_text_text_analysis_command_semantics"
+path = "tests/command_semantics/full_text_text_analysis_command_semantics.rs"
+
+[[test]]
+name = "full_text_dictionary_suggestion_synonym_command_semantics"
+path = "tests/command_semantics/full_text_dictionary_suggestion_synonym_command_semantics.rs"
+
+[[test]]
+name = "full_text_geo_search_command_semantics"
+path = "tests/command_semantics/full_text_geo_search_command_semantics.rs"
+
+[[test]]
+name = "full_text_introspection_command_semantics"
+path = "tests/command_semantics/full_text_introspection_command_semantics.rs"
+
+[[test]]
+name = "full_text_refresh_outbox_command_semantics"
+path = "tests/command_semantics/full_text_refresh_outbox_command_semantics.rs"
+
+[[test]]
+name = "full_text_cluster_contract_command_semantics"
+path = "tests/command_semantics/full_text_cluster_contract_command_semantics.rs"
+
+[[test]]
+name = "kv_engine_collection_command_semantics"
+path = "tests/command_semantics/kv_engine_collection_command_semantics.rs"
+
+[[test]]
+name = "kv_engine_string_key_command_semantics"
+path = "tests/command_semantics/kv_engine_string_key_command_semantics.rs"
+
+[[test]]
+name = "lua_command_semantics"
+path = "tests/command_semantics/lua_command_semantics.rs"
+
+[[test]]
+name = "server_components_command_semantics"
+path = "tests/command_semantics/server_components_command_semantics.rs"
+
+[[test]]
+name = "vector_command_semantics"
+path = "tests/command_semantics/vector_command_semantics.rs"
+
+[[test]]
+name = "basic_commands_tcp_e2e"
+path = "tests/tcp_e2e/basic_commands_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "connect_commands_tcp_e2e"
+path = "tests/tcp_e2e/connect_commands_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "hash_commands_tcp_e2e"
+path = "tests/tcp_e2e/hash_commands_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "info_command_tcp_e2e"
+path = "tests/tcp_e2e/info_command_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "keys_performance_tcp_e2e"
+path = "tests/tcp_e2e/keys_performance_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "move_command_tcp_e2e"
+path = "tests/tcp_e2e/move_command_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "scan_command_tcp_e2e"
+path = "tests/tcp_e2e/scan_command_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "sdiff_command_tcp_e2e"
+path = "tests/tcp_e2e/sdiff_command_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "sscan_command_tcp_e2e"
+path = "tests/tcp_e2e/sscan_command_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]
+
+[[test]]
+name = "transactions_tcp_e2e"
+path = "tests/tcp_e2e/transactions_tcp_e2e.rs"
+required-features = ["tcp-integration-tests"]

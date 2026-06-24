@@ -10,7 +10,7 @@ use bytes::Bytes;
 use common::types::status::Status;
 use common::types::write_batch::{WriteBatch, WriteType};
 use dashmap::{DashMap, mapref::entry::Entry};
-use kv_engine::db::CompareCondition;
+use kv_engine::db::SchemalessCompareCondition as CompareCondition;
 use serde_json::Value as JsonValue;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 

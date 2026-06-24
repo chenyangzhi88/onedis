@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common::types::options::FileConfig;
-use kv_engine::db::DB;
 use onedis_server::store::db::{Db, KeyMutationTracker};
 use onedis_server::store::kv_store::KvStore;
 use onedis_server::store::ttl::{TtlConfig, TtlManager, VersionCounter};

@@ -1,7 +1,6 @@
 use anyhow::Error;
 
 use crate::{frame::Frame, store::db_manager::DatabaseManager};
-use kv_engine::db::DB;
 
 pub struct Bgsave {}
 

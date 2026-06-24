@@ -52,6 +52,7 @@ include!("full_text/aggregate_cursor.rs");
 include!("full_text/dictionary_suggestion_synonym.rs");
 include!("full_text/info.rs");
 include!("full_text/source_vector_indexing.rs");
+include!("full_text/refresh_backfill_progress.rs");
 include!("full_text/refresh_outbox.rs");
 include!("full_text/metadata_config_helpers.rs");
 

@@ -75,7 +75,7 @@ pub(crate) fn apply_command(db: &Db, args: &[&str]) -> Frame {
 pub(crate) async fn apply_command_async(db: &Db, args: &[&str]) -> Frame {
     let frame = frame_args(args);
     let command = Command::parse_from_frame(frame).unwrap();
-    db.handle_command_async(command).await.unwrap()
+    Box::pin(db.handle_command_async(command)).await.unwrap()
 }
 
 pub(crate) fn apply_frame(db: &Db, frame: Frame) -> Frame {

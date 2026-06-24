@@ -115,6 +115,33 @@
         );
     }
 
+    #[test]
+    fn zset_limited_filter_stops_after_enough_matches() {
+        let db = test_db();
+        let members = (0..10)
+            .map(|index| (index as f64, format!("m{index:02}")))
+            .collect::<Vec<_>>();
+        db.zset_add("limited", &members).unwrap();
+
+        let mut visited = 0usize;
+        let entries = db
+            .zset_filter_entries_limited("limited", 3, |_, score| {
+                visited += 1;
+                score >= 3.0
+            })
+            .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                ("m03".to_string(), 3.0),
+                ("m04".to_string(), 4.0),
+                ("m05".to_string(), 5.0),
+            ]
+        );
+        assert_eq!(visited, 6);
+    }
+
     #[tokio::test]
     async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
         let db = test_db();
@@ -264,4 +291,3 @@
         );
         assert!(db.zset_scan_async("plain", 0, "*", 10).await.is_err());
     }
-

@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /// 设置指定下标的元素。
     pub fn list_set(&self, key: &str, index: i64, value: &str) -> Result<(), Error> {

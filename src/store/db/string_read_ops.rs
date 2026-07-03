@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /**
      * 获取键值（返回 owned Structure）

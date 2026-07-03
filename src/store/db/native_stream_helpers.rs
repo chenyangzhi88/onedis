@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn stream_meta(&self, key: &str) -> Result<Option<StreamMeta>, Error> {
+    pub(in crate::store::db) fn stream_meta(&self, key: &str) -> Result<Option<StreamMeta>, Error> {
         self.expire_if_needed(key);
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
             return Ok(None);
@@ -18,7 +20,10 @@ impl Db {
         Err(Error::msg("Failed to decode stream metadata"))
     }
 
-    async fn stream_meta_async(&self, key: &str) -> Result<Option<StreamMeta>, Error> {
+    pub(in crate::store::db) async fn stream_meta_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<StreamMeta>, Error> {
         self.expire_if_needed_async(key).await;
         let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
             return Ok(None);
@@ -37,7 +42,7 @@ impl Db {
         Err(Error::msg("Failed to decode stream metadata"))
     }
 
-    fn next_stream_id(&self, last_id: StreamId) -> StreamId {
+    pub(in crate::store::db) fn next_stream_id(&self, last_id: StreamId) -> StreamId {
         let now = now_ms();
         if now > last_id.ms {
             StreamId { ms: now, seq: 0 }
@@ -49,7 +54,11 @@ impl Db {
         }
     }
 
-    fn stream_entries_raw(&self, key: &str, version: u64) -> Vec<(StreamId, Vec<u8>)> {
+    pub(in crate::store::db) fn stream_entries_raw(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(StreamId, Vec<u8>)> {
         let prefix = stream_entry_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw(&prefix)
@@ -60,7 +69,11 @@ impl Db {
             .collect()
     }
 
-    async fn stream_entries_raw_async(&self, key: &str, version: u64) -> Vec<(StreamId, Vec<u8>)> {
+    pub(in crate::store::db) async fn stream_entries_raw_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(StreamId, Vec<u8>)> {
         let prefix = stream_entry_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw_async(&prefix)
@@ -72,7 +85,7 @@ impl Db {
             .collect()
     }
 
-    fn stream_entries_between(
+    pub(in crate::store::db) fn stream_entries_between(
         &self,
         key: &str,
         version: u64,
@@ -91,7 +104,7 @@ impl Db {
             .collect()
     }
 
-    async fn stream_entries_between_async(
+    pub(in crate::store::db) async fn stream_entries_between_async(
         &self,
         key: &str,
         version: u64,
@@ -111,7 +124,12 @@ impl Db {
             .collect()
     }
 
-    fn stream_entry_by_id(&self, key: &str, version: u64, id: StreamId) -> Option<StreamEntry> {
+    pub(in crate::store::db) fn stream_entry_by_id(
+        &self,
+        key: &str,
+        version: u64,
+        id: StreamId,
+    ) -> Option<StreamEntry> {
         let raw = self
             .store
             .get_raw(&stream_entry_key(self.db_index, key, version, id))?;
@@ -121,7 +139,7 @@ impl Db {
         })
     }
 
-    async fn stream_entry_by_id_async(
+    pub(in crate::store::db) async fn stream_entry_by_id_async(
         &self,
         key: &str,
         version: u64,
@@ -137,7 +155,7 @@ impl Db {
         })
     }
 
-    fn stream_group_state(
+    pub(in crate::store::db) fn stream_group_state(
         &self,
         key: &str,
         group: &str,
@@ -151,7 +169,7 @@ impl Db {
             .and_then(|raw| decode_stream_group_state(&raw)))
     }
 
-    async fn stream_group_state_async(
+    pub(in crate::store::db) async fn stream_group_state_async(
         &self,
         key: &str,
         group: &str,
@@ -166,7 +184,7 @@ impl Db {
             .and_then(|raw| decode_stream_group_state(&raw)))
     }
 
-    fn stream_pending_raw(
+    pub(in crate::store::db) fn stream_pending_raw(
         &self,
         key: &str,
         version: u64,
@@ -185,7 +203,7 @@ impl Db {
             .collect()
     }
 
-    fn stream_consumers_raw(
+    pub(in crate::store::db) fn stream_consumers_raw(
         &self,
         key: &str,
         version: u64,
@@ -204,7 +222,7 @@ impl Db {
             .collect()
     }
 
-    async fn stream_consumers_raw_async(
+    pub(in crate::store::db) async fn stream_consumers_raw_async(
         &self,
         key: &str,
         version: u64,
@@ -224,7 +242,7 @@ impl Db {
             .collect()
     }
 
-    async fn stream_pending_raw_async(
+    pub(in crate::store::db) async fn stream_pending_raw_async(
         &self,
         key: &str,
         version: u64,

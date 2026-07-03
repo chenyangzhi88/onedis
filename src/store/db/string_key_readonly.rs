@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn get_string_entry_raw_bytes(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         let Some(raw) = self.read_live_raw_key_bytes(key) else {
@@ -169,7 +171,7 @@ impl Db {
         if expire_ms == 0 { -1 } else { expire_ms as i64 }
     }
 
-    fn read_live_raw(&self, key: &str) -> Option<Vec<u8>> {
+    pub(in crate::store::db) fn read_live_raw(&self, key: &str) -> Option<Vec<u8>> {
         let raw = self.store.get_raw(&self.mk(key))?;
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms > 0 && now_ms() >= expire_ms {
@@ -178,7 +180,7 @@ impl Db {
         Some(raw)
     }
 
-    async fn read_live_raw_async(&self, key: &str) -> Option<Vec<u8>> {
+    pub(in crate::store::db) async fn read_live_raw_async(&self, key: &str) -> Option<Vec<u8>> {
         let raw = self.store.get_raw_async(&self.mk(key)).await?;
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms > 0 && now_ms() >= expire_ms {
@@ -187,7 +189,7 @@ impl Db {
         Some(raw)
     }
 
-    fn read_live_raw_key_bytes(&self, key: &[u8]) -> Option<Bytes> {
+    pub(in crate::store::db) fn read_live_raw_key_bytes(&self, key: &[u8]) -> Option<Bytes> {
         let raw = self
             .store
             .get_raw_bytes(&main_key_bytes(self.db_index, key))?;

@@ -34,7 +34,11 @@ impl Handler {
             return self
                 .command_executor
                 .execute(
-                    async move { db.handle_command_async(command).await.map(|f| f.as_bytes()) },
+                    async move {
+                        crate::command_dispatch::handle_command_async(&db, command)
+                            .await
+                            .map(|f| f.as_bytes())
+                    },
                 )
                 .await?;
         }
@@ -73,9 +77,9 @@ impl Handler {
         let should_notify_zset = Self::is_zset_mutating_command(&command);
         let should_notify_stream = Self::is_stream_mutating_command(&command);
         let frame = if direct {
-            db.handle_command_async(command).await
+            crate::command_dispatch::handle_command_async(&db, command).await
         } else {
-            db.handle_command_autocommit_async(command).await
+            crate::command_dispatch::handle_command_autocommit_async(&db, command).await
         }?;
         if should_notify && !matches!(frame, Frame::Error(_)) {
             self.db_manager.notify_list_waiters();
@@ -107,13 +111,19 @@ impl Handler {
                     return Ok(Frame::Error("ERR DB index is out of range".to_string()));
                 }
                 let db = self.session.get_db().clone();
-                db.handle_command_autocommit_async(Command::Move(r#move))
-                    .await
+                crate::command_dispatch::handle_command_autocommit_async(
+                    &db,
+                    Command::Move(r#move),
+                )
+                .await
             }
             Command::Copy(copy) => {
                 let db = self.session.get_db().clone();
-                db.handle_command_autocommit_async(Command::Copy(copy))
-                    .await
+                crate::command_dispatch::handle_command_autocommit_async(
+                    &db,
+                    Command::Copy(copy),
+                )
+                .await
             }
             Command::Exec(_) => self.execute_transaction_async().await,
             Command::Multi(multi) => multi.apply(self),
@@ -127,9 +137,9 @@ impl Handler {
             _ => {
                 let db = self.session.get_db().clone();
                 if Self::can_apply_direct(&command) {
-                    db.handle_command_async(command).await
+                    crate::command_dispatch::handle_command_async(&db, command).await
                 } else {
-                    db.handle_command_autocommit_async(command).await
+                    crate::command_dispatch::handle_command_autocommit_async(&db, command).await
                 }
             }
         }

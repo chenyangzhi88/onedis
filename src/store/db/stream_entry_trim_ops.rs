@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_trim_maxlen(&self, key: &str, max_len: usize) -> Result<usize, Error> {
         let Some(mut meta) = self.stream_meta(key)? else {

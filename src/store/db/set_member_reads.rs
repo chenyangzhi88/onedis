@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /// 检查 member 是否属于 set。
     pub fn set_contains(&self, key: &str, member: &str) -> Result<bool, Error> {
@@ -56,7 +58,10 @@ impl Db {
             .collect())
     }
 
-    async fn set_member_set_async(&self, key: &str) -> Result<Option<HashSet<String>>, Error> {
+    pub(in crate::store::db) async fn set_member_set_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<HashSet<String>>, Error> {
         match self.set_meta_async(key).await? {
             Some(meta) => Ok(Some(
                 self.set_members_raw_async(key, meta.version)

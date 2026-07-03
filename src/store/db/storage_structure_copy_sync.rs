@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn copy_prefixed_namespace_to_batch_sync(
+    pub(in crate::store::db) fn copy_prefixed_namespace_to_batch_sync(
         store: &KvStore,
         batch: &mut WriteBatch,
         source_prefix: Vec<u8>,
@@ -14,7 +16,7 @@ impl Db {
         }
     }
 
-    fn copy_structure_between_dbs_to_batch(
+    pub(in crate::store::db) fn copy_structure_between_dbs_to_batch(
         source_store: &KvStore,
         target_store: &KvStore,
         batch: &mut WriteBatch,
@@ -70,7 +72,12 @@ impl Db {
                     stream_consumer_prefix(target_db_index, target_key, target_version),
                 ),
             ] {
-                Self::copy_prefixed_namespace_to_batch_sync(source_store, batch, source_ns, target_ns);
+                Self::copy_prefixed_namespace_to_batch_sync(
+                    source_store,
+                    batch,
+                    source_ns,
+                    target_ns,
+                );
             }
             return;
         }
@@ -135,7 +142,7 @@ impl Db {
                     ),
                 ] {
                     Self::copy_prefixed_namespace_to_batch_sync(
-                source_store,
+                        source_store,
                         batch,
                         source_prefix,
                         target_prefix,
@@ -190,7 +197,7 @@ impl Db {
                     ),
                 ] {
                     Self::copy_prefixed_namespace_to_batch_sync(
-                source_store,
+                        source_store,
                         batch,
                         source_prefix,
                         target_prefix,

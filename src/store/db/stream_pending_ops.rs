@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_ack(&self, key: &str, group: &str, ids: &[StreamId]) -> Result<usize, Error> {
         let Some(meta) = self.stream_meta(key)? else {

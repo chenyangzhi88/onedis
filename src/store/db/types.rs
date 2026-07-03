@@ -1,3 +1,5 @@
+use super::*;
+
 #[derive(Clone, Encode, Decode)]
 pub enum Structure {
     String(String),
@@ -11,7 +13,7 @@ pub enum Structure {
 }
 
 #[derive(Clone, Encode, Decode)]
-enum JsonNode {
+pub(in crate::store::db) enum JsonNode {
     Scalar(String),
     Object(Vec<String>),
     Array(usize),
@@ -54,9 +56,9 @@ pub enum SetOutcome {
 }
 
 #[derive(Clone, Copy)]
-struct CounterCacheEntry {
-    value: i64,
-    expire_ms: u64,
+pub(in crate::store::db) struct CounterCacheEntry {
+    pub(in crate::store::db) value: i64,
+    pub(in crate::store::db) expire_ms: u64,
 }
 
 #[derive(Clone, Encode, Decode, Debug, PartialEq, Eq)]
@@ -165,11 +167,11 @@ pub struct Vector {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ListMeta {
-    expire_ms: u64,
-    version: u64,
-    head: i64,
-    tail: i64,
+pub(in crate::store::db) struct ListMeta {
+    pub(in crate::store::db) expire_ms: u64,
+    pub(in crate::store::db) version: u64,
+    pub(in crate::store::db) head: i64,
+    pub(in crate::store::db) tail: i64,
 }
 
 #[derive(Default)]
@@ -180,12 +182,12 @@ pub struct KeyMutationTracker {
 }
 
 impl KeyMutationTracker {
-    fn bump_key(&self, key: Vec<u8>) {
+    pub(in crate::store::db) fn bump_key(&self, key: Vec<u8>) {
         let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
         self.key_versions.insert(key, version);
     }
 
-    fn bump_db(&self, db_index: u16) {
+    pub(in crate::store::db) fn bump_db(&self, db_index: u16) {
         let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
         self.db_versions.insert(db_index, version);
     }
@@ -203,18 +205,18 @@ impl KeyMutationTracker {
 }
 
 #[derive(Default)]
-struct PendingMutations {
-    keys: Vec<Vec<u8>>,
-    dbs: Vec<u16>,
+pub(in crate::store::db) struct PendingMutations {
+    pub(in crate::store::db) keys: Vec<Vec<u8>>,
+    pub(in crate::store::db) dbs: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StreamMeta {
-    expire_ms: u64,
-    version: u64,
-    last_id: StreamId,
-    length: u64,
-    entries_added: u64,
+pub(in crate::store::db) struct StreamMeta {
+    pub(in crate::store::db) expire_ms: u64,
+    pub(in crate::store::db) version: u64,
+    pub(in crate::store::db) last_id: StreamId,
+    pub(in crate::store::db) length: u64,
+    pub(in crate::store::db) entries_added: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,26 +233,26 @@ pub enum ZsetAggregate {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StreamGroupState {
-    last_delivered_id: StreamId,
-    entries_read: u64,
+pub(in crate::store::db) struct StreamGroupState {
+    pub(in crate::store::db) last_delivered_id: StreamId,
+    pub(in crate::store::db) entries_read: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StreamPelState {
-    consumer: String,
-    last_delivery_ms: u64,
-    deliveries: u64,
+pub(in crate::store::db) struct StreamPelState {
+    pub(in crate::store::db) consumer: String,
+    pub(in crate::store::db) last_delivery_ms: u64,
+    pub(in crate::store::db) deliveries: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StreamConsumerState {
-    last_seen_ms: u64,
+pub(in crate::store::db) struct StreamConsumerState {
+    pub(in crate::store::db) last_seen_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SetMeta {
-    expire_ms: u64,
-    version: u64,
-    len: usize,
+pub(in crate::store::db) struct SetMeta {
+    pub(in crate::store::db) expire_ms: u64,
+    pub(in crate::store::db) version: u64,
+    pub(in crate::store::db) len: usize,
 }

@@ -1,5 +1,11 @@
+use super::*;
+
 impl Db {
-    fn remove_internal(&self, key: &str, count_change: bool) -> Option<Structure> {
+    pub(in crate::store::db) fn remove_internal(
+        &self,
+        key: &str,
+        count_change: bool,
+    ) -> Option<Structure> {
         let key_bytes = self.mk(key);
         let raw = self.store.get_raw(&key_bytes)?.clone();
 
@@ -72,7 +78,11 @@ impl Db {
         result
     }
 
-    async fn remove_internal_async(&self, key: &str, count_change: bool) -> Option<Structure> {
+    pub(in crate::store::db) async fn remove_internal_async(
+        &self,
+        key: &str,
+        count_change: bool,
+    ) -> Option<Structure> {
         let key_bytes = self.mk(key);
         let raw = self.store.get_raw(&key_bytes)?.clone();
 
@@ -145,7 +155,7 @@ impl Db {
         result
     }
 
-    fn delete_key_internal(&self, key: &str, count_change: bool) -> bool {
+    pub(in crate::store::db) fn delete_key_internal(&self, key: &str, count_change: bool) -> bool {
         let key_bytes = self.mk(key);
         let Some(raw) = self.store.get_raw(&key_bytes).map(|raw| raw.clone()) else {
             return false;
@@ -208,7 +218,11 @@ impl Db {
         true
     }
 
-    async fn delete_key_internal_async(&self, key: &str, count_change: bool) -> bool {
+    pub(in crate::store::db) async fn delete_key_internal_async(
+        &self,
+        key: &str,
+        count_change: bool,
+    ) -> bool {
         let key_bytes = self.mk(key);
         let Some(raw) = self.store.get_raw(&key_bytes).map(|raw| raw.clone()) else {
             return false;
@@ -270,5 +284,4 @@ impl Db {
         }
         true
     }
-
 }

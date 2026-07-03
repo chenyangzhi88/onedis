@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub async fn insert_string_bytes_refs_async(&self, key_vals: &[(&str, &[u8])]) {
         if key_vals.is_empty() {

@@ -1,11 +1,13 @@
-fn now_ms() -> u64 {
+use super::*;
+
+pub(in crate::store::db) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
 }
 
-fn random_u64() -> u64 {
+pub(in crate::store::db) fn random_u64() -> u64 {
     static RANDOM_COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -17,7 +19,7 @@ fn random_u64() -> u64 {
     x ^ (x >> 31)
 }
 
-fn set_write_lock_shard(db_index: u16, key: &str) -> usize {
+pub(in crate::store::db) fn set_write_lock_shard(db_index: u16, key: &str) -> usize {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in db_index.to_be_bytes().into_iter().chain(key.bytes()) {
         hash ^= u64::from(byte);
@@ -26,13 +28,17 @@ fn set_write_lock_shard(db_index: u16, key: &str) -> usize {
     hash as usize & (SET_WRITE_LOCK_SHARDS - 1)
 }
 
-fn normalize_byte_index(len: usize, index: i64) -> Option<usize> {
+pub(in crate::store::db) fn normalize_byte_index(len: usize, index: i64) -> Option<usize> {
     let len = len as i64;
     let normalized = if index < 0 { len + index } else { index };
     (normalized >= 0).then_some(normalized as usize)
 }
 
-fn byte_range_slice(bytes: &[u8], start: Option<i64>, end: Option<i64>) -> &[u8] {
+pub(in crate::store::db) fn byte_range_slice(
+    bytes: &[u8],
+    start: Option<i64>,
+    end: Option<i64>,
+) -> &[u8] {
     if bytes.is_empty() {
         return bytes;
     }

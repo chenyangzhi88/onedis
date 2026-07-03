@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /**
      * 设置过期
@@ -71,7 +73,7 @@ impl Db {
         false
     }
 
-    fn expire_condition_matches(
+    pub(in crate::store::db) fn expire_condition_matches(
         current_expire_ms: u64,
         ttl: u64,
         condition: ExpireCondition,

@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_add(
         &self,

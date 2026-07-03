@@ -69,18 +69,22 @@ pub(crate) fn frame_args(args: &[&str]) -> Frame {
 pub(crate) fn apply_command(db: &Db, args: &[&str]) -> Frame {
     let frame = frame_args(args);
     let command = Command::parse_from_frame(frame).unwrap();
-    db.handle_command(command).unwrap()
+    onedis_server::command_dispatch::handle_command(db, command).unwrap()
 }
 
 pub(crate) async fn apply_command_async(db: &Db, args: &[&str]) -> Frame {
     let frame = frame_args(args);
     let command = Command::parse_from_frame(frame).unwrap();
-    Box::pin(db.handle_command_async(command)).await.unwrap()
+    Box::pin(onedis_server::command_dispatch::handle_command_async(
+        db, command,
+    ))
+    .await
+    .unwrap()
 }
 
 pub(crate) fn apply_frame(db: &Db, frame: Frame) -> Frame {
     let command = Command::parse_from_frame(frame).unwrap();
-    db.handle_command(command).unwrap()
+    onedis_server::command_dispatch::handle_command(db, command).unwrap()
 }
 
 pub(crate) fn array_contains_bulk(frame: &Frame, expected: &str) -> bool {

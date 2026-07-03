@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn zset_all_entries(&self, key: &str) -> Result<Vec<(String, f64)>, Error> {
         let meta = self.zset_expire_ms(key)?;

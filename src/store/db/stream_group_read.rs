@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_read_group(
         &self,
@@ -203,5 +205,4 @@ impl Db {
         }
         Ok(result)
     }
-
 }

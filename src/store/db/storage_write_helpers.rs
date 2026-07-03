@@ -1,5 +1,13 @@
+use super::*;
+
 impl Db {
-    fn write_structure(&self, key: &str, value: &Structure, expire_ms: u64, version: u64) {
+    pub(in crate::store::db) fn write_structure(
+        &self,
+        key: &str,
+        value: &Structure,
+        expire_ms: u64,
+        version: u64,
+    ) {
         let mut batch = WriteBatch::new();
         if version > 0 {}
         // Clean up old version's sub-keys if overwriting
@@ -36,13 +44,13 @@ impl Db {
         self.write_batch_if_not_empty(&batch);
     }
 
-    fn write_string(&self, key: &str, value: &[u8], expire_ms: u64) {
+    pub(in crate::store::db) fn write_string(&self, key: &str, value: &[u8], expire_ms: u64) {
         let mut batch = WriteBatch::new();
         self.write_string_to_batch(&mut batch, key, value, expire_ms);
         self.write_batch_if_not_empty(&batch);
     }
 
-    async fn write_string_async(
+    pub(in crate::store::db) async fn write_string_async(
         &self,
         key: &str,
         value: &[u8],
@@ -54,7 +62,7 @@ impl Db {
         self.write_batch_if_not_empty_async(&batch).await;
     }
 
-    fn write_string_to_batch(
+    pub(in crate::store::db) fn write_string_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -69,7 +77,7 @@ impl Db {
         self.write_string_to_batch_with_old_raw(batch, key, value, expire_ms, old_raw.as_deref());
     }
 
-    fn write_string_to_batch_with_old_raw(
+    pub(in crate::store::db) fn write_string_to_batch_with_old_raw(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -88,7 +96,7 @@ impl Db {
         }
     }
 
-    fn write_string_byte_key_to_batch_with_old_raw(
+    pub(in crate::store::db) fn write_string_byte_key_to_batch_with_old_raw(
         &self,
         batch: &mut WriteBatch,
         key: &[u8],
@@ -113,7 +121,7 @@ impl Db {
         }
     }
 
-    fn cleanup_old_complex_subkeys_for_string_overwrite(
+    pub(in crate::store::db) fn cleanup_old_complex_subkeys_for_string_overwrite(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -155,7 +163,7 @@ impl Db {
         }
     }
 
-    fn cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
+    pub(in crate::store::db) fn cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
         &self,
         batch: &mut WriteBatch,
         key: &[u8],
@@ -186,7 +194,7 @@ impl Db {
         }
     }
 
-    fn write_structure_to_batch(
+    pub(in crate::store::db) fn write_structure_to_batch(
         batch: &mut WriteBatch,
         db_index: u16,
         key: &str,
@@ -299,5 +307,4 @@ impl Db {
             }
         }
     }
-
 }

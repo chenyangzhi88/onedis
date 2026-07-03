@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub(crate) fn move_key_between_dbs(
         store: &KvStore,
@@ -46,7 +48,8 @@ impl Db {
                 source_key,
                 &source_raw,
             );
-            if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+            if let (Some(ttl_manager), Some(header)) =
+                (ttl_manager, decode_meta_header(&source_raw))
                 && header.expire_ms > 0
             {
                 ttl_manager.remove_known_to_batch(
@@ -76,7 +79,12 @@ impl Db {
         if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
             && header.expire_ms > 0
         {
-            ttl_manager.add_to_batch(&mut target_batch, header.expire_ms, target_db_index, target_key);
+            ttl_manager.add_to_batch(
+                &mut target_batch,
+                header.expire_ms,
+                target_db_index,
+                target_key,
+            );
         }
         target_store.write_batch(&target_batch);
 
@@ -150,7 +158,8 @@ impl Db {
                 source_key,
                 &source_raw,
             );
-            if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+            if let (Some(ttl_manager), Some(header)) =
+                (ttl_manager, decode_meta_header(&source_raw))
                 && header.expire_ms > 0
             {
                 ttl_manager.remove_known_to_batch(
@@ -181,7 +190,12 @@ impl Db {
         if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
             && header.expire_ms > 0
         {
-            ttl_manager.add_to_batch(&mut target_batch, header.expire_ms, target_db_index, target_key);
+            ttl_manager.add_to_batch(
+                &mut target_batch,
+                header.expire_ms,
+                target_db_index,
+                target_key,
+            );
         }
         target_store.write_batch(&target_batch);
 

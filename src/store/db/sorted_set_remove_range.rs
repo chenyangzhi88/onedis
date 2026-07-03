@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn zset_remove_range_by_rank(
         &self,
@@ -56,5 +58,4 @@ impl Db {
             .collect();
         self.zset_remove_async(key, &members).await
     }
-
 }

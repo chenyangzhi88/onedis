@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn logical_keys(&self) -> Vec<String> {
+    pub(in crate::store::db) fn logical_keys(&self) -> Vec<String> {
         self.store
             .scan_range_raw_limited(&[], None, usize::MAX)
             .into_iter()
@@ -10,7 +12,7 @@ impl Db {
             .collect()
     }
 
-    async fn logical_keys_async(&self) -> Vec<String> {
+    pub(in crate::store::db) async fn logical_keys_async(&self) -> Vec<String> {
         self.store
             .scan_range_raw_limited_async(&[], None, usize::MAX)
             .await
@@ -48,7 +50,11 @@ impl Db {
         rows
     }
 
-    fn read_hash_fields(&self, key: &str, version: u64) -> HashMap<String, String> {
+    pub(in crate::store::db) fn read_hash_fields(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> HashMap<String, String> {
         let mut hash = HashMap::new();
 
         for (field, value) in self.hash_entries_raw(key, version) {
@@ -60,14 +66,22 @@ impl Db {
         hash
     }
 
-    fn read_set_members(&self, key: &str, version: u64) -> HashSet<String> {
+    pub(in crate::store::db) fn read_set_members(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> HashSet<String> {
         self.set_members_raw(key, version)
             .into_iter()
             .filter_map(|member| String::from_utf8(member).ok())
             .collect()
     }
 
-    fn read_zset_members(&self, key: &str, version: u64) -> BTreeMap<String, f64> {
+    pub(in crate::store::db) fn read_zset_members(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> BTreeMap<String, f64> {
         self.zset_members_raw(key, version)
             .into_iter()
             .filter_map(|(member, value)| {
@@ -79,7 +93,12 @@ impl Db {
             .collect()
     }
 
-    fn decode_rank_score(&self, key: &str, version: u64, rank_key: &[u8]) -> Option<f64> {
+    pub(in crate::store::db) fn decode_rank_score(
+        &self,
+        key: &str,
+        version: u64,
+        rank_key: &[u8],
+    ) -> Option<f64> {
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let suffix = rank_key.strip_prefix(prefix.as_slice())?;
         if suffix.len() < 9 {
@@ -89,7 +108,12 @@ impl Db {
         Some(decode_sorted_f64(score_bytes))
     }
 
-    fn decode_rank_member(&self, key: &str, version: u64, rank_key: &[u8]) -> Option<String> {
+    pub(in crate::store::db) fn decode_rank_member(
+        &self,
+        key: &str,
+        version: u64,
+        rank_key: &[u8],
+    ) -> Option<String> {
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let suffix = rank_key.strip_prefix(prefix.as_slice())?;
         if suffix.len() < 9 || suffix[8] != 0x00 {
@@ -98,7 +122,7 @@ impl Db {
         String::from_utf8(suffix[9..].to_vec()).ok()
     }
 
-    fn read_list_items(&self, key: &str, version: u64) -> Vec<String> {
+    pub(in crate::store::db) fn read_list_items(&self, key: &str, version: u64) -> Vec<String> {
         let prefix = list_item_prefix(self.db_index, key, version);
         let mut items: Vec<(i64, String)> = Vec::new();
 
@@ -122,7 +146,11 @@ impl Db {
         items.into_iter().map(|(_, value)| value).collect()
     }
 
-    fn read_stream_entries(&self, key: &str, version: u64) -> Vec<StreamEntry> {
+    pub(in crate::store::db) fn read_stream_entries(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<StreamEntry> {
         self.stream_entries_between(
             key,
             version,
@@ -133,5 +161,4 @@ impl Db {
             },
         )
     }
-
 }

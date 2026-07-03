@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /// 返回队列长度。
     pub fn list_len(&self, key: &str) -> Result<usize, Error> {

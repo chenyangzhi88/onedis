@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn hash_expire_fields_at_ms(
         &self,

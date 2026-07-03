@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn flushdb(&self) {
         let prefix = db_prefix(self.db_index);

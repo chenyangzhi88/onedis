@@ -1,6 +1,7 @@
 pub mod args;
 pub mod cmds;
 pub mod command;
+pub mod command_dispatch;
 pub mod command_executor;
 pub mod frame;
 pub mod lua;

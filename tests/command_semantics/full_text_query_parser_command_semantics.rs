@@ -32,12 +32,18 @@ fn command(args: &[&str]) -> Result<Command, anyhow::Error> {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command(command(args).expect("failed to parse command"))
-        .expect("command failed")
+    onedis_server::command_dispatch::handle_command(
+        db,
+        command(args).expect("failed to parse command"),
+    )
+    .expect("command failed")
 }
 
 fn apply_err(db: &Db, args: &[&str]) -> anyhow::Error {
-    match db.handle_command(command(args).expect("failed to parse command")) {
+    match onedis_server::command_dispatch::handle_command(
+        db,
+        command(args).expect("failed to parse command"),
+    ) {
         Ok(_) => panic!("command should fail"),
         Err(err) => err,
     }

@@ -1,4 +1,6 @@
-fn structure_type_tag(s: &Structure) -> u8 {
+use super::*;
+
+pub(in crate::store::db) fn structure_type_tag(s: &Structure) -> u8 {
     match s {
         Structure::String(_) => TYPE_STRING,
         Structure::Hash(_) => TYPE_HASH,
@@ -11,7 +13,11 @@ fn structure_type_tag(s: &Structure) -> u8 {
     }
 }
 
-fn encode_entry(structure: &Structure, expire_ms: u64, version: u64) -> Vec<u8> {
+pub(in crate::store::db) fn encode_entry(
+    structure: &Structure,
+    expire_ms: u64,
+    version: u64,
+) -> Vec<u8> {
     if let Structure::String(value) = structure {
         return encode_raw_string(value.as_bytes(), expire_ms);
     }
@@ -26,7 +32,7 @@ fn encode_entry(structure: &Structure, expire_ms: u64, version: u64) -> Vec<u8> 
     buf
 }
 
-fn encode_raw_string(value: &[u8], expire_ms: u64) -> Vec<u8> {
+pub(in crate::store::db) fn encode_raw_string(value: &[u8], expire_ms: u64) -> Vec<u8> {
     let mut buf = Vec::with_capacity(17 + value.len());
     buf.extend_from_slice(&expire_ms.to_be_bytes());
     buf.extend_from_slice(&0u64.to_be_bytes());
@@ -35,7 +41,7 @@ fn encode_raw_string(value: &[u8], expire_ms: u64) -> Vec<u8> {
     buf
 }
 
-fn decode_entry(raw: &[u8]) -> Option<(u64, u64, Structure)> {
+pub(in crate::store::db) fn decode_entry(raw: &[u8]) -> Option<(u64, u64, Structure)> {
     if decode_list_meta(raw).is_some() {
         return None;
     }
@@ -56,7 +62,7 @@ fn decode_entry(raw: &[u8]) -> Option<(u64, u64, Structure)> {
     Some((expire_ms, version, structure))
 }
 
-fn decode_string_bytes(raw: &[u8]) -> Option<Vec<u8>> {
+pub(in crate::store::db) fn decode_string_bytes(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() >= 17 && raw[16] == TYPE_STRING {
         Some(raw[17..].to_vec())
     } else {
@@ -73,7 +79,7 @@ pub fn decode_string_bytes_slice(raw: &[u8]) -> Option<&[u8]> {
 }
 
 /// 只解码 expire_ms，不解码 Structure（用于快速检查过期）
-fn decode_expire_ms(raw: &[u8]) -> u64 {
+pub(in crate::store::db) fn decode_expire_ms(raw: &[u8]) -> u64 {
     if let Some(meta) = decode_list_meta(raw) {
         return meta.expire_ms;
     }

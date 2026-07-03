@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn set_members_raw(&self, key: &str, version: u64) -> Vec<Vec<u8>> {
+    pub(in crate::store::db) fn set_members_raw(&self, key: &str, version: u64) -> Vec<Vec<u8>> {
         let prefix = set_member_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw(&prefix)
@@ -12,7 +14,11 @@ impl Db {
             .collect()
     }
 
-    async fn set_members_raw_async(&self, key: &str, version: u64) -> Vec<Vec<u8>> {
+    pub(in crate::store::db) async fn set_members_raw_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<Vec<u8>> {
         let prefix = set_member_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw_async(&prefix)

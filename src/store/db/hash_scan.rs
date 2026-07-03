@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn hash_scan(
         &self,
@@ -54,5 +56,4 @@ impl Db {
 
         Ok((next_cursor, items))
     }
-
 }

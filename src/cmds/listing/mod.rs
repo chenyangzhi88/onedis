@@ -65,14 +65,17 @@ mod tests {
     }
 
     fn apply(db: &Db, args: &[&str]) -> Frame {
-        db.handle_command(Command::parse_from_frame(frame(args)).unwrap())
+        crate::command_dispatch::handle_command(db, Command::parse_from_frame(frame(args)).unwrap())
             .unwrap()
     }
 
     async fn apply_async(db: &Db, args: &[&str]) -> Frame {
-        db.handle_command_async(Command::parse_from_frame(frame(args)).unwrap())
-            .await
-            .unwrap()
+        crate::command_dispatch::handle_command_async(
+            db,
+            Command::parse_from_frame(frame(args)).unwrap(),
+        )
+        .await
+        .unwrap()
     }
 
     fn parse_err(args: &[&str]) -> String {

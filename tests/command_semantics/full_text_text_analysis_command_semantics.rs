@@ -36,7 +36,7 @@ fn command(args: &[&str]) -> Command {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command(command(args)).expect("command failed")
+    onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
 
 fn apply_err(db: &Db, args: &[&str]) -> Frame {
@@ -45,7 +45,9 @@ fn apply_err(db: &Db, args: &[&str]) -> Frame {
             .map(|arg| Frame::bulk_string((*arg).to_string()))
             .collect(),
     )) {
-        Ok(command) => db.handle_command(command).expect("command failed"),
+        Ok(command) => {
+            onedis_server::command_dispatch::handle_command(db, command).expect("command failed")
+        }
         Err(error) => Frame::Error(error.to_string()),
     }
 }

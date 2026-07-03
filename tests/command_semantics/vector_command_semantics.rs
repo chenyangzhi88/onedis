@@ -65,16 +65,16 @@ fn command(args: &[&str]) -> Command {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command(command(args)).expect("command failed")
+    onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
 
 fn apply_autocommit(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command_autocommit(command(args))
+    onedis_server::command_dispatch::handle_command_autocommit(db, command(args))
         .expect("command failed")
 }
 
 fn try_apply(db: &Db, args: &[&str]) -> anyhow::Result<Frame> {
-    db.handle_command(command(args))
+    onedis_server::command_dispatch::handle_command(db, command(args))
 }
 
 fn command_frame(frame: Frame) -> Command {
@@ -82,7 +82,7 @@ fn command_frame(frame: Frame) -> Command {
 }
 
 async fn apply_async(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command_async(command(args))
+    onedis_server::command_dispatch::handle_command_async(db, command(args))
         .await
         .expect("command failed")
 }
@@ -500,7 +500,9 @@ async fn redis_vector_set_concurrent_adds_do_not_lose_meta_updates() {
                 "0",
                 id.as_str(),
             ];
-            db.handle_command_async(command(&args)).await.unwrap()
+            onedis_server::command_dispatch::handle_command_async(&db, command(&args))
+                .await
+                .unwrap()
         }));
     }
     for task in tasks {
@@ -656,7 +658,7 @@ fn redis_vector_set_advanced_options_cover_reduce_fp32_epsilon_and_attr_clear() 
         Frame::bulk_string(r#"{"group":"drop"}"#),
     ]);
     assert!(matches!(
-        db.handle_command(command_frame(fp32)).unwrap(),
+        onedis_server::command_dispatch::handle_command(&db, command_frame(fp32)).unwrap(),
         Frame::Integer(1)
     ));
 

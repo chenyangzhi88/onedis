@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn set_intersection_card(&self, keys: &[String], limit: usize) -> Result<usize, Error> {
         let count = self.set_intersection(keys)?.len();

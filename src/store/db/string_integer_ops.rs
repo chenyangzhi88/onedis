@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn update_integer_string<F>(&self, key: &str, update: F) -> Result<i64, Error>
     where
@@ -34,7 +36,11 @@ impl Db {
         Ok(next)
     }
 
-    fn update_integer_string_read_modify_write<F>(&self, key: &str, update: F) -> Result<i64, Error>
+    pub(in crate::store::db) fn update_integer_string_read_modify_write<F>(
+        &self,
+        key: &str,
+        update: F,
+    ) -> Result<i64, Error>
     where
         F: FnOnce(i64) -> Option<i64>,
     {
@@ -216,7 +222,10 @@ impl Db {
         Ok(next)
     }
 
-    fn read_integer_string_for_update(&self, key_bytes: &[u8]) -> Result<(u64, i64), Error> {
+    pub(in crate::store::db) fn read_integer_string_for_update(
+        &self,
+        key_bytes: &[u8],
+    ) -> Result<(u64, i64), Error> {
         let Some(raw) = self.store.get_raw(key_bytes) else {
             return Ok((0, 0));
         };

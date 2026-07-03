@@ -35,12 +35,15 @@ fn command(args: &[&str]) -> Result<Command, anyhow::Error> {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command(command(args).expect("failed to parse command"))
-        .expect("command failed")
+    onedis_server::command_dispatch::handle_command(
+        db,
+        command(args).expect("failed to parse command"),
+    )
+    .expect("command failed")
 }
 
 fn apply_result(db: &Db, args: &[&str]) -> Result<Frame, anyhow::Error> {
-    db.handle_command(command(args)?)
+    onedis_server::command_dispatch::handle_command(db, command(args)?)
 }
 
 fn total(frame: &Frame) -> Option<i64> {

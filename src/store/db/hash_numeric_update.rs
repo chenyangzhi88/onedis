@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn hash_set_nx(&self, key: &str, field: &str, value: &str) -> Result<bool, Error> {
         if self.hash_exists(key, field)? {

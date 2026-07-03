@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn load_live_raw_for_db_with_backend(
+    pub(in crate::store::db) fn load_live_raw_for_db_with_backend(
         store: &KvStore,
         db_index: u16,
         key: &str,

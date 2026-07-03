@@ -32,7 +32,7 @@ impl Handler {
                 ));
             }
 
-            let frame = match txn_db.handle_command(command) {
+            let frame = match crate::command_dispatch::handle_command(txn_db, command) {
                 Ok(frame) => frame,
                 Err(error) => {
                     return Ok(Frame::Error(format!(
@@ -91,7 +91,7 @@ impl Handler {
                 ));
             }
 
-            let frame = match txn_db.handle_command_async(command).await {
+            let frame = match crate::command_dispatch::handle_command_async(txn_db, command).await {
                 Ok(frame) => frame,
                 Err(error) => {
                     return Ok(Frame::Error(format!(

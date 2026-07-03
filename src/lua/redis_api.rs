@@ -100,7 +100,7 @@ fn redis_call(
             .note_write()
             .map_err(|err| mlua::Error::runtime(err.to_string()))?;
     }
-    match db.handle_command(command) {
+    match crate::command_dispatch::handle_command(&db, command) {
         Ok(Frame::Error(err)) if protected => error_table(lua, &err).map(Value::Table),
         Ok(Frame::Error(err)) => Err(mlua::Error::runtime(err)),
         Ok(frame) => frame_to_lua_value(lua, frame),

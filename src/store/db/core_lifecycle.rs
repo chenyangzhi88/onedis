@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /**
      * 创建数据库
@@ -44,6 +46,10 @@ impl Db {
         }
     }
 
+    pub(crate) fn db_index(&self) -> u16 {
+        self.db_index
+    }
+
     pub fn transactional_view(&self) -> Result<Self, Error> {
         Ok(Db {
             db_index: self.db_index,
@@ -63,15 +69,15 @@ impl Db {
         })
     }
 
-    fn set_write_lock(&self, key: &str) -> &tokio::sync::Mutex<()> {
+    pub(in crate::store::db) fn set_write_lock(&self, key: &str) -> &tokio::sync::Mutex<()> {
         &self.set_write_locks[set_write_lock_shard(self.db_index, key)]
     }
 
-    fn next_persisted_version(&self) -> u64 {
+    pub(in crate::store::db) fn next_persisted_version(&self) -> u64 {
         Self::next_persisted_version_for_store(&self.store, &self.version_counter)
     }
 
-    async fn next_persisted_version_async(&self) -> u64 {
+    pub(in crate::store::db) async fn next_persisted_version_async(&self) -> u64 {
         Self::next_persisted_version_for_store_async(&self.store, &self.version_counter).await
     }
 
@@ -87,7 +93,10 @@ impl Db {
         }
     }
 
-    fn next_persisted_version_for_store(store: &KvStore, version_counter: &VersionCounter) -> u64 {
+    pub(in crate::store::db) fn next_persisted_version_for_store(
+        store: &KvStore,
+        version_counter: &VersionCounter,
+    ) -> u64 {
         version_counter.next_reserved(|high_water| {
             let mut batch = WriteBatch::new();
             reserve_version_high_water_to_batch(&mut batch, high_water);
@@ -95,7 +104,7 @@ impl Db {
         })
     }
 
-    async fn next_persisted_version_for_store_async(
+    pub(in crate::store::db) async fn next_persisted_version_for_store_async(
         store: &KvStore,
         version_counter: &VersionCounter,
     ) -> u64 {
@@ -138,7 +147,7 @@ impl Db {
         Ok(())
     }
 
-    fn non_transactional_view(&self) -> Self {
+    pub(in crate::store::db) fn non_transactional_view(&self) -> Self {
         Db {
             db_index: self.db_index,
             store: self.store.non_transactional_view(),

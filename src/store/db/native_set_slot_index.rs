@@ -1,5 +1,12 @@
+use super::*;
+
 impl Db {
-    fn set_slot_index_is_present(&self, key: &str, version: u64, len: usize) -> bool {
+    pub(in crate::store::db) fn set_slot_index_is_present(
+        &self,
+        key: &str,
+        version: u64,
+        len: usize,
+    ) -> bool {
         if len == 0 {
             return true;
         }
@@ -10,7 +17,12 @@ impl Db {
                 .contains_key(&set_slot_key(self.db_index, key, version, (len - 1) as u64))
     }
 
-    async fn set_slot_index_is_present_async(&self, key: &str, version: u64, len: usize) -> bool {
+    pub(in crate::store::db) async fn set_slot_index_is_present_async(
+        &self,
+        key: &str,
+        version: u64,
+        len: usize,
+    ) -> bool {
         if len == 0 {
             return true;
         }
@@ -23,7 +35,7 @@ impl Db {
                 .await
     }
 
-    fn rebuild_set_slot_index_to_batch(
+    pub(in crate::store::db) fn rebuild_set_slot_index_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -54,7 +66,7 @@ impl Db {
         members.len()
     }
 
-    async fn rebuild_set_slot_index_to_batch_async(
+    pub(in crate::store::db) async fn rebuild_set_slot_index_to_batch_async(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -85,7 +97,7 @@ impl Db {
         members.len()
     }
 
-    fn ensure_set_slot_index(&self, key: &str, meta: SetMeta) -> SetMeta {
+    pub(in crate::store::db) fn ensure_set_slot_index(&self, key: &str, meta: SetMeta) -> SetMeta {
         if self.set_slot_index_is_present(key, meta.version, meta.len) {
             return meta;
         }
@@ -106,7 +118,7 @@ impl Db {
         }
     }
 
-    fn rebuild_set_slot_index(&self, key: &str, meta: SetMeta) -> SetMeta {
+    pub(in crate::store::db) fn rebuild_set_slot_index(&self, key: &str, meta: SetMeta) -> SetMeta {
         let mut batch = WriteBatch::new();
         let rebuilt_len = self.rebuild_set_slot_index_to_batch(&mut batch, key, meta.version);
         batch.put(
@@ -122,7 +134,11 @@ impl Db {
         }
     }
 
-    async fn ensure_set_slot_index_async(&self, key: &str, meta: SetMeta) -> SetMeta {
+    pub(in crate::store::db) async fn ensure_set_slot_index_async(
+        &self,
+        key: &str,
+        meta: SetMeta,
+    ) -> SetMeta {
         if self
             .set_slot_index_is_present_async(key, meta.version, meta.len)
             .await
@@ -148,7 +164,11 @@ impl Db {
         }
     }
 
-    async fn rebuild_set_slot_index_async(&self, key: &str, meta: SetMeta) -> SetMeta {
+    pub(in crate::store::db) async fn rebuild_set_slot_index_async(
+        &self,
+        key: &str,
+        meta: SetMeta,
+    ) -> SetMeta {
         let mut batch = WriteBatch::new();
         let rebuilt_len = self
             .rebuild_set_slot_index_to_batch_async(&mut batch, key, meta.version)

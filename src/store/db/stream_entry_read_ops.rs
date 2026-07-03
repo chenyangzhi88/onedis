@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_len(&self, key: &str) -> Result<usize, Error> {
         Ok(self

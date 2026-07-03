@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn hash_multi_set(&self, key: &str, fields: &HashMap<String, String>) -> Result<(), Error> {
         let meta = self.hash_expire_ms(key)?;

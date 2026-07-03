@@ -36,7 +36,7 @@ fn db_command_errors_are_returned_to_caller() {
     let db = Db::new(0, store, vc, ttl);
     let command = make_command(&["RENAME", "missing-key", "new-key"]);
 
-    let result = db.handle_command(command);
+    let result = onedis_server::command_dispatch::handle_command(&db, command);
     match result {
         Err(e) => assert_eq!(e.to_string(), "ERR no such key"),
         Ok(Frame::Error(message)) => assert_eq!(message, "ERR no such key"),

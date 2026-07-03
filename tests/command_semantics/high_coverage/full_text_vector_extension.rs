@@ -245,12 +245,16 @@ async fn async_full_text_vector_and_extension_dispatch_paths_are_covered_inner()
         if let Some(Frame::Integer(cursor_id)) = items.get(1) {
             if *cursor_id > 0 {
                 let id = cursor_id.to_string();
-                let _ = db
-                    .handle_command_async(parse(&["FT.CURSOR", "READ", "idx", &id, "COUNT", "1"]))
-                    .await;
-                let _ = db
-                    .handle_command_async(parse(&["FT.CURSOR", "DEL", "idx", &id]))
-                    .await;
+                let _ = onedis_server::command_dispatch::handle_command_async(
+                    &db,
+                    parse(&["FT.CURSOR", "READ", "idx", &id, "COUNT", "1"]),
+                )
+                .await;
+                let _ = onedis_server::command_dispatch::handle_command_async(
+                    &db,
+                    parse(&["FT.CURSOR", "DEL", "idx", &id]),
+                )
+                .await;
             }
         }
     }
@@ -311,5 +315,4 @@ async fn async_full_text_vector_and_extension_dispatch_paths_are_covered_inner()
         Frame::Ok
     ));
 }
-
 

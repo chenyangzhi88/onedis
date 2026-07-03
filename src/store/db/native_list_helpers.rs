@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn list_meta(&self, key: &str) -> Result<Option<ListMeta>, Error> {
+    pub(in crate::store::db) fn list_meta(&self, key: &str) -> Result<Option<ListMeta>, Error> {
         let key_bytes = self.mk(key);
         if !self.store.is_transactional() {
             if let Some(meta) = self.list_meta_cache.get(&key_bytes).map(|entry| *entry) {
@@ -68,7 +70,10 @@ impl Db {
         }
     }
 
-    async fn list_meta_async(&self, key: &str) -> Result<Option<ListMeta>, Error> {
+    pub(in crate::store::db) async fn list_meta_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<ListMeta>, Error> {
         let key_bytes = self.mk(key);
         if !self.store.is_transactional() {
             if let Some(meta) = self.list_meta_cache.get(&key_bytes).map(|entry| *entry) {
@@ -137,7 +142,11 @@ impl Db {
         }
     }
 
-    fn resolve_list_index(&self, meta: ListMeta, index: i64) -> Option<i64> {
+    pub(in crate::store::db) fn resolve_list_index(
+        &self,
+        meta: ListMeta,
+        index: i64,
+    ) -> Option<i64> {
         let len = meta.tail - meta.head;
         if len <= 0 {
             return None;
@@ -151,7 +160,12 @@ impl Db {
         Some(meta.head + normalized)
     }
 
-    fn resolve_list_range(&self, meta: ListMeta, start: i64, stop: i64) -> Option<(i64, i64)> {
+    pub(in crate::store::db) fn resolve_list_range(
+        &self,
+        meta: ListMeta,
+        start: i64,
+        stop: i64,
+    ) -> Option<(i64, i64)> {
         let len = meta.tail - meta.head;
         if len <= 0 {
             return None;
@@ -170,7 +184,7 @@ impl Db {
         Some((meta.head + normalized_start, meta.head + normalized_stop))
     }
 
-    fn list_range_raw_values(
+    pub(in crate::store::db) fn list_range_raw_values(
         &self,
         key: &str,
         version: u64,
@@ -204,7 +218,7 @@ impl Db {
         values
     }
 
-    async fn list_range_raw_values_async(
+    pub(in crate::store::db) async fn list_range_raw_values_async(
         &self,
         key: &str,
         version: u64,
@@ -240,7 +254,7 @@ impl Db {
         values
     }
 
-    async fn list_range_raw_values_visit_async<F>(
+    pub(in crate::store::db) async fn list_range_raw_values_visit_async<F>(
         &self,
         key: &str,
         version: u64,
@@ -283,7 +297,7 @@ impl Db {
         seen
     }
 
-    fn append_list_range_raw_values(
+    pub(in crate::store::db) fn append_list_range_raw_values(
         &self,
         key: &str,
         version: u64,
@@ -315,7 +329,7 @@ impl Db {
         );
     }
 
-    async fn append_list_range_raw_values_async(
+    pub(in crate::store::db) async fn append_list_range_raw_values_async(
         &self,
         key: &str,
         version: u64,
@@ -348,7 +362,7 @@ impl Db {
         );
     }
 
-    async fn append_list_range_raw_values_visit_async(
+    pub(in crate::store::db) async fn append_list_range_raw_values_visit_async(
         &self,
         key: &str,
         version: u64,
@@ -376,5 +390,4 @@ impl Db {
             .scan_range_raw_visit_async(&lower_bound, upper_bound, limit, |_, value| visitor(value))
             .await
     }
-
 }

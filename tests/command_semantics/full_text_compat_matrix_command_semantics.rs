@@ -75,7 +75,7 @@ fn command(args: &[&str]) -> Command {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command(command(args)).expect("command failed")
+    onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
 
 fn wait_for_search_bytes(db: &Db, args: &[&str], expected_prefix: &[u8]) -> Vec<u8> {

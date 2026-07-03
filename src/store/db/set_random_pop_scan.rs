@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn set_random_members(
         &self,

@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn json_set(
         &self,
@@ -56,7 +58,7 @@ impl Db {
         self.json_set_indexed(key, expire_ms, version, &tokens, new_value, condition)
     }
 
-    fn json_set_indexed(
+    pub(in crate::store::db) fn json_set_indexed(
         &self,
         key: &str,
         expire_ms: u64,
@@ -144,7 +146,7 @@ impl Db {
         Ok(true)
     }
 
-    async fn json_set_indexed_async(
+    pub(in crate::store::db) async fn json_set_indexed_async(
         &self,
         key: &str,
         expire_ms: u64,

@@ -1,5 +1,10 @@
+use super::*;
+
 impl Db {
-    fn hash_expire_ms(&self, key: &str) -> Result<Option<(u64, u64)>, Error> {
+    pub(in crate::store::db) fn hash_expire_ms(
+        &self,
+        key: &str,
+    ) -> Result<Option<(u64, u64)>, Error> {
         let key_bytes = self.mk(key);
 
         self.expire_if_needed(key);
@@ -12,7 +17,10 @@ impl Db {
         Ok(Some((header.expire_ms, header.version)))
     }
 
-    async fn hash_expire_ms_async(&self, key: &str) -> Result<Option<(u64, u64)>, Error> {
+    pub(in crate::store::db) async fn hash_expire_ms_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<(u64, u64)>, Error> {
         let key_bytes = self.mk(key);
 
         self.expire_if_needed_async(key).await;
@@ -24,7 +32,11 @@ impl Db {
         Ok(Some((header.expire_ms, header.version)))
     }
 
-    fn hash_entries_raw(&self, key: &str, version: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(in crate::store::db) fn hash_entries_raw(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let prefix = hash_field_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw(&prefix)
@@ -37,7 +49,11 @@ impl Db {
             .collect()
     }
 
-    fn hash_live_entries_raw(&self, key: &str, version: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(in crate::store::db) fn hash_live_entries_raw(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.hash_entries_raw(key, version)
             .into_iter()
             .filter_map(|(field, value)| {
@@ -48,7 +64,7 @@ impl Db {
             .collect()
     }
 
-    async fn hash_live_entries_raw_async(
+    pub(in crate::store::db) async fn hash_live_entries_raw_async(
         &self,
         key: &str,
         version: u64,
@@ -66,7 +82,12 @@ impl Db {
         entries
     }
 
-    fn hash_field_is_live(&self, key: &str, version: u64, field: &str) -> bool {
+    pub(in crate::store::db) fn hash_field_is_live(
+        &self,
+        key: &str,
+        version: u64,
+        field: &str,
+    ) -> bool {
         let expire_key = hash_field_expire_key(self.db_index, key, version, field);
         let Some(raw) = self.store.get_raw(&expire_key) else {
             return true;
@@ -85,7 +106,12 @@ impl Db {
         false
     }
 
-    async fn hash_field_is_live_async(&self, key: &str, version: u64, field: &str) -> bool {
+    pub(in crate::store::db) async fn hash_field_is_live_async(
+        &self,
+        key: &str,
+        version: u64,
+        field: &str,
+    ) -> bool {
         let expire_key = hash_field_expire_key(self.db_index, key, version, field);
         let Some(raw) = self.store.get_raw_async(&expire_key).await else {
             return true;
@@ -104,7 +130,12 @@ impl Db {
         false
     }
 
-    fn hash_live_field_value(&self, key: &str, version: u64, field: &str) -> Option<Vec<u8>> {
+    pub(in crate::store::db) fn hash_live_field_value(
+        &self,
+        key: &str,
+        version: u64,
+        field: &str,
+    ) -> Option<Vec<u8>> {
         if !self.hash_field_is_live(key, version, field) {
             return None;
         }
@@ -112,7 +143,7 @@ impl Db {
             .get_raw(&hash_field_key(self.db_index, key, version, field))
     }
 
-    async fn hash_live_field_value_async(
+    pub(in crate::store::db) async fn hash_live_field_value_async(
         &self,
         key: &str,
         version: u64,
@@ -126,7 +157,7 @@ impl Db {
             .await
     }
 
-    async fn hash_live_field_observed_async(
+    pub(in crate::store::db) async fn hash_live_field_observed_async(
         &self,
         key: &str,
         version: u64,
@@ -138,7 +169,11 @@ impl Db {
             .await
     }
 
-    async fn hash_entries_raw_async(&self, key: &str, version: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(in crate::store::db) async fn hash_entries_raw_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let prefix = hash_field_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw_async(&prefix)

@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub async fn rename_key_async(
         &self,

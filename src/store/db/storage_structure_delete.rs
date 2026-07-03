@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn delete_structure_for_db_to_batch(
+    pub(in crate::store::db) fn delete_structure_for_db_to_batch(
         batch: &mut WriteBatch,
         db_index: u16,
         key: &str,

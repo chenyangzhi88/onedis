@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /**
      * 清理过期键

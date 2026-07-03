@@ -36,7 +36,10 @@ fn apply(db: &Db, args: &[&str]) -> Frame {
 }
 
 fn try_apply(db: &Db, args: &[&str]) -> Result<Frame, anyhow::Error> {
-    db.handle_command(command(args).expect("failed to parse command"))
+    onedis_server::command_dispatch::handle_command(
+        db,
+        command(args).expect("failed to parse command"),
+    )
 }
 
 fn bulk_text(frame: &Frame) -> String {

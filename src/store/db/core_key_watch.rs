@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn mk(&self, key: &str) -> Vec<u8> {
+    pub(in crate::store::db) fn mk(&self, key: &str) -> Vec<u8> {
         self.key_layout.main_key(self.db_index, key)
     }
 

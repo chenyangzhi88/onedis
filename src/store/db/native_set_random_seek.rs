@@ -1,5 +1,12 @@
+use super::*;
+
 impl Db {
-    fn set_random_seek_members(&self, key: &str, version: u64, count: usize) -> Vec<Vec<u8>> {
+    pub(in crate::store::db) fn set_random_seek_members(
+        &self,
+        key: &str,
+        version: u64,
+        count: usize,
+    ) -> Vec<Vec<u8>> {
         if count == 0 {
             return Vec::new();
         }
@@ -51,7 +58,7 @@ impl Db {
         members
     }
 
-    async fn set_random_seek_members_async(
+    pub(in crate::store::db) async fn set_random_seek_members_async(
         &self,
         key: &str,
         version: u64,

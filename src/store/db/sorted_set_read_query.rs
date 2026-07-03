@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn zset_score(&self, key: &str, member: &str) -> Result<Option<f64>, Error> {
         let meta = self.zset_expire_ms(key)?;
@@ -142,5 +144,4 @@ impl Db {
             .filter(|score| *score >= min && *score <= max)
             .count())
     }
-
 }

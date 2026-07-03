@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn write_batch_if_not_empty(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) fn write_batch_if_not_empty(&self, batch: &WriteBatch) {
         if batch.count() == 0 {
             return;
         }
@@ -9,7 +11,7 @@ impl Db {
         self.record_or_publish_mutations(batch);
     }
 
-    async fn write_batch_if_not_empty_async(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) async fn write_batch_if_not_empty_async(&self, batch: &WriteBatch) {
         if batch.count() == 0 {
             return;
         }
@@ -19,7 +21,10 @@ impl Db {
         self.record_or_publish_mutations(batch);
     }
 
-    async fn write_batch_if_not_empty_without_watch_publish_async(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) async fn write_batch_if_not_empty_without_watch_publish_async(
+        &self,
+        batch: &WriteBatch,
+    ) {
         if batch.count() == 0 {
             return;
         }
@@ -28,7 +33,7 @@ impl Db {
         self.store.write_batch_async(batch).await;
     }
 
-    async fn compare_and_write_batch_if_not_empty_async(
+    pub(in crate::store::db) async fn compare_and_write_batch_if_not_empty_async(
         &self,
         conditions: &[CompareCondition],
         batch: &WriteBatch,
@@ -52,7 +57,7 @@ impl Db {
         }
     }
 
-    fn record_or_publish_mutations(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) fn record_or_publish_mutations(&self, batch: &WriteBatch) {
         let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, batch);
         if keys.is_empty() && dbs.is_empty() {
             return;
@@ -71,7 +76,7 @@ impl Db {
         self.publish_mutations(keys, dbs);
     }
 
-    fn take_pending_mutations(&self) -> (Vec<Vec<u8>>, Vec<u16>) {
+    pub(in crate::store::db) fn take_pending_mutations(&self) -> (Vec<Vec<u8>>, Vec<u16>) {
         let mut pending = self
             .pending_mutations
             .lock()
@@ -81,7 +86,7 @@ impl Db {
         (keys, dbs)
     }
 
-    fn publish_mutations(&self, keys: Vec<Vec<u8>>, dbs: Vec<u16>) {
+    pub(in crate::store::db) fn publish_mutations(&self, keys: Vec<Vec<u8>>, dbs: Vec<u16>) {
         let mut seen_keys = HashSet::new();
         for key in keys {
             if seen_keys.insert(key.clone()) {
@@ -97,7 +102,7 @@ impl Db {
         }
     }
 
-    fn invalidate_counter_cache_for_batch(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) fn invalidate_counter_cache_for_batch(&self, batch: &WriteBatch) {
         let mut clear_all = false;
         let mut keys = Vec::new();
         for (write_type, key, _) in batch.iter() {
@@ -107,7 +112,9 @@ impl Db {
                 | common::types::write_batch::WriteType::PutBlobExternal
                 | common::types::write_batch::WriteType::Delete
                 | common::types::write_batch::WriteType::Merge => {
-                    if let Some(key) = logical_main_key_from_raw_key(self.key_layout, self.db_index, key) {
+                    if let Some(key) =
+                        logical_main_key_from_raw_key(self.key_layout, self.db_index, key)
+                    {
                         keys.push(key);
                     }
                 }
@@ -131,7 +138,7 @@ impl Db {
         }
     }
 
-    fn invalidate_list_meta_cache_for_batch(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) fn invalidate_list_meta_cache_for_batch(&self, batch: &WriteBatch) {
         if self.store.is_transactional() {
             return;
         }
@@ -144,7 +151,9 @@ impl Db {
                 | WriteType::PutBlobExternal
                 | WriteType::Delete
                 | WriteType::Merge => {
-                    if let Some(key) = logical_main_key_from_raw_key(self.key_layout, self.db_index, key) {
+                    if let Some(key) =
+                        logical_main_key_from_raw_key(self.key_layout, self.db_index, key)
+                    {
                         keys.push(key);
                     }
                 }
@@ -163,13 +172,17 @@ impl Db {
         }
     }
 
-    fn cache_list_meta_if_non_transactional(&self, key: &str, meta: ListMeta) {
+    pub(in crate::store::db) fn cache_list_meta_if_non_transactional(
+        &self,
+        key: &str,
+        meta: ListMeta,
+    ) {
         if !self.store.is_transactional() {
             self.list_meta_cache.insert(self.mk(key), meta);
         }
     }
 
-    fn remove_list_meta_cache_if_non_transactional(&self, key: &str) {
+    pub(in crate::store::db) fn remove_list_meta_cache_if_non_transactional(&self, key: &str) {
         if !self.store.is_transactional() {
             self.list_meta_cache.remove(&self.mk(key));
         }

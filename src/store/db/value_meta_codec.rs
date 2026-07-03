@@ -1,8 +1,10 @@
-fn encode_hash_meta(expire_ms: u64, version: u64) -> Vec<u8> {
+use super::*;
+
+pub(in crate::store::db) fn encode_hash_meta(expire_ms: u64, version: u64) -> Vec<u8> {
     encode_hash_meta_with_field_ttl_flag(expire_ms, version, false)
 }
 
-fn encode_hash_meta_with_field_ttl_flag(
+pub(in crate::store::db) fn encode_hash_meta_with_field_ttl_flag(
     expire_ms: u64,
     version: u64,
     may_have_field_ttl: bool,
@@ -19,7 +21,7 @@ fn encode_hash_meta_with_field_ttl_flag(
     buf
 }
 
-fn encode_set_meta(expire_ms: u64, version: u64, len: usize) -> Vec<u8> {
+pub(in crate::store::db) fn encode_set_meta(expire_ms: u64, version: u64, len: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(25);
     buf.extend_from_slice(&expire_ms.to_be_bytes());
     buf.extend_from_slice(&version.to_be_bytes());
@@ -28,7 +30,12 @@ fn encode_set_meta(expire_ms: u64, version: u64, len: usize) -> Vec<u8> {
     buf
 }
 
-fn encode_list_meta(expire_ms: u64, version: u64, head: i64, tail: i64) -> Vec<u8> {
+pub(in crate::store::db) fn encode_list_meta(
+    expire_ms: u64,
+    version: u64,
+    head: i64,
+    tail: i64,
+) -> Vec<u8> {
     let mut buf = Vec::with_capacity(36);
     buf.extend_from_slice(&LIST_META_MAGIC);
     buf.extend_from_slice(&expire_ms.to_be_bytes());
@@ -38,7 +45,7 @@ fn encode_list_meta(expire_ms: u64, version: u64, head: i64, tail: i64) -> Vec<u
     buf
 }
 
-fn encode_stream_meta(meta: StreamMeta) -> Vec<u8> {
+pub(in crate::store::db) fn encode_stream_meta(meta: StreamMeta) -> Vec<u8> {
     let mut buf = Vec::with_capacity(52);
     buf.extend_from_slice(&STREAM_META_MAGIC);
     buf.extend_from_slice(&meta.expire_ms.to_be_bytes());
@@ -50,11 +57,11 @@ fn encode_stream_meta(meta: StreamMeta) -> Vec<u8> {
     buf
 }
 
-fn encode_zset_meta(expire_ms: u64, version: u64) -> Vec<u8> {
+pub(in crate::store::db) fn encode_zset_meta(expire_ms: u64, version: u64) -> Vec<u8> {
     encode_entry(&Structure::SortedSet(BTreeMap::new()), expire_ms, version)
 }
 
-fn decode_list_meta(raw: &[u8]) -> Option<ListMeta> {
+pub(in crate::store::db) fn decode_list_meta(raw: &[u8]) -> Option<ListMeta> {
     if raw.len() != 36 || raw[..4] != LIST_META_MAGIC {
         return None;
     }
@@ -66,7 +73,7 @@ fn decode_list_meta(raw: &[u8]) -> Option<ListMeta> {
     })
 }
 
-fn decode_stream_meta(raw: &[u8]) -> Option<StreamMeta> {
+pub(in crate::store::db) fn decode_stream_meta(raw: &[u8]) -> Option<StreamMeta> {
     if raw.len() != 52 || raw[..4] != STREAM_META_MAGIC {
         return None;
     }
@@ -82,7 +89,7 @@ fn decode_stream_meta(raw: &[u8]) -> Option<StreamMeta> {
     })
 }
 
-fn decode_set_meta(raw: &[u8]) -> Option<SetMeta> {
+pub(in crate::store::db) fn decode_set_meta(raw: &[u8]) -> Option<SetMeta> {
     let header = decode_meta_header(raw)?;
     if header.type_tag != TYPE_SET || raw.len() < 25 {
         return None;
@@ -95,16 +102,16 @@ fn decode_set_meta(raw: &[u8]) -> Option<SetMeta> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct HashMeta {
-    expire_ms: u64,
-    version: u64,
-    may_have_field_ttl: bool,
+pub(in crate::store::db) struct HashMeta {
+    pub(in crate::store::db) expire_ms: u64,
+    pub(in crate::store::db) version: u64,
+    pub(in crate::store::db) may_have_field_ttl: bool,
 }
 
-const HASH_META_COMPACT_LEN: usize = 18;
-const HASH_META_FLAG_MAY_HAVE_FIELD_TTL: u8 = 0x01;
+pub(in crate::store::db) const HASH_META_COMPACT_LEN: usize = 18;
+pub(in crate::store::db) const HASH_META_FLAG_MAY_HAVE_FIELD_TTL: u8 = 0x01;
 
-fn decode_hash_meta(raw: &[u8]) -> Option<HashMeta> {
+pub(in crate::store::db) fn decode_hash_meta(raw: &[u8]) -> Option<HashMeta> {
     let header = decode_meta_header(raw)?;
     if header.type_tag != TYPE_HASH {
         return None;
@@ -120,7 +127,7 @@ fn decode_hash_meta(raw: &[u8]) -> Option<HashMeta> {
     })
 }
 
-fn decode_hash_meta_checked(raw: &[u8]) -> Result<HashMeta, Error> {
+pub(in crate::store::db) fn decode_hash_meta_checked(raw: &[u8]) -> Result<HashMeta, Error> {
     let Some(header) = decode_meta_header(raw) else {
         return Err(Error::msg("Failed to decode hash metadata"));
     };
@@ -130,7 +137,7 @@ fn decode_hash_meta_checked(raw: &[u8]) -> Result<HashMeta, Error> {
     decode_hash_meta(raw).ok_or_else(|| Error::msg("Failed to decode hash metadata"))
 }
 
-fn re_encode_meta_with_version(raw: &[u8], new_version: u64) -> Vec<u8> {
+pub(in crate::store::db) fn re_encode_meta_with_version(raw: &[u8], new_version: u64) -> Vec<u8> {
     let mut new_raw = raw.to_vec();
     if new_raw.len() >= 16 {
         new_raw[8..16].copy_from_slice(&new_version.to_be_bytes());

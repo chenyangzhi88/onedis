@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_group_create(
         &self,
@@ -280,5 +282,4 @@ impl Db {
         }
         Ok(removed)
     }
-
 }

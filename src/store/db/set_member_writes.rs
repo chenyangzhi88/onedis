@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn set_add(&self, key: &str, members: &[String]) -> Result<usize, Error> {
         let meta = self.set_meta(key)?;

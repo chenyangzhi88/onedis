@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn zset_add(&self, key: &str, members: &[(f64, String)]) -> Result<usize, Error> {
         let exists = self.zset_expire_ms(key)?;

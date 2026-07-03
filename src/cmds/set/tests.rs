@@ -37,12 +37,14 @@ fn frame(args: &[&str]) -> Frame {
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
     let command = Command::parse_from_frame(frame(args)).unwrap();
-    db.handle_command(command).unwrap()
+    crate::command_dispatch::handle_command(db, command).unwrap()
 }
 
 async fn apply_async(db: &Db, args: &[&str]) -> Frame {
     let command = Command::parse_from_frame(frame(args)).unwrap();
-    db.handle_command_async(command).await.unwrap()
+    crate::command_dispatch::handle_command_async(db, command)
+        .await
+        .unwrap()
 }
 
 fn parse_err(args: &[&str]) -> String {

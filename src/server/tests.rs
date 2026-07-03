@@ -631,10 +631,10 @@ maxclients = 0
         assert!(response_text.contains("ERR invalid UTF-8 hash value"));
 
         rt.block_on(
-            handler
-                .get_session()
-                .get_db()
-                .handle_command_async(command(&["set", "plain", "value"])),
+            crate::command_dispatch::handle_command_async(
+                handler.get_session().get_db().as_ref(),
+                command(&["set", "plain", "value"]),
+            ),
         )
         .unwrap();
         let response = rt
@@ -673,8 +673,11 @@ maxclients = 0
         let (handler, _) = rt.block_on(test_handler(1, None));
         let db = handler.get_session().get_db().clone();
 
-        rt.block_on(db.handle_command_async(command(&["rpush", "l", "a", "b"])))
-            .unwrap();
+        rt.block_on(crate::command_dispatch::handle_command_async(
+            &db,
+            command(&["rpush", "l", "a", "b"]),
+        ))
+        .unwrap();
         let bytes = rt
             .block_on(handler.apply_blocking_list_command(command(&["blpop", "l", "0.01"])))
             .unwrap();
@@ -695,8 +698,11 @@ maxclients = 0
             .unwrap();
         assert_eq!(bytes, Frame::Null.as_bytes());
 
-        rt.block_on(db.handle_command_async(command(&["zadd", "z", "1", "one", "2", "two"])))
-            .unwrap();
+        rt.block_on(crate::command_dispatch::handle_command_async(
+            &db,
+            command(&["zadd", "z", "1", "one", "2", "two"]),
+        ))
+        .unwrap();
         let bytes = rt
             .block_on(handler.apply_blocking_zset_command(command(&["bzpopmin", "z", "0.01"])))
             .unwrap();
@@ -714,8 +720,11 @@ maxclients = 0
             .unwrap();
         assert_eq!(bytes, Frame::Null.as_bytes());
 
-        rt.block_on(db.handle_command_async(command(&["xadd", "s", "1-0", "f", "v"])))
-            .unwrap();
+        rt.block_on(crate::command_dispatch::handle_command_async(
+            &db,
+            command(&["xadd", "s", "1-0", "f", "v"]),
+        ))
+        .unwrap();
         let bytes = rt
             .block_on(handler.apply_blocking_stream_command(command(&[
                 "xread", "block", "1", "streams", "s", "0-0",
@@ -736,8 +745,11 @@ maxclients = 0
         let (handler, _) = rt.block_on(test_handler(1, None));
         let db = handler.get_session().get_db().clone();
 
-        rt.block_on(db.handle_command_async(command(&["rpush", "list", "a", "b", "c", "d"])))
-            .unwrap();
+        rt.block_on(crate::command_dispatch::handle_command_async(
+            &db,
+            command(&["rpush", "list", "a", "b", "c", "d"]),
+        ))
+        .unwrap();
         let frame = rt
             .block_on(handler.try_blocking_list_command_once(&command(&["brpop", "list", "0.01"])))
             .unwrap()
@@ -774,9 +786,10 @@ maxclients = 0
             .is_none()
         );
 
-        rt.block_on(db.handle_command_async(command(&[
-            "zadd", "myzset", "1", "one", "2", "two", "3", "three",
-        ])))
+        rt.block_on(crate::command_dispatch::handle_command_async(
+            &db,
+            command(&["zadd", "myzset", "1", "one", "2", "two", "3", "three"]),
+        ))
         .unwrap();
         let frame = rt
             .block_on(
@@ -874,10 +887,10 @@ maxclients = 0
 
         handler.watch_keys(vec!["watched".to_string()]).unwrap();
         rt.block_on(
-            handler
-                .get_session()
-                .get_db()
-                .handle_command_async(command(&["set", "watched", "changed"])),
+            crate::command_dispatch::handle_command_async(
+                handler.get_session().get_db().as_ref(),
+                command(&["set", "watched", "changed"]),
+            ),
         )
         .unwrap();
         handler.start_transaction().unwrap();

@@ -53,11 +53,13 @@ fn parse(args: &[&str]) -> Command {
 
 #[track_caller]
 fn apply(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command(parse(args)).unwrap()
+    onedis_server::command_dispatch::handle_command(db, parse(args)).unwrap()
 }
 
 async fn apply_async(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command_async(parse(args)).await.unwrap()
+    onedis_server::command_dispatch::handle_command_async(db, parse(args))
+        .await
+        .unwrap()
 }
 
 #[track_caller]

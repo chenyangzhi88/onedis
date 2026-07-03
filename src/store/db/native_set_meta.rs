@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn set_meta(&self, key: &str) -> Result<Option<SetMeta>, Error> {
+    pub(in crate::store::db) fn set_meta(&self, key: &str) -> Result<Option<SetMeta>, Error> {
         self.expire_if_needed(key);
 
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
@@ -19,7 +21,10 @@ impl Db {
         Ok(Some(meta))
     }
 
-    async fn set_meta_async(&self, key: &str) -> Result<Option<SetMeta>, Error> {
+    pub(in crate::store::db) async fn set_meta_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<SetMeta>, Error> {
         self.expire_if_needed_async(key).await;
 
         let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {

@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_groups(&self, key: &str) -> Result<Vec<StreamGroupInfo>, Error> {
         let Some(meta) = self.stream_meta(key)? else {

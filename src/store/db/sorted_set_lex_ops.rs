@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub(crate) fn zset_range_by_lex(
         &self,

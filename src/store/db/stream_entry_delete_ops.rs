@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn stream_delete(&self, key: &str, ids: &[StreamId]) -> Result<usize, Error> {
         let Some(mut meta) = self.stream_meta(key)? else {

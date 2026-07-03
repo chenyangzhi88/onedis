@@ -39,7 +39,7 @@ fn command(args: &[&str]) -> Command {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
-    db.handle_command(command(args)).expect("command failed")
+    onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
 
 fn apply_owned(db: &Db, args: Vec<String>) -> Frame {
@@ -421,7 +421,10 @@ fn ft_search_after_flushdb_reports_missing_index() {
         ],
     );
     apply(&db, &["FLUSHDB"]);
-    let err = match db.handle_command(command(&["FT.SEARCH", "idx", "*"])) {
+    let err = match onedis_server::command_dispatch::handle_command(
+        &db,
+        command(&["FT.SEARCH", "idx", "*"]),
+    ) {
         Ok(_) => panic!("search should fail after flushdb removes index meta"),
         Err(err) => err,
     };

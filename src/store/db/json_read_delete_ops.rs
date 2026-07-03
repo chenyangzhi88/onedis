@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn json_get(&self, key: &str, path: &str) -> Result<Option<String>, Error> {
         let tokens = parse_json_path(path)?;
@@ -132,7 +134,7 @@ impl Db {
         Ok(json_get_path(&document, &tokens).map(json_type_name))
     }
 
-    fn json_del_indexed(
+    pub(in crate::store::db) fn json_del_indexed(
         &self,
         key: &str,
         expire_ms: u64,
@@ -208,7 +210,7 @@ impl Db {
         Ok(1)
     }
 
-    async fn json_del_indexed_async(
+    pub(in crate::store::db) async fn json_del_indexed_async(
         &self,
         key: &str,
         expire_ms: u64,
@@ -293,5 +295,4 @@ impl Db {
         }
         Ok(None)
     }
-
 }

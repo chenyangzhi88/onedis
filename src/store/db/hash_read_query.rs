@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn hash_exists(&self, key: &str, field: &str) -> Result<bool, Error> {
         let meta = self.hash_expire_ms(key)?;
@@ -227,5 +229,4 @@ impl Db {
                 .collect(),
         ))
     }
-
 }

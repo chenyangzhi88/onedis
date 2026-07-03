@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub async fn string_get_bit_async(&self, key: &str, offset: usize) -> Result<u8, Error> {
         let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();

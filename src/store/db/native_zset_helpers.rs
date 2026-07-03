@@ -1,5 +1,10 @@
+use super::*;
+
 impl Db {
-    fn zset_expire_ms(&self, key: &str) -> Result<Option<(u64, u64)>, Error> {
+    pub(in crate::store::db) fn zset_expire_ms(
+        &self,
+        key: &str,
+    ) -> Result<Option<(u64, u64)>, Error> {
         self.expire_if_needed(key);
 
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
@@ -16,7 +21,10 @@ impl Db {
         Ok(Some((header.expire_ms, header.version)))
     }
 
-    async fn zset_expire_ms_async(&self, key: &str) -> Result<Option<(u64, u64)>, Error> {
+    pub(in crate::store::db) async fn zset_expire_ms_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<(u64, u64)>, Error> {
         self.expire_if_needed_async(key).await;
 
         let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
@@ -33,7 +41,11 @@ impl Db {
         Ok(Some((header.expire_ms, header.version)))
     }
 
-    fn zset_members_raw(&self, key: &str, version: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(in crate::store::db) fn zset_members_raw(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let prefix = zset_member_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw(&prefix)
@@ -46,7 +58,11 @@ impl Db {
             .collect()
     }
 
-    async fn zset_members_raw_async(&self, key: &str, version: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(in crate::store::db) async fn zset_members_raw_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let prefix = zset_member_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw_async(&prefix)
@@ -60,12 +76,16 @@ impl Db {
             .collect()
     }
 
-    fn zset_rank_entries_raw(&self, key: &str, version: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(in crate::store::db) fn zset_rank_entries_raw(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.store
             .scan_prefix_raw(&zset_rank_prefix(self.db_index, key, version))
     }
 
-    async fn zset_rank_entries_raw_async(
+    pub(in crate::store::db) async fn zset_rank_entries_raw_async(
         &self,
         key: &str,
         version: u64,
@@ -75,7 +95,11 @@ impl Db {
             .await
     }
 
-    fn zset_ranked_members(&self, key: &str, version: u64) -> Vec<(String, f64)> {
+    pub(in crate::store::db) fn zset_ranked_members(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(String, f64)> {
         self.zset_rank_entries_raw(key, version)
             .into_iter()
             .filter_map(|(rank_key, _)| {
@@ -86,7 +110,11 @@ impl Db {
             .collect()
     }
 
-    async fn zset_ranked_members_async(&self, key: &str, version: u64) -> Vec<(String, f64)> {
+    pub(in crate::store::db) async fn zset_ranked_members_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<(String, f64)> {
         self.zset_rank_entries_raw_async(key, version)
             .await
             .into_iter()

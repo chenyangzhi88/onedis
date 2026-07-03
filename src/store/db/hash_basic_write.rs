@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn hash_get(&self, key: &str, field: &str) -> Result<Option<String>, Error> {
         let meta = self.hash_expire_ms(key)?;

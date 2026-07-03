@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     /// 分页扫描 zset members，返回下一个游标和成员/分数。
     pub fn zset_scan(

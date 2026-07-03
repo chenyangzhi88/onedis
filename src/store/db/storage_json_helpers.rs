@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn decode_json_meta(raw: &[u8]) -> Result<(u64, u64, bool), Error> {
+    pub(in crate::store::db) fn decode_json_meta(raw: &[u8]) -> Result<(u64, u64, bool), Error> {
         let Some(header) = decode_meta_header(raw) else {
             return Err(Error::msg("Type parsing error"));
         };
@@ -12,7 +14,9 @@ impl Db {
         Ok((expire_ms, version, json == JSON_INDEXED_MARKER))
     }
 
-    fn decode_legacy_json_document(raw: &[u8]) -> Result<JsonValue, Error> {
+    pub(in crate::store::db) fn decode_legacy_json_document(
+        raw: &[u8],
+    ) -> Result<JsonValue, Error> {
         let Some((_, _, Structure::Json(json))) = decode_entry(raw) else {
             return Err(Error::msg("Type parsing error"));
         };
@@ -22,7 +26,7 @@ impl Db {
         serde_json::from_str(&json).map_err(|_| Error::msg("Type parsing error"))
     }
 
-    fn read_json_node(
+    pub(in crate::store::db) fn read_json_node(
         &self,
         key: &str,
         version: u64,
@@ -39,7 +43,7 @@ impl Db {
             .ok_or_else(|| Error::msg("Type parsing error"))
     }
 
-    async fn read_json_node_async(
+    pub(in crate::store::db) async fn read_json_node_async(
         &self,
         key: &str,
         version: u64,
@@ -57,12 +61,17 @@ impl Db {
             .ok_or_else(|| Error::msg("Type parsing error"))
     }
 
-    fn json_node_exists(&self, key: &str, version: u64, tokens: &[JsonPathToken]) -> bool {
+    pub(in crate::store::db) fn json_node_exists(
+        &self,
+        key: &str,
+        version: u64,
+        tokens: &[JsonPathToken],
+    ) -> bool {
         self.store
             .contains_key(&json_node_key(self.db_index, key, version, tokens))
     }
 
-    async fn json_node_exists_async(
+    pub(in crate::store::db) async fn json_node_exists_async(
         &self,
         key: &str,
         version: u64,
@@ -74,7 +83,7 @@ impl Db {
             .is_some()
     }
 
-    fn read_json_value_at_path(
+    pub(in crate::store::db) fn read_json_value_at_path(
         &self,
         key: &str,
         version: u64,
@@ -114,7 +123,7 @@ impl Db {
         }
     }
 
-    async fn read_json_value_at_path_async(
+    pub(in crate::store::db) async fn read_json_value_at_path_async(
         &self,
         key: &str,
         version: u64,
@@ -157,7 +166,7 @@ impl Db {
         }
     }
 
-    fn json_type_indexed(
+    pub(in crate::store::db) fn json_type_indexed(
         &self,
         key: &str,
         version: u64,
@@ -173,7 +182,7 @@ impl Db {
         }))
     }
 
-    async fn json_type_indexed_async(
+    pub(in crate::store::db) async fn json_type_indexed_async(
         &self,
         key: &str,
         version: u64,
@@ -189,7 +198,7 @@ impl Db {
         }))
     }
 
-    fn touch_json_meta_to_batch(
+    pub(in crate::store::db) fn touch_json_meta_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -206,7 +215,7 @@ impl Db {
         );
     }
 
-    fn write_json_value(
+    pub(in crate::store::db) fn write_json_value(
         &self,
         key: &str,
         value: &JsonValue,
@@ -239,7 +248,7 @@ impl Db {
         Ok(())
     }
 
-    async fn write_json_value_cas_async(
+    pub(in crate::store::db) async fn write_json_value_cas_async(
         &self,
         key: &str,
         value: &JsonValue,
@@ -277,5 +286,4 @@ impl Db {
         }
         Ok(false)
     }
-
 }

@@ -1,5 +1,7 @@
+use super::*;
+
 impl Db {
-    fn set_slot_add_to_batch(
+    pub(in crate::store::db) fn set_slot_add_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -14,7 +16,7 @@ impl Db {
         );
     }
 
-    fn set_slot_remove_to_batch(
+    pub(in crate::store::db) fn set_slot_remove_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -61,7 +63,7 @@ impl Db {
         true
     }
 
-    async fn set_slot_remove_to_batch_async(
+    pub(in crate::store::db) async fn set_slot_remove_to_batch_async(
         &self,
         batch: &mut WriteBatch,
         key: &str,

@@ -1,10 +1,12 @@
+use super::*;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum JsonPathToken {
+pub(in crate::store::db) enum JsonPathToken {
     Field(String),
     Index(usize),
 }
 
-fn parse_json_path(path: &str) -> Result<Vec<JsonPathToken>, Error> {
+pub(in crate::store::db) fn parse_json_path(path: &str) -> Result<Vec<JsonPathToken>, Error> {
     if path == "$" || path == "." {
         return Ok(Vec::new());
     }
@@ -48,7 +50,10 @@ fn parse_json_path(path: &str) -> Result<Vec<JsonPathToken>, Error> {
     Ok(tokens)
 }
 
-fn json_get_path<'a>(value: &'a JsonValue, tokens: &[JsonPathToken]) -> Option<&'a JsonValue> {
+pub(in crate::store::db) fn json_get_path<'a>(
+    value: &'a JsonValue,
+    tokens: &[JsonPathToken],
+) -> Option<&'a JsonValue> {
     let mut current = value;
     for token in tokens {
         current = match token {
@@ -59,7 +64,7 @@ fn json_get_path<'a>(value: &'a JsonValue, tokens: &[JsonPathToken]) -> Option<&
     Some(current)
 }
 
-fn json_get_parent_mut<'a>(
+pub(in crate::store::db) fn json_get_parent_mut<'a>(
     value: &'a mut JsonValue,
     tokens: &'a [JsonPathToken],
 ) -> Option<(&'a mut JsonValue, &'a JsonPathToken)> {
@@ -74,7 +79,7 @@ fn json_get_parent_mut<'a>(
     Some((current, last))
 }
 
-fn json_set_path(
+pub(in crate::store::db) fn json_set_path(
     value: &mut JsonValue,
     tokens: &[JsonPathToken],
     new_value: JsonValue,
@@ -101,7 +106,7 @@ fn json_set_path(
     }
 }
 
-fn json_del_path(value: &mut JsonValue, tokens: &[JsonPathToken]) -> bool {
+pub(in crate::store::db) fn json_del_path(value: &mut JsonValue, tokens: &[JsonPathToken]) -> bool {
     if tokens.is_empty() {
         return true;
     }
@@ -127,7 +132,7 @@ fn json_del_path(value: &mut JsonValue, tokens: &[JsonPathToken]) -> bool {
     }
 }
 
-fn json_type_name(value: &JsonValue) -> &'static str {
+pub(in crate::store::db) fn json_type_name(value: &JsonValue) -> &'static str {
     match value {
         JsonValue::Null => "null",
         JsonValue::Bool(_) => "boolean",
@@ -139,7 +144,7 @@ fn json_type_name(value: &JsonValue) -> &'static str {
     }
 }
 
-fn json_node_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
+pub(in crate::store::db) fn json_node_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + JSON_NODE_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&JSON_NODE_NAMESPACE);
@@ -149,7 +154,7 @@ fn json_node_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     prefix
 }
 
-fn encode_json_path(tokens: &[JsonPathToken]) -> Vec<u8> {
+pub(in crate::store::db) fn encode_json_path(tokens: &[JsonPathToken]) -> Vec<u8> {
     let mut encoded = Vec::new();
     for token in tokens {
         match token {
@@ -168,23 +173,28 @@ fn encode_json_path(tokens: &[JsonPathToken]) -> Vec<u8> {
     encoded
 }
 
-fn json_node_key(db_index: u16, key: &str, version: u64, tokens: &[JsonPathToken]) -> Vec<u8> {
+pub(in crate::store::db) fn json_node_key(
+    db_index: u16,
+    key: &str,
+    version: u64,
+    tokens: &[JsonPathToken],
+) -> Vec<u8> {
     let mut composite_key = json_node_prefix(db_index, key, version);
     composite_key.extend_from_slice(&encode_json_path(tokens));
     composite_key
 }
 
-fn encode_json_node(node: &JsonNode) -> Vec<u8> {
+pub(in crate::store::db) fn encode_json_node(node: &JsonNode) -> Vec<u8> {
     bincode::encode_to_vec(node, bincode::config::standard()).unwrap()
 }
 
-fn decode_json_node(raw: &[u8]) -> Option<JsonNode> {
+pub(in crate::store::db) fn decode_json_node(raw: &[u8]) -> Option<JsonNode> {
     bincode::decode_from_slice::<JsonNode, _>(raw, bincode::config::standard())
         .ok()
         .map(|(node, _)| node)
 }
 
-fn json_node_from_value(value: &JsonValue) -> Result<JsonNode, Error> {
+pub(in crate::store::db) fn json_node_from_value(value: &JsonValue) -> Result<JsonNode, Error> {
     match value {
         JsonValue::Object(object) => Ok(JsonNode::Object(object.keys().cloned().collect())),
         JsonValue::Array(array) => Ok(JsonNode::Array(array.len())),
@@ -194,7 +204,7 @@ fn json_node_from_value(value: &JsonValue) -> Result<JsonNode, Error> {
     }
 }
 
-fn json_scalar_to_value(raw: &str) -> Result<JsonValue, Error> {
+pub(in crate::store::db) fn json_scalar_to_value(raw: &str) -> Result<JsonValue, Error> {
     let value: JsonValue =
         serde_json::from_str(raw).map_err(|_| Error::msg("Type parsing error"))?;
     if value.is_object() || value.is_array() {
@@ -203,7 +213,7 @@ fn json_scalar_to_value(raw: &str) -> Result<JsonValue, Error> {
     Ok(value)
 }
 
-fn write_json_subtree_to_batch(
+pub(in crate::store::db) fn write_json_subtree_to_batch(
     batch: &mut WriteBatch,
     db_index: u16,
     key: &str,
@@ -234,7 +244,7 @@ fn write_json_subtree_to_batch(
     Ok(())
 }
 
-fn delete_json_subtree_to_batch(
+pub(in crate::store::db) fn delete_json_subtree_to_batch(
     store: &KvStore,
     batch: &mut WriteBatch,
     db_index: u16,
@@ -254,7 +264,7 @@ fn delete_json_subtree_to_batch(
     }
 }
 
-fn delete_json_nodes_to_batch(
+pub(in crate::store::db) fn delete_json_nodes_to_batch(
     store: &KvStore,
     batch: &mut WriteBatch,
     db_index: u16,

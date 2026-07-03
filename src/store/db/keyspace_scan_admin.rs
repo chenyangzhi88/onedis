@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn keys(&self, pattern_str: &str) -> Vec<String> {
         let now = now_ms();
@@ -83,7 +85,8 @@ impl Db {
         for (key, _) in self.store.scan_prefix_raw(&prefix) {
             batch.delete(&key);
         }
-        self.ttl_manager.remove_db_to_batch(&mut batch, self.db_index);
+        self.ttl_manager
+            .remove_db_to_batch(&mut batch, self.db_index);
         if batch.count() > 0 {
             self.write_batch_if_not_empty(&batch);
         }

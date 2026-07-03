@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn insert_string(&self, key: String, value: String, ttl_ms: Option<u64>) {
         self.insert_string_bytes(key, value.into_bytes(), ttl_ms);

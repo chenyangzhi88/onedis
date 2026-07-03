@@ -1,3 +1,5 @@
+use super::*;
+
 impl Db {
     pub fn zset_pop(
         &self,

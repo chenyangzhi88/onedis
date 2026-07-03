@@ -1,7 +1,11 @@
 use anyhow::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    frame::Frame,
+    observability::metrics::{CommandStatsSnapshot, global_metrics},
+    store::db::Db,
+};
 
 pub struct Info {
     section: Option<String>,
@@ -21,17 +25,19 @@ impl Info {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let info = self.generate_info(db.len());
+        let info = self.generate_info(db, db.len());
         Ok(Frame::bulk_string(info))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let info = self.generate_info(db.len_async().await);
+        let info = self.generate_info(db, db.len_async().await);
         Ok(Frame::bulk_string(info))
     }
 
-    fn generate_info(&self, db_size: usize) -> String {
+    fn generate_info(&self, db: &Db, db_size: usize) -> String {
         let mut info = String::new();
+        let metrics = global_metrics().snapshot();
+        let ttl = db.ttl_observability_snapshot();
 
         // Default sections to show
         let show_all =
@@ -143,18 +149,33 @@ impl Info {
         // Stats section
         if show_stats {
             info.push_str("# Stats\r\n");
-            info.push_str(&format!("total_connections_received:{}\r\n", 1));
-            info.push_str(&format!("total_commands_processed:{}\r\n", 1));
+            info.push_str(&format!(
+                "total_connections_received:{}\r\n",
+                metrics.total_connections_received
+            ));
+            info.push_str(&format!(
+                "total_commands_processed:{}\r\n",
+                metrics.total_commands_processed
+            ));
             info.push_str("instantaneous_ops_per_sec:0\r\n");
-            info.push_str("total_net_input_bytes:0\r\n");
-            info.push_str("total_net_output_bytes:0\r\n");
+            info.push_str(&format!(
+                "total_net_input_bytes:{}\r\n",
+                metrics.total_net_input_bytes
+            ));
+            info.push_str(&format!(
+                "total_net_output_bytes:{}\r\n",
+                metrics.total_net_output_bytes
+            ));
             info.push_str("instantaneous_input_kbps:0.00\r\n");
             info.push_str("instantaneous_output_kbps:0.00\r\n");
-            info.push_str("rejected_connections:0\r\n");
+            info.push_str(&format!(
+                "rejected_connections:{}\r\n",
+                metrics.rejected_connections
+            ));
             info.push_str("sync_full:0\r\n");
             info.push_str("sync_partial_ok:0\r\n");
             info.push_str("sync_partial_err:0\r\n");
-            info.push_str("expired_keys:0\r\n");
+            info.push_str(&format!("expired_keys:{}\r\n", ttl.expired_keys));
             info.push_str("expired_stale_perc:0.00\r\n");
             info.push_str("expired_time_cap_reached_count:0\r\n");
             info.push_str("expire_cycle_cpu_milliseconds:0\r\n");
@@ -174,7 +195,10 @@ impl Info {
             info.push_str("tracking_total_keys:0\r\n");
             info.push_str("tracking_total_items:0\r\n");
             info.push_str("tracking_total_prefixes:0\r\n");
-            info.push_str("unexpected_error_replies:0\r\n");
+            info.push_str(&format!(
+                "unexpected_error_replies:{}\r\n",
+                metrics.total_command_errors
+            ));
             info.push_str("total_reads_processed:0\r\n");
             info.push_str("total_writes_processed:0\r\n");
             info.push_str("io_threaded_reads_processed:0\r\n");
@@ -210,18 +234,42 @@ impl Info {
         // Commandstats section
         if show_commandstats {
             info.push_str("# Commandstats\r\n");
-            // In a real implementation, we would track command statistics
-            info.push_str("cmdstat_info:calls=1,usec=10,usec_per_call=10.00\r\n\r\n");
+            for command in metrics
+                .command_stats
+                .iter()
+                .filter(|command| command.calls > 0 || command.name == "INFO")
+            {
+                push_command_stat(&mut info, command);
+            }
+            info.push_str("\r\n");
         }
 
         // Keyspace section
         if show_keyspace {
             info.push_str("# Keyspace\r\n");
-            info.push_str(&format!("db0:keys={},expires=0,avg_ttl=0\r\n", db_size));
+            info.push_str(&format!(
+                "db0:keys={},expires={},avg_ttl={}\r\n",
+                db_size, ttl.expires, ttl.avg_ttl_millis
+            ));
         }
 
         info
     }
+}
+
+fn push_command_stat(info: &mut String, command: &CommandStatsSnapshot) {
+    let usec_per_call = if command.calls == 0 {
+        0.0
+    } else {
+        command.usec as f64 / command.calls as f64
+    };
+    info.push_str(&format!(
+        "cmdstat_{}:calls={},usec={},usec_per_call={:.2}\r\n",
+        command.name.to_ascii_lowercase().replace('.', "_"),
+        command.calls,
+        command.usec,
+        usec_per_call
+    ));
 }
 
 #[cfg(test)]
@@ -300,7 +348,7 @@ mod tests {
 
         let all_info = bulk_text(command(&["info", "all"]).apply(&db).unwrap());
         assert!(all_info.contains("master_replid:"));
-        assert!(all_info.contains("cmdstat_info:calls=1"));
+        assert!(all_info.contains("cmdstat_info:calls="));
 
         let server_info = bulk_text(command(&["info", "server"]).apply(&db).unwrap());
         assert!(server_info.contains("# Server"));

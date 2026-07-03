@@ -13,6 +13,8 @@ impl Handler {
         let connection = Connection::new(stream);
         let session = Session::new(certification, db);
         session_manager.create_session(session.clone());
+        let metrics = crate::observability::metrics::global_metrics();
+        metrics.connection_opened();
 
         Handler {
             session,
@@ -23,6 +25,7 @@ impl Handler {
             wasm_registry,
             args,
             transaction_db: None,
+            metrics,
         }
     }
 
@@ -70,17 +73,21 @@ impl Handler {
                 Ok(bytes) => bytes,
                 Err(_e) => {
                     self.session_manager.remove_session(self.session.get_id());
+                    self.metrics.connection_closed();
                     return;
                 }
             };
+            self.metrics.add_input_bytes(bytes.len());
 
             if let Some(response_bytes) = self.try_handle_ping_fast_batch(bytes.as_slice()) {
+                self.metrics.add_output_bytes(response_bytes.len());
                 self.connection.write_bytes(response_bytes).await;
                 continue;
             }
             if let Some(response_bytes) =
                 self.try_handle_borrowed_fast_batch(bytes.as_slice()).await
             {
+                self.metrics.add_output_bytes(response_bytes.len());
                 self.connection.write_bytes(response_bytes).await;
                 continue;
             }
@@ -89,12 +96,16 @@ impl Handler {
             let frames = match Frame::parse_multiple_frames(bytes.as_slice()) {
                 Ok(frames) => frames,
                 Err(e) => {
+                    self.metrics.record_parse_error();
                     log::error!("Failed to parse multiple frames: {:?}", e);
                     let frame = Frame::Error(format!("Failed to parse frames: {:?}", e));
-                    self.connection.write_bytes(frame.as_bytes()).await;
+                    let response = frame.as_bytes();
+                    self.metrics.add_output_bytes(response.len());
+                    self.connection.write_bytes(response).await;
                     continue;
                 }
             };
+            self.metrics.record_protocol_frames(frames.len());
 
             log::debug!(
                 "Received bytes: {:?}",
@@ -115,13 +126,15 @@ impl Handler {
                 let command = match Command::parse_from_frame(frame) {
                     Ok(cmd) => cmd,
                     Err(e) => {
+                        self.metrics.record_parse_error();
                         let frame = Frame::Error(e.to_string());
                         response_bytes.extend(frame.as_bytes());
                         continue;
                     }
                 };
+                let command_name = command.name();
                 self.session
-                    .set_last_cmd(command.name().to_ascii_lowercase());
+                    .set_last_cmd(command_name.to_ascii_lowercase());
                 self.session_manager.update_session(self.session.clone());
 
                 match command {
@@ -129,6 +142,13 @@ impl Handler {
                     _ => {
                         if self.args.requirepass.is_some() {
                             if self.session.get_certification() == false {
+                                self.metrics.record_rejection("noauth");
+                                self.metrics.record_command(
+                                    command_name,
+                                    1,
+                                    Some("noauth"),
+                                    self.slow_command_threshold_us(),
+                                );
                                 let frame =
                                     Frame::Error("NOAUTH Authentication required.".to_string());
                                 response_bytes.extend(frame.as_bytes());
@@ -137,11 +157,18 @@ impl Handler {
                         }
                         if !self
                             .session_manager
-                            .acl_allows(self.session.user(), command.name())
+                            .acl_allows(self.session.user(), command_name)
                         {
+                            self.metrics.record_rejection("noperm");
+                            self.metrics.record_command(
+                                command_name,
+                                1,
+                                Some("noperm"),
+                                self.slow_command_threshold_us(),
+                            );
                             let frame = Frame::Error(format!(
                                 "NOPERM this user has no permissions to run the '{}' command",
-                                command.name().to_ascii_lowercase()
+                                command_name.to_ascii_lowercase()
                             ));
                             response_bytes.extend(frame.as_bytes());
                             continue;
@@ -149,19 +176,37 @@ impl Handler {
                     }
                 };
 
+                let started = std::time::Instant::now();
                 match self.apply_command_response_bytes(command).await {
                     Ok(bytes) => {
+                        self.metrics.record_command(
+                            command_name,
+                            crate::observability::metrics::elapsed_us(started),
+                            crate::observability::metrics::classify_error_response(&bytes),
+                            self.slow_command_threshold_us(),
+                        );
                         response_bytes.extend(bytes);
                     }
                     Err(e) => {
+                        self.metrics.record_command(
+                            command_name,
+                            crate::observability::metrics::elapsed_us(started),
+                            Some("internal_error"),
+                            self.slow_command_threshold_us(),
+                        );
                         log::error!("Failed to receive; err = {:?}", e);
                         response_bytes.extend(Frame::Error(e.to_string()).as_bytes());
                     }
                 }
             }
             if !response_bytes.is_empty() {
+                self.metrics.add_output_bytes(response_bytes.len());
                 self.connection.write_bytes(response_bytes).await;
             }
         }
+    }
+
+    fn slow_command_threshold_us(&self) -> u64 {
+        self.args.slow_command_threshold_ms.saturating_mul(1_000)
     }
 }

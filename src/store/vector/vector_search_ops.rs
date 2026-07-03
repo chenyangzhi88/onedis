@@ -5,6 +5,18 @@ impl Db {
         query: &[f32],
         options: VectorSearchOptions,
     ) -> Result<Vec<VectorSearchResult>, Error> {
+        let started = Instant::now();
+        let result = self.vector_search_inner(index, query, options);
+        global_metrics().record_vector_search(elapsed_us(started), result.is_err());
+        result
+    }
+
+    fn vector_search_inner(
+        &self,
+        index: &str,
+        query: &[f32],
+        options: VectorSearchOptions,
+    ) -> Result<Vec<VectorSearchResult>, Error> {
         let (_, version, meta) = self.read_vector_meta(index)?;
         validate_vector(query, meta.dim as usize)?;
         validate_vector_for_distance(query, meta.distance)?;
@@ -47,6 +59,18 @@ impl Db {
     }
 
     pub async fn vector_search_async(
+        &self,
+        index: &str,
+        query: &[f32],
+        options: VectorSearchOptions,
+    ) -> Result<Vec<VectorSearchResult>, Error> {
+        let started = Instant::now();
+        let result = self.vector_search_async_inner(index, query, options).await;
+        global_metrics().record_vector_search(elapsed_us(started), result.is_err());
+        result
+    }
+
+    async fn vector_search_async_inner(
         &self,
         index: &str,
         query: &[f32],

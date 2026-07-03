@@ -115,6 +115,10 @@ fn config_apply(args: &[&str]) -> Frame {
         port: 6380,
         loglevel: "debug".to_string(),
         maxclients: 1024,
+        observability_enabled: false,
+        metrics_bind: "127.0.0.1".to_string(),
+        metrics_port: 0,
+        slow_command_threshold_ms: 10,
     };
     Config::parse_from_frame(frame_args(args))
         .unwrap()

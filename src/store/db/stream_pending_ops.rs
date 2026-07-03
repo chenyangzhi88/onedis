@@ -180,6 +180,7 @@ impl Db {
         min_idle_ms: u64,
         ids: &[StreamId],
     ) -> Result<Vec<StreamEntry>, Error> {
+        global_metrics().record_stream_claim();
         let Some(meta) = self.stream_meta(key)? else {
             return Ok(Vec::new());
         };
@@ -227,6 +228,7 @@ impl Db {
         min_idle_ms: u64,
         ids: &[StreamId],
     ) -> Result<Vec<StreamEntry>, Error> {
+        global_metrics().record_stream_claim();
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(Vec::new());
         };
@@ -276,6 +278,7 @@ impl Db {
         start: StreamId,
         count: usize,
     ) -> Result<StreamClaimedEntries, Error> {
+        global_metrics().record_stream_autoclaim();
         let Some(meta) = self.stream_meta(key)? else {
             return Ok(StreamClaimedEntries {
                 next_id: "0-0".to_string(),
@@ -334,6 +337,7 @@ impl Db {
         start: StreamId,
         count: usize,
     ) -> Result<StreamClaimedEntries, Error> {
+        global_metrics().record_stream_autoclaim();
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(StreamClaimedEntries {
                 next_id: "0-0".to_string(),

@@ -12,35 +12,43 @@ impl Db {
             return Ok(false);
         }
 
+        let source_store = store.for_db_index(source_db_index);
+        let target_store = store.for_db_index(target_db_index);
+
         let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(store, source_db_index, source_key)
+            Self::load_live_raw_for_db_with_backend(&source_store, source_db_index, source_key)
         else {
             return Ok(false);
         };
 
-        if Self::load_live_raw_for_db_with_backend(store, target_db_index, target_key).is_some() {
+        if Self::load_live_raw_for_db_with_backend(&target_store, target_db_index, target_key)
+            .is_some()
+        {
             return Ok(false);
         }
 
-        let mut batch = WriteBatch::new();
-        Self::copy_structure_between_dbs_to_batch(
-            store,
-            &mut batch,
-            source_db_index,
-            source_key,
-            target_db_index,
-            target_key,
-            &source_raw,
-            version_counter,
-        );
-        Self::delete_structure_for_db_to_batch(
-            &mut batch,
-            source_db_index,
-            source_key,
-            &source_raw,
-        );
-        if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw)) {
-            if header.expire_ms > 0 {
+        if source_db_index == target_db_index {
+            let mut batch = WriteBatch::new();
+            Self::copy_structure_between_dbs_to_batch(
+                &source_store,
+                &target_store,
+                &mut batch,
+                source_db_index,
+                source_key,
+                target_db_index,
+                target_key,
+                &source_raw,
+                version_counter,
+            );
+            Self::delete_structure_for_db_to_batch(
+                &mut batch,
+                source_db_index,
+                source_key,
+                &source_raw,
+            );
+            if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+                && header.expire_ms > 0
+            {
                 ttl_manager.remove_known_to_batch(
                     &mut batch,
                     header.expire_ms,
@@ -49,8 +57,47 @@ impl Db {
                 );
                 ttl_manager.add_to_batch(&mut batch, header.expire_ms, target_db_index, target_key);
             }
+            target_store.write_batch(&batch);
+            return Ok(true);
         }
-        store.write_batch(&batch);
+
+        let mut target_batch = WriteBatch::new();
+        Self::copy_structure_between_dbs_to_batch(
+            &source_store,
+            &target_store,
+            &mut target_batch,
+            source_db_index,
+            source_key,
+            target_db_index,
+            target_key,
+            &source_raw,
+            version_counter,
+        );
+        if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+            && header.expire_ms > 0
+        {
+            ttl_manager.add_to_batch(&mut target_batch, header.expire_ms, target_db_index, target_key);
+        }
+        target_store.write_batch(&target_batch);
+
+        let mut source_batch = WriteBatch::new();
+        Self::delete_structure_for_db_to_batch(
+            &mut source_batch,
+            source_db_index,
+            source_key,
+            &source_raw,
+        );
+        if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+            && header.expire_ms > 0
+        {
+            ttl_manager.remove_known_to_batch(
+                &mut source_batch,
+                header.expire_ms,
+                source_db_index,
+                source_key,
+            );
+        }
+        source_store.write_batch(&source_batch);
         Ok(true)
     }
 
@@ -68,36 +115,44 @@ impl Db {
             return Ok(false);
         }
 
+        let source_store = store.for_db_index(source_db_index);
+        let target_store = store.for_db_index(target_db_index);
+
         let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(store, source_db_index, source_key)
+            Self::load_live_raw_for_db_with_backend(&source_store, source_db_index, source_key)
         else {
             return Ok(false);
         };
 
-        if Self::load_live_raw_for_db_with_backend(store, target_db_index, target_key).is_some() {
+        if Self::load_live_raw_for_db_with_backend(&target_store, target_db_index, target_key)
+            .is_some()
+        {
             return Ok(false);
         }
 
-        let mut batch = WriteBatch::new();
-        Self::copy_structure_between_dbs_to_batch_async(
-            store,
-            &mut batch,
-            source_db_index,
-            source_key,
-            target_db_index,
-            target_key,
-            &source_raw,
-            version_counter,
-        )
-        .await;
-        Self::delete_structure_for_db_to_batch(
-            &mut batch,
-            source_db_index,
-            source_key,
-            &source_raw,
-        );
-        if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw)) {
-            if header.expire_ms > 0 {
+        if source_db_index == target_db_index {
+            let mut batch = WriteBatch::new();
+            Self::copy_structure_between_dbs_to_batch_async(
+                &source_store,
+                &target_store,
+                &mut batch,
+                source_db_index,
+                source_key,
+                target_db_index,
+                target_key,
+                &source_raw,
+                version_counter,
+            )
+            .await;
+            Self::delete_structure_for_db_to_batch(
+                &mut batch,
+                source_db_index,
+                source_key,
+                &source_raw,
+            );
+            if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+                && header.expire_ms > 0
+            {
                 ttl_manager.remove_known_to_batch(
                     &mut batch,
                     header.expire_ms,
@@ -106,52 +161,61 @@ impl Db {
                 );
                 ttl_manager.add_to_batch(&mut batch, header.expire_ms, target_db_index, target_key);
             }
+            target_store.write_batch(&batch);
+            return Ok(true);
         }
-        store.write_batch(&batch);
+
+        let mut target_batch = WriteBatch::new();
+        Self::copy_structure_between_dbs_to_batch_async(
+            &source_store,
+            &target_store,
+            &mut target_batch,
+            source_db_index,
+            source_key,
+            target_db_index,
+            target_key,
+            &source_raw,
+            version_counter,
+        )
+        .await;
+        if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+            && header.expire_ms > 0
+        {
+            ttl_manager.add_to_batch(&mut target_batch, header.expire_ms, target_db_index, target_key);
+        }
+        target_store.write_batch(&target_batch);
+
+        let mut source_batch = WriteBatch::new();
+        Self::delete_structure_for_db_to_batch(
+            &mut source_batch,
+            source_db_index,
+            source_key,
+            &source_raw,
+        );
+        if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
+            && header.expire_ms > 0
+        {
+            ttl_manager.remove_known_to_batch(
+                &mut source_batch,
+                header.expire_ms,
+                source_db_index,
+                source_key,
+            );
+        }
+        source_store.write_batch(&source_batch);
         Ok(true)
     }
 
     pub fn move_key_to_db(&self, target_db_index: u16, key: &str) -> Result<bool, Error> {
-        if self.db_index == target_db_index {
-            return Ok(false);
-        }
-
-        let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(&self.store, self.db_index, key)
-        else {
-            return Ok(false);
-        };
-
-        if Self::load_live_raw_for_db_with_backend(&self.store, target_db_index, key).is_some() {
-            return Ok(false);
-        }
-
-        let mut batch = WriteBatch::new();
-        Self::copy_structure_between_dbs_to_batch(
+        Self::move_key_between_dbs(
             &self.store,
-            &mut batch,
             self.db_index,
             key,
             target_db_index,
             key,
-            &source_raw,
             &self.version_counter,
-        );
-        Self::delete_structure_for_db_to_batch(&mut batch, self.db_index, key, &source_raw);
-        if let Some(header) = decode_meta_header(&source_raw)
-            && header.expire_ms > 0
-        {
-            self.ttl_manager.remove_known_to_batch(
-                &mut batch,
-                header.expire_ms,
-                self.db_index,
-                key,
-            );
-            self.ttl_manager
-                .add_to_batch(&mut batch, header.expire_ms, target_db_index, key);
-        }
-        self.write_batch_if_not_empty(&batch);
-        Ok(true)
+            Some(&self.ttl_manager),
+        )
     }
 
     pub async fn move_key_to_db_async(
@@ -159,46 +223,15 @@ impl Db {
         target_db_index: u16,
         key: &str,
     ) -> Result<bool, Error> {
-        if self.db_index == target_db_index {
-            return Ok(false);
-        }
-
-        let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(&self.store, self.db_index, key)
-        else {
-            return Ok(false);
-        };
-
-        if Self::load_live_raw_for_db_with_backend(&self.store, target_db_index, key).is_some() {
-            return Ok(false);
-        }
-
-        let mut batch = WriteBatch::new();
-        Self::copy_structure_between_dbs_to_batch_async(
+        Self::move_key_between_dbs_async(
             &self.store,
-            &mut batch,
             self.db_index,
             key,
             target_db_index,
             key,
-            &source_raw,
             &self.version_counter,
+            Some(&self.ttl_manager),
         )
-        .await;
-        Self::delete_structure_for_db_to_batch(&mut batch, self.db_index, key, &source_raw);
-        if let Some(header) = decode_meta_header(&source_raw)
-            && header.expire_ms > 0
-        {
-            self.ttl_manager.remove_known_to_batch(
-                &mut batch,
-                header.expire_ms,
-                self.db_index,
-                key,
-            );
-            self.ttl_manager
-                .add_to_batch(&mut batch, header.expire_ms, target_db_index, key);
-        }
-        self.write_batch_if_not_empty(&batch);
-        Ok(true)
+        .await
     }
 }

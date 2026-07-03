@@ -1,4 +1,36 @@
 impl Db {
+    pub fn fulltext_observability_snapshot(
+        &self,
+    ) -> crate::store::db::FullTextObservabilitySnapshot {
+        let mut snapshot = crate::store::db::FullTextObservabilitySnapshot::default();
+        let Ok(metas) = self.read_all_fulltext_metas() else {
+            return snapshot;
+        };
+        for (index, meta) in metas {
+            match meta.state {
+                FullTextIndexState::Creating => snapshot.creating += 1,
+                FullTextIndexState::Backfilling => snapshot.backfilling += 1,
+                FullTextIndexState::Ready => snapshot.ready += 1,
+                FullTextIndexState::Dirty => snapshot.dirty += 1,
+                FullTextIndexState::Rebuilding => snapshot.rebuilding += 1,
+                FullTextIndexState::Dropping => snapshot.dropping += 1,
+            }
+            if meta.backfill_cursor.is_some()
+                || matches!(
+                    meta.state,
+                    FullTextIndexState::Backfilling | FullTextIndexState::Rebuilding
+                )
+            {
+                snapshot.backfill_pending += 1;
+            }
+            snapshot.outbox_pending += self
+                .store
+                .scan_prefix_raw(&fulltext_outbox_prefix(self.db_index, &index))
+                .len() as u64;
+        }
+        snapshot
+    }
+
     pub fn fulltext_info(&self, index: &str) -> Result<Frame, Error> {
         let index = self.resolve_fulltext_index(index)?;
         let meta = self.read_fulltext_meta_direct(&index)?;

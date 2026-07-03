@@ -1,5 +1,6 @@
 impl Db {
     pub fn vector_drop(&self, index: &str) -> Result<usize, Error> {
+        global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let _guard = write_lock
             .lock()
@@ -18,6 +19,7 @@ impl Db {
     }
 
     pub fn vector_rebuild(&self, index: &str) -> Result<(), Error> {
+        global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let _guard = write_lock
             .lock()
@@ -77,6 +79,7 @@ impl Db {
     }
 
     pub fn vector_compact(&self, index: &str) -> Result<(), Error> {
+        global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let _guard = write_lock
             .lock()

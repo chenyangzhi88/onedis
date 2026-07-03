@@ -1,5 +1,6 @@
 impl Db {
     pub fn vector_create(&self, index: &str, options: VectorCreateOptions) -> Result<(), Error> {
+        global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let _guard = write_lock
             .lock()
@@ -92,6 +93,7 @@ impl Db {
         vector: Vec<f32>,
         attrs_json: Option<String>,
     ) -> Result<(), Error> {
+        global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let _guard = write_lock
             .lock()
@@ -241,6 +243,7 @@ impl Db {
     }
 
     pub fn vector_del(&self, index: &str, ids: &[String]) -> Result<usize, Error> {
+        global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let _guard = write_lock
             .lock()

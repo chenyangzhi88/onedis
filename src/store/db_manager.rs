@@ -1,10 +1,13 @@
 use std::{
+    fmt::Write as _,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
+
+use crate::observability::metrics::global_metrics;
 
 use tokio::sync::Notify;
 
@@ -15,6 +18,50 @@ use crate::{
     store::ttl::{TYPE_HASH, TYPE_JSON, TtlConfig, TtlManager, VersionCounter},
 };
 use common::types::options::{FileConfig, Options};
+
+const STORAGE_ENGINE_PROPERTIES: &[&str] = &[
+    "db.num-immutable-memtables",
+    "db.memtable-memory-backed-immutables",
+    "db.memtable-store-backed-immutables",
+    "db.memtable-compaction-referenced-immutables",
+    "db.memtable-pressure-immutables",
+    "db.memtable-merge-layer-count",
+    "db.memtable-merge-layer-pressure-units",
+    "db.memtable-active-entries",
+    "db.memtable-active-bytes",
+    "db.memtable-immutable-entries",
+    "db.memtable-immutable-bytes",
+    "db.immutable-page-target-size",
+    "db.immutable-page-hard-max-size",
+    "db.immutable-index-page-count",
+    "db.immutable-index-page-avg-bytes",
+    "db.immutable-normal-page-count",
+    "db.immutable-user-key-continuation-page-count",
+    "db.immutable-oversized-value-page-count",
+    "db.immutable-max-user-key-run-pages",
+    "db.num-visible-tablets",
+    "db.cur-compaction-version",
+    "db.next-sequence",
+    "db.num-wal-files",
+    "db.block-cache-entries",
+    "db.block-cache-bytes",
+    "db.meta-cache-entries",
+    "db.meta-cache-bytes",
+    "db.page-cache-entries",
+    "db.page-cache-bytes",
+    "db.io-scheduler-queued",
+    "db.io-scheduler-inflight",
+    "db.io-scheduler-completed",
+    "db.write-thread-stats",
+    "db.get-stats",
+    "db.get-detail-stats",
+    "db.read-path-stats",
+    "db.block-cache-hit-stats",
+    "db.read-path-detail-stats",
+    "db.memtable-lifecycle-stats",
+    "db.memtable-active-storage-stats",
+    "db.memtable-immutable-storage-stats",
+];
 
 /// DB 管理器
 ///
@@ -161,6 +208,160 @@ impl DatabaseManager {
     pub fn notify_stream_waiters(&self) {
         self.stream_notify.notify_waiters();
     }
+
+    pub fn render_observability_prometheus(&self) -> String {
+        let mut out = String::new();
+        let mut expired_keys = 0;
+        let mut ttl_stale_entries = 0;
+        let mut ttl_sweep_cycles = 0;
+        let mut fulltext_creating = 0;
+        let mut fulltext_backfilling = 0;
+        let mut fulltext_ready = 0;
+        let mut fulltext_dirty = 0;
+        let mut fulltext_rebuilding = 0;
+        let mut fulltext_dropping = 0;
+        let mut fulltext_outbox_pending = 0;
+        let mut fulltext_backfill_pending = 0;
+        let mut stream_groups = 0;
+        let mut stream_pending_entries = 0;
+        let mut vector_indexes = 0;
+
+        let _ = writeln!(out, "# TYPE onedis_db_keys gauge");
+        let _ = writeln!(out, "# TYPE onedis_db_expires gauge");
+        let _ = writeln!(out, "# TYPE onedis_db_avg_ttl_milliseconds gauge");
+        for (db_index, db) in self.dbs.iter().enumerate() {
+            let ttl = db.ttl_observability_snapshot();
+            expired_keys = ttl.expired_keys;
+            ttl_stale_entries = ttl.stale_entries_skipped;
+            ttl_sweep_cycles = ttl.sweep_cycles;
+            let _ = writeln!(out, "onedis_db_keys{{db=\"{db_index}\"}} {}", db.len());
+            let _ = writeln!(
+                out,
+                "onedis_db_expires{{db=\"{db_index}\"}} {}",
+                ttl.expires
+            );
+            let _ = writeln!(
+                out,
+                "onedis_db_avg_ttl_milliseconds{{db=\"{db_index}\"}} {}",
+                ttl.avg_ttl_millis
+            );
+
+            let fulltext = db.fulltext_observability_snapshot();
+            fulltext_creating += fulltext.creating;
+            fulltext_backfilling += fulltext.backfilling;
+            fulltext_ready += fulltext.ready;
+            fulltext_dirty += fulltext.dirty;
+            fulltext_rebuilding += fulltext.rebuilding;
+            fulltext_dropping += fulltext.dropping;
+            fulltext_outbox_pending += fulltext.outbox_pending;
+            fulltext_backfill_pending += fulltext.backfill_pending;
+
+            let stream = db.stream_observability_snapshot();
+            stream_groups += stream.groups;
+            stream_pending_entries += stream.pending_entries;
+
+            let vector = db.vector_observability_snapshot();
+            vector_indexes += vector.indexes;
+        }
+        let metrics = global_metrics();
+        metrics.set_stream_snapshot(stream_groups, stream_pending_entries);
+        metrics.set_vector_indexes(vector_indexes);
+
+        let _ = writeln!(out, "# TYPE onedis_expired_keys_total counter");
+        let _ = writeln!(out, "onedis_expired_keys_total {expired_keys}");
+        let _ = writeln!(out, "# TYPE onedis_ttl_sweep_cycles_total counter");
+        let _ = writeln!(out, "onedis_ttl_sweep_cycles_total {ttl_sweep_cycles}");
+        let _ = writeln!(out, "# TYPE onedis_ttl_stale_entries_skipped_total counter");
+        let _ = writeln!(
+            out,
+            "onedis_ttl_stale_entries_skipped_total {ttl_stale_entries}"
+        );
+
+        let _ = writeln!(out, "# TYPE onedis_fulltext_indexes_total gauge");
+        for (state, value) in [
+            ("creating", fulltext_creating),
+            ("backfilling", fulltext_backfilling),
+            ("ready", fulltext_ready),
+            ("dirty", fulltext_dirty),
+            ("rebuilding", fulltext_rebuilding),
+            ("dropping", fulltext_dropping),
+        ] {
+            let _ = writeln!(
+                out,
+                "onedis_fulltext_indexes_total{{state=\"{state}\"}} {value}"
+            );
+        }
+        let _ = writeln!(out, "# TYPE onedis_fulltext_outbox_pending gauge");
+        let _ = writeln!(
+            out,
+            "onedis_fulltext_outbox_pending {fulltext_outbox_pending}"
+        );
+        let _ = writeln!(out, "# TYPE onedis_fulltext_backfill_pending gauge");
+        let _ = writeln!(
+            out,
+            "onedis_fulltext_backfill_pending {fulltext_backfill_pending}"
+        );
+        self.render_storage_engine_properties(&mut out);
+        out
+    }
+
+    fn render_storage_engine_properties(&self, out: &mut String) {
+        let _ = writeln!(out, "# TYPE onedis_storage_engine_property gauge");
+        for property in STORAGE_ENGINE_PROPERTIES {
+            let Ok(Some(value)) = self.store.get_property(property) else {
+                continue;
+            };
+            if let Some(number) = parse_property_number(&value) {
+                let _ = writeln!(
+                    out,
+                    "onedis_storage_engine_property{{property=\"{property}\"}} {number}"
+                );
+                continue;
+            }
+            for (field, number) in parse_property_fields(&value) {
+                let _ = writeln!(
+                    out,
+                    "onedis_storage_engine_property{{property=\"{property}.{field}\"}} {number}"
+                );
+            }
+        }
+    }
+}
+
+fn parse_property_number(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+fn parse_property_fields(value: &str) -> Vec<(String, f64)> {
+    value
+        .split_ascii_whitespace()
+        .filter_map(|part| {
+            let (key, raw_value) = part.split_once('=')?;
+            let raw_value = raw_value.trim_end_matches('%');
+            let value = raw_value
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())?;
+            Some((sanitize_property_field(key), value))
+        })
+        .collect()
+}
+
+fn sanitize_property_field(field: &str) -> String {
+    field
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 impl Drop for DatabaseManager {

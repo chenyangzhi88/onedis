@@ -9,17 +9,15 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn main_key(db_index: u16, key: &str) -> Vec<u8> {
-    let pfx = db_index.to_be_bytes();
-    let mut k = Vec::with_capacity(2 + key.len());
-    k.extend_from_slice(&pfx);
-    k.extend_from_slice(key.as_bytes());
-    k
+fn main_key(_db_index: u16, key: &str) -> Vec<u8> {
+    key.as_bytes().to_vec()
 }
 
-fn json_node_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(2 + JSON_NODE_NS.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_index.to_be_bytes());
+fn json_node_prefix(_db_index: u16, key: &str, version: u64) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(
+        crate::store::TABLE_LOCAL_INTERNAL_PREFIX.len() + JSON_NODE_NS.len() + key.len() + 1 + 8,
+    );
+    prefix.extend_from_slice(crate::store::TABLE_LOCAL_INTERNAL_PREFIX);
     prefix.extend_from_slice(&JSON_NODE_NS);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);

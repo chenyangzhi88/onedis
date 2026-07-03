@@ -36,6 +36,22 @@ pub struct Args {
     /// 最大客户端连接数
     #[arg(long)]
     pub maxclients: Option<usize>,
+
+    /// Prometheus metrics 监听地址
+    #[arg(long)]
+    pub metrics_bind: Option<String>,
+
+    /// Prometheus metrics 监听端口
+    #[arg(long)]
+    pub metrics_port: Option<u16>,
+
+    /// 禁用 Prometheus metrics endpoint
+    #[arg(long)]
+    pub disable_observability: bool,
+
+    /// 慢命令阈值，单位毫秒
+    #[arg(long)]
+    pub slow_command_threshold_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +64,10 @@ pub struct ResolvedArgs {
     pub port: u16,
     pub loglevel: String,
     pub maxclients: usize,
+    pub observability_enabled: bool,
+    pub metrics_bind: String,
+    pub metrics_port: u16,
+    pub slow_command_threshold_ms: u64,
 }
 
 impl Args {
@@ -96,6 +116,10 @@ impl Args {
             port: config.port,
             loglevel: config.loglevel,
             maxclients: config.maxclients,
+            observability_enabled: !self.disable_observability,
+            metrics_bind: self.metrics_bind.unwrap_or_else(|| "0.0.0.0".to_string()),
+            metrics_port: self.metrics_port.unwrap_or(9121),
+            slow_command_threshold_ms: self.slow_command_threshold_ms.unwrap_or(10),
         }
     }
 }
@@ -149,6 +173,10 @@ mod tests {
             port: Some(6381),
             loglevel: Some("warn".to_string()),
             maxclients: Some(99),
+            metrics_bind: Some("127.0.0.1".to_string()),
+            metrics_port: Some(19121),
+            disable_observability: true,
+            slow_command_threshold_ms: Some(25),
         };
 
         let resolved = args.resolve(OnedisServerOptions::default());
@@ -159,5 +187,9 @@ mod tests {
         assert_eq!(resolved.port, 6381);
         assert_eq!(resolved.loglevel, "warn");
         assert_eq!(resolved.maxclients, 99);
+        assert!(!resolved.observability_enabled);
+        assert_eq!(resolved.metrics_bind, "127.0.0.1");
+        assert_eq!(resolved.metrics_port, 19121);
+        assert_eq!(resolved.slow_command_threshold_ms, 25);
     }
 }

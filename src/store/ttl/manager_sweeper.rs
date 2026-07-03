@@ -40,6 +40,7 @@ impl TtlManager {
     /// One sweep cycle: drain expired entries, Double Check, delete.
     #[allow(dead_code)]
     fn sweep_once(&self) -> bool {
+        let started = Instant::now();
         let now = now_ms();
         let expired = self.scan_expired_batch(now, self.config.batch_size);
 
@@ -51,16 +52,19 @@ impl TtlManager {
 
         let mut deleted = 0usize;
         let mut stale = 0usize;
-        let mut batch = WriteBatch::new();
+        let mut batches: BTreeMap<u16, WriteBatch> = BTreeMap::new();
 
         for entry in expired.iter().take(self.config.batch_size) {
-            match self.plan_expire_key(entry, &mut batch) {
+            let batch = batches.entry(entry.db_index).or_insert_with(WriteBatch::new);
+            match self.plan_expire_key(entry, batch) {
                 ExpireResult::Deleted => deleted += 1,
                 ExpireResult::Stale | ExpireResult::NotFound => stale += 1,
             }
         }
-        if batch.count() > 0 {
-            self.store.write_batch(&batch);
+        for (db_index, batch) in batches {
+            if batch.count() > 0 {
+                self.store_for_db(db_index).write_batch(&batch);
+            }
         }
 
         self.stats
@@ -74,10 +78,12 @@ impl TtlManager {
             debug!("TTL sweep: {} deleted, {} stale/skipped", deleted, stale);
         }
 
+        global_metrics().record_ttl_sweep_duration(elapsed_us(started));
         expired.len() == self.config.batch_size
     }
 
     async fn sweep_once_async(&self) -> bool {
+        let started = Instant::now();
         let now = now_ms();
         let expired = self
             .scan_expired_batch_async(now, self.config.batch_size)
@@ -91,16 +97,19 @@ impl TtlManager {
 
         let mut deleted = 0usize;
         let mut stale = 0usize;
-        let mut batch = WriteBatch::new();
+        let mut batches: BTreeMap<u16, WriteBatch> = BTreeMap::new();
 
         for entry in expired.iter().take(self.config.batch_size) {
-            match self.plan_expire_key(entry, &mut batch) {
+            let batch = batches.entry(entry.db_index).or_insert_with(WriteBatch::new);
+            match self.plan_expire_key(entry, batch) {
                 ExpireResult::Deleted => deleted += 1,
                 ExpireResult::Stale | ExpireResult::NotFound => stale += 1,
             }
         }
-        if batch.count() > 0 {
-            self.store.write_batch(&batch);
+        for (db_index, batch) in batches {
+            if batch.count() > 0 {
+                self.store_for_db(db_index).write_batch(&batch);
+            }
         }
 
         self.stats
@@ -114,6 +123,7 @@ impl TtlManager {
             debug!("TTL sweep: {} deleted, {} stale/skipped", deleted, stale);
         }
 
+        global_metrics().record_ttl_sweep_duration(elapsed_us(started));
         expired.len() == self.config.batch_size
     }
 
@@ -125,7 +135,7 @@ impl TtlManager {
             if expired.len() >= batch_size {
                 break;
             }
-            for (ttl_key, _) in self.store.scan_prefix_raw(&ttl_db_prefix(db_idx)) {
+            for (ttl_key, _) in self.store_for_db(db_idx).scan_prefix_raw(&ttl_db_prefix(db_idx)) {
                 if let Some((expire_ms, parsed_db, key)) = parse_ttl_index_key(&ttl_key) {
                     debug_assert_eq!(parsed_db, db_idx);
                     if expire_ms > now {
@@ -153,7 +163,7 @@ impl TtlManager {
                 break;
             }
             for (ttl_key, _) in self
-                .store
+                .store_for_db(db_idx)
                 .scan_prefix_raw_async(&ttl_db_prefix(db_idx))
                 .await
             {
@@ -196,10 +206,11 @@ impl TtlManager {
     //      Commit atomically.
 
     fn plan_expire_key(&self, entry: &TtlEntry, batch: &mut WriteBatch) -> ExpireResult {
+        let store = self.store_for_db(entry.db_index);
         let meta_key = main_key(entry.db_index, &entry.key);
 
         // ── Check 1: meta key still alive? ──
-        let Some(raw) = self.store.get_raw(&meta_key) else {
+        let Some(raw) = store.get_raw(&meta_key) else {
             batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
             return ExpireResult::NotFound;
         };
@@ -236,7 +247,7 @@ impl TtlManager {
             header.type_tag,
         );
         if header.type_tag == TYPE_JSON {
-            for (node_key, _) in self.store.scan_prefix_raw(&json_node_prefix(
+            for (node_key, _) in store.scan_prefix_raw(&json_node_prefix(
                 entry.db_index,
                 &entry.key,
                 header.version,

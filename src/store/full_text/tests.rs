@@ -1051,7 +1051,10 @@
             fulltext_alias_from_key(3, &fulltext_alias_key(3, "alias")).unwrap(),
             "alias"
         );
-        assert!(fulltext_alias_from_key(4, &fulltext_alias_key(3, "alias")).is_none());
+        assert_eq!(
+            fulltext_alias_from_key(4, &fulltext_alias_key(3, "alias")).unwrap(),
+            "alias"
+        );
         assert_eq!(
             fulltext_dict_term_from_key(1, "dict", &fulltext_dict_term_key(1, "dict", "term"))
                 .unwrap(),
@@ -1084,7 +1087,7 @@
         let mut bad_outbox = fulltext_outbox_key(7, "idx", 42);
         bad_outbox.push(0);
         assert!(fulltext_outbox_seq_from_key(7, "idx", &bad_outbox).is_none());
-        assert!(fulltext_file_prefix(1, "idx").starts_with(&db_prefix(1)));
+        assert!(fulltext_file_prefix(1, "idx").starts_with(&internal_prefix(1)));
         assert!(fulltext_repair_marker_key(1, "idx").starts_with(&fulltext_meta_prefix(1)));
         assert!(fulltext_config_key(1, "DEFAULT_DIALECT").starts_with(&fulltext_meta_prefix(1)));
 

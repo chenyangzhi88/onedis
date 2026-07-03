@@ -28,10 +28,11 @@ use tantivy::{
 use super::full_text_directory::KvTantivyDirectory;
 use super::{
     Db, FULLTEXT_FILE_NAMESPACE, FULLTEXT_META_NAMESPACE, FULLTEXT_OUTBOX_NAMESPACE,
-    VectorCreateOptions, VectorSearchOptions, VectorSearchResult, db_prefix,
-    decode_hash_meta_checked, main_key, prefix_exclusive_upper_bound,
+    VectorCreateOptions, VectorSearchOptions, VectorSearchResult, decode_hash_meta_checked,
+    internal_prefix, main_key, prefix_exclusive_upper_bound,
 };
 use crate::frame::Frame;
+use crate::observability::metrics::{elapsed_us, global_metrics};
 use crate::store::ttl::{TYPE_HASH, TYPE_JSON, decode_meta_header};
 
 const FULLTEXT_KEY_FIELD: &str = "__key";

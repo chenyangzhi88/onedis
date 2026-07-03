@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv_engine::db::SchemalessCompareCondition as CompareCondition;
+    use kv_engine::api::SchemalessCompareCondition as CompareCondition;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

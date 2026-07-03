@@ -2,6 +2,10 @@ impl Handler {
     async fn apply_blocking_stream_command(&self, command: Command) -> Result<Vec<u8>, Error> {
         let block_ms = Self::blocking_stream_timeout_ms(&command).unwrap_or(0);
         let deadline = (block_ms > 0).then(|| Instant::now() + Duration::from_millis(block_ms));
+        self.metrics.stream_blocked_started();
+        let _blocked = StreamBlockedGuard {
+            metrics: self.metrics.clone(),
+        };
         loop {
             let notified = self.db_manager.stream_notify().notified();
             let frame = self.try_stream_read_once(&command).await?;
@@ -93,5 +97,15 @@ impl Handler {
 
     fn is_blocking_stream_command(command: &Command) -> bool {
         Self::blocking_stream_timeout_ms(command).is_some()
+    }
+}
+
+struct StreamBlockedGuard {
+    metrics: Arc<OnedisMetrics>,
+}
+
+impl Drop for StreamBlockedGuard {
+    fn drop(&mut self) {
+        self.metrics.stream_blocked_finished();
     }
 }

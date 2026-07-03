@@ -127,6 +127,14 @@ impl Db {
         };
         if header.type_tag != TYPE_STRING && header.version > 0 {
             delete_sub_keys_to_batch(batch, self.db_index, key, header.version, header.type_tag);
+            delete_sub_keys_by_scan_to_batch(
+                &self.store,
+                batch,
+                self.db_index,
+                key,
+                header.version,
+                header.type_tag,
+            );
             match header.type_tag {
                 TYPE_HASH => {
                     if let Err(err) = self.fulltext_enqueue_hash_delete_to_batch(batch, key) {
@@ -161,6 +169,14 @@ impl Db {
         };
         if header.type_tag != TYPE_STRING && header.version > 0 {
             delete_sub_keys_to_batch_bytes(
+                batch,
+                self.db_index,
+                key,
+                header.version,
+                header.type_tag,
+            );
+            delete_sub_keys_by_scan_to_batch_bytes(
+                &self.store,
                 batch,
                 self.db_index,
                 key,

@@ -7,7 +7,7 @@
         TYPE_LIST, TYPE_SET, TYPE_SORTED_SET, TYPE_STREAM, TYPE_VECTOR, VECTOR_DOC_NAMESPACE,
         VECTOR_GRAPH_NAMESPACE, VECTOR_META_NAMESPACE, VECTOR_NUMERIC_NAMESPACE,
         VECTOR_SEGMENT_NAMESPACE, VECTOR_TAG_NAMESPACE, WRONG_TYPE_ERROR, ZSET_MEMBER_NAMESPACE,
-        ZSET_RANK_NAMESPACE, ZsetAggregate, db_prefix, db_prefix_exclusive_upper_bound,
+        ZSET_RANK_NAMESPACE, ZsetAggregate, db_prefix, internal_prefix, db_prefix_exclusive_upper_bound,
         decode_db_prefix, decode_entry, delete_sub_keys_to_batch_bytes, hash_field_key,
         is_known_subkey_namespace, json_node_key, json_node_prefix, main_key, main_key_bytes,
         now_ms, parse_json_path, prefix_exclusive_upper_bound, set_slot_key,

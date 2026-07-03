@@ -24,9 +24,12 @@ impl Db {
         ttl_manager: Arc<TtlManager>,
         mutation_tracker: Arc<KeyMutationTracker>,
     ) -> Self {
+        let store = store.for_db_index(db_index);
+        let key_layout = KeyEncodingLayout::open_or_initialize_for_table(&store);
         Db {
             db_index,
             store,
+            key_layout,
             changes: Arc::new(AtomicU64::new(0)),
             version_counter,
             ttl_manager,
@@ -45,6 +48,7 @@ impl Db {
         Ok(Db {
             db_index: self.db_index,
             store: self.store.begin_transaction()?,
+            key_layout: self.key_layout,
             changes: self.changes.clone(),
             version_counter: self.version_counter.clone(),
             ttl_manager: self.ttl_manager.clone(),
@@ -69,6 +73,18 @@ impl Db {
 
     async fn next_persisted_version_async(&self) -> u64 {
         Self::next_persisted_version_for_store_async(&self.store, &self.version_counter).await
+    }
+
+    pub fn ttl_observability_snapshot(&self) -> TtlObservabilitySnapshot {
+        let stats = self.ttl_manager.stats();
+        let (expires, avg_ttl_millis) = self.ttl_manager.index_snapshot_for_db(self.db_index);
+        TtlObservabilitySnapshot {
+            expired_keys: stats.keys_expired.load(Ordering::Relaxed),
+            stale_entries_skipped: stats.stale_entries_skipped.load(Ordering::Relaxed),
+            sweep_cycles: stats.sweep_cycles.load(Ordering::Relaxed),
+            expires,
+            avg_ttl_millis,
+        }
     }
 
     fn next_persisted_version_for_store(store: &KvStore, version_counter: &VersionCounter) -> u64 {
@@ -126,6 +142,7 @@ impl Db {
         Db {
             db_index: self.db_index,
             store: self.store.non_transactional_view(),
+            key_layout: self.key_layout,
             version_counter: self.version_counter.clone(),
             ttl_manager: self.ttl_manager.clone(),
             changes: self.changes.clone(),

@@ -79,6 +79,7 @@ impl Db {
         requests: &[(String, StreamReadStart)],
         count: Option<usize>,
     ) -> Result<Vec<(String, Vec<StreamEntry>)>, Error> {
+        global_metrics().record_stream_read();
         let mut result = Vec::new();
         let limit = count.unwrap_or(usize::MAX);
         if limit == 0 {
@@ -115,6 +116,7 @@ impl Db {
         requests: &[(String, StreamReadStart)],
         count: Option<usize>,
     ) -> Result<Vec<(String, Vec<StreamEntry>)>, Error> {
+        global_metrics().record_stream_read();
         let mut result = Vec::new();
         let limit = count.unwrap_or(usize::MAX);
         if limit == 0 {

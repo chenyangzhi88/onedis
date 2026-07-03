@@ -4,15 +4,14 @@
 //
 // Sub-key layout (after the version migration):
 //
-//   [db_prefix:2][namespace:3][key_bytes][0x00][version:8 BE][field/member/…]
+//   [internal_prefix][namespace:3][key_bytes][0x00][version:8 BE][field/member/…]
 //
 // A DeleteRange from `prefix(version)` to `prefix(version+1)` covers exactly
 // the sub-keys that belong to this (key, version) pair.
 
-fn sub_key_range_start(db_index: u16, ns: &[u8; 3], key: &str, version: u64) -> Vec<u8> {
-    let pfx = db_index.to_be_bytes();
-    let mut buf = Vec::with_capacity(2 + 3 + key.len() + 1 + 8);
-    buf.extend_from_slice(&pfx);
+fn sub_key_range_start(_db_index: u16, ns: &[u8; 3], key: &str, version: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(crate::store::TABLE_LOCAL_INTERNAL_PREFIX.len() + 3 + key.len() + 1 + 8);
+    buf.extend_from_slice(crate::store::TABLE_LOCAL_INTERNAL_PREFIX);
     buf.extend_from_slice(ns);
     buf.extend_from_slice(key.as_bytes());
     buf.push(0x00);

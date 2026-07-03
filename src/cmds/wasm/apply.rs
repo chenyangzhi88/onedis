@@ -13,19 +13,29 @@ impl WasmCommand {
                 function,
                 args,
                 read_only,
-            } => match call_wasm(registry, db, &name, &function, &args, read_only).await {
-                Ok(values) => wasm_values_frame(values),
-                Err(error) => wasm_error_frame(error),
-            },
+            } => {
+                let started = Instant::now();
+                let result = call_wasm(registry, db, &name, &function, &args, read_only).await;
+                global_metrics().record_wasm_call(elapsed_us(started), result.is_err());
+                match result {
+                    Ok(values) => wasm_values_frame(values),
+                    Err(error) => wasm_error_frame(error),
+                }
+            }
             Self::Scan {
                 name,
                 function,
                 prefix,
                 limit,
-            } => match registry.scan(db, &name, &function, &prefix, limit).await {
-                Ok(keys) => Frame::Array(keys.into_iter().map(Frame::bulk_string).collect()),
-                Err(error) => wasm_error_frame(error),
-            },
+            } => {
+                let started = Instant::now();
+                let result = registry.scan(db, &name, &function, &prefix, limit).await;
+                global_metrics().record_wasm_call(elapsed_us(started), result.is_err());
+                match result {
+                    Ok(keys) => Frame::Array(keys.into_iter().map(Frame::bulk_string).collect()),
+                    Err(error) => wasm_error_frame(error),
+                }
+            }
             Self::Delete { name } => Frame::Integer(i64::from(registry.delete(&name))),
             Self::FunctionLoad { name, bytes } => match registry.load(&name, &bytes) {
                 Ok(()) => Frame::Ok,

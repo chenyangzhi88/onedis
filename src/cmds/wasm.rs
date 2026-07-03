@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use anyhow::{Error, Result};
 
 use crate::frame::Frame;
+use crate::observability::metrics::{elapsed_us, global_metrics};
 use crate::store::db::Db;
 use crate::wasm::{WasmRegistry, WasmValue};
 

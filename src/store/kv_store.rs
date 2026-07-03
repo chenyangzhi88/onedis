@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -7,11 +8,16 @@ use bytes::Bytes;
 use common::types::options::Options;
 use common::types::status::{Result as KvResult, Status};
 use common::types::write_batch::{WriteBatch, WriteType};
-use kv_engine::db::{
-    DbImpl, DbIterator, IteratorOptions, MergeOperate, ObservedKeyState, ObservedKvValue,
-    OptimisticTransactionDb, SchemalessCompareCondition as CompareCondition, SchemalessTable,
-    SchemalessWriteBatch, Transaction, TransactionDB, TransactionOptions,
+use kv_engine::{
+    api::{
+        DbImpl, KeyRange, ObservedKeyState, ObservedKvValue, RangeBatch, RangeProjection,
+        ScanBudget, SchemalessCompareCondition as CompareCondition, SchemalessRangeQuery,
+        SchemalessTable, SchemalessTableOptions, SchemalessTransaction, SchemalessWriteBatch,
+    },
+    function::MergeOperate,
 };
+
+use crate::observability::metrics::{elapsed_us, global_metrics};
 
 fn trace_lrange_scan_sample() -> Option<u64> {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -30,8 +36,12 @@ fn trace_lrange_scan_sample() -> Option<u64> {
 pub struct KvStore {
     db: Arc<DbImpl>,
     table: SchemalessTable,
-    txn_db: Arc<OptimisticTransactionDb>,
-    txn: Option<Arc<Mutex<Option<Transaction>>>>,
+    table_name: Arc<str>,
+    txn: Option<Arc<KvStoreTransactionContext>>,
+}
+
+struct KvStoreTransactionContext {
+    txns: Mutex<Option<BTreeMap<String, SchemalessTransaction>>>,
 }
 
 include!("kv_store_lifecycle.rs");

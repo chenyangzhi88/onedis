@@ -1,7 +1,6 @@
 impl Db {
-    /// 生成带数据库前缀的主键。
     fn mk(&self, key: &str) -> Vec<u8> {
-        main_key(self.db_index, key)
+        self.key_layout.main_key(self.db_index, key)
     }
 
     /// Read the encoded top-level key value used by Redis WATCH snapshots.

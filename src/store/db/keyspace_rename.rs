@@ -41,6 +41,7 @@ impl Db {
         }
         Self::copy_structure_between_dbs_to_batch_async(
             &self.store,
+            &self.store,
             &mut batch,
             self.db_index,
             old_key,

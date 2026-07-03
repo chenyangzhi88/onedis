@@ -1,16 +1,21 @@
     #[test]
     fn raw_key_namespace_helpers_cover_prefix_bounds_and_delete_batches() {
-        assert_eq!(db_prefix(7), [0, 7]);
-        assert_eq!(db_prefix_exclusive_upper_bound(7).unwrap(), vec![0, 8]);
+        assert!(db_prefix(7).is_empty());
+        assert!(db_prefix_exclusive_upper_bound(7).is_none());
         assert!(db_prefix_exclusive_upper_bound(u16::MAX).is_none());
         assert_eq!(prefix_exclusive_upper_bound(b"ab").unwrap(), b"ac".to_vec());
         assert!(prefix_exclusive_upper_bound(&[0xff, 0xff]).is_none());
-        assert_eq!(main_key(3, "key"), [0, 3, b'k', b'e', b'y']);
-        assert_eq!(main_key_bytes(3, b"key"), [0, 3, b'k', b'e', b'y']);
+        assert_eq!(main_key(3, "key"), [b'k', b'e', b'y']);
+        assert_eq!(main_key_bytes(3, b"key"), [b'k', b'e', b'y']);
         assert_eq!(decode_db_prefix(&[0x12, 0x34, b'k']), Some(0x1234));
         assert_eq!(decode_db_prefix(&[0x12]), None);
 
         let start = sub_key_range_start_bytes(1, &HASH_FIELD_NAMESPACE, b"k", 9);
+        let mut expected_start = internal_prefix(1);
+        expected_start.extend_from_slice(&HASH_FIELD_NAMESPACE);
+        expected_start.extend_from_slice(b"k\0");
+        expected_start.extend_from_slice(&9u64.to_be_bytes());
+        assert_eq!(start, expected_start);
         let end = sub_key_range_end_bytes(1, &HASH_FIELD_NAMESPACE, b"k", 9);
         assert!(start < end);
 

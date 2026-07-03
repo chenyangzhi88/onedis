@@ -37,21 +37,180 @@ fn trace_lrange_sample() -> Option<u64> {
     (count <= 20 || count.is_multiple_of(1000)).then_some(count)
 }
 
-/// 数据库索引前缀（2 字节大端序），用于在共享 KvStore 中隔离不同逻辑数据库的数据。
-fn db_prefix(db_index: u16) -> [u8; 2] {
-    db_index.to_be_bytes()
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyEncodingLayout {
+    /// Legacy on-disk format used before kv-engine tables carried DB isolation.
+    DbPrefixedV1,
+    /// Current on-disk format for new onedis tables. DB isolation lives in the
+    /// kv-engine table, so keys no longer carry the logical DB prefix.
+    TableLocalV2,
+}
+
+const KEY_ENCODING_LAYOUT_META_KEY: &[u8] = b"\x80m\x00layout";
+const DB_PREFIXED_V1_LAYOUT_VALUE: &[u8] = b"db-prefixed-v1";
+const TABLE_LOCAL_V2_LAYOUT_VALUE: &[u8] = b"table-local-v2";
+
+impl KeyEncodingLayout {
+    const CURRENT: Self = Self::TableLocalV2;
+
+    fn db_prefix(self, db_index: u16) -> Vec<u8> {
+        match self {
+            Self::DbPrefixedV1 => db_index.to_be_bytes().to_vec(),
+            Self::TableLocalV2 => Vec::new(),
+        }
+    }
+
+    fn internal_prefix(self, db_index: u16) -> Vec<u8> {
+        match self {
+            Self::DbPrefixedV1 => self.db_prefix(db_index),
+            Self::TableLocalV2 => crate::store::TABLE_LOCAL_INTERNAL_PREFIX.to_vec(),
+        }
+    }
+
+    fn db_prefix_exclusive_upper_bound(self, db_index: u16) -> Option<Vec<u8>> {
+        match self {
+            Self::DbPrefixedV1 => prefix_exclusive_upper_bound(&self.db_prefix(db_index)),
+            Self::TableLocalV2 => None,
+        }
+    }
+
+    fn main_key(self, db_index: u16, key: &str) -> Vec<u8> {
+        self.main_key_bytes(db_index, key.as_bytes())
+    }
+
+    fn main_key_bytes(self, db_index: u16, key: &[u8]) -> Vec<u8> {
+        match self {
+            Self::DbPrefixedV1 => {
+                let pfx = self.db_prefix(db_index);
+                let mut k = Vec::with_capacity(pfx.len() + key.len());
+                k.extend_from_slice(&pfx);
+                k.extend_from_slice(key);
+                k
+            }
+            Self::TableLocalV2 => key.to_vec()
+        }
+    }
+
+    fn sub_key_range_start_bytes(
+        self,
+        db_index: u16,
+        ns: &[u8; 3],
+        key: &[u8],
+        version: u64,
+    ) -> Vec<u8> {
+        match self {
+            Self::DbPrefixedV1 => {
+                let pfx = self.internal_prefix(db_index);
+                let mut buf = Vec::with_capacity(pfx.len() + 3 + key.len() + 1 + 8);
+                buf.extend_from_slice(&pfx);
+                buf.extend_from_slice(ns);
+                buf.extend_from_slice(key);
+                buf.push(0x00);
+                buf.extend_from_slice(&version.to_be_bytes());
+                buf
+            }
+            Self::TableLocalV2 => {
+                let pfx = self.internal_prefix(db_index);
+                let mut buf = Vec::with_capacity(pfx.len() + 3 + key.len() + 1 + 8);
+                buf.extend_from_slice(&pfx);
+                buf.extend_from_slice(ns);
+                buf.extend_from_slice(key);
+                buf.push(0x00);
+                buf.extend_from_slice(&version.to_be_bytes());
+                buf
+            }
+        }
+    }
+
+    fn sub_key_range_end_bytes(
+        self,
+        db_index: u16,
+        ns: &[u8; 3],
+        key: &[u8],
+        version: u64,
+    ) -> Vec<u8> {
+        self.sub_key_range_start_bytes(db_index, ns, key, version + 1)
+    }
+
+    fn is_db_range_delete_start(self, db_index: u16, key: &[u8]) -> bool {
+        match self {
+            Self::DbPrefixedV1 => key == self.db_prefix(db_index),
+            Self::TableLocalV2 => key.is_empty(),
+        }
+    }
+
+    fn logical_main_key_from_raw_key(self, db_index: u16, key: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            Self::DbPrefixedV1 => {
+                let prefix = self.internal_prefix(db_index);
+                if key.len() <= prefix.len() || !key.starts_with(prefix.as_slice()) {
+                    return None;
+                }
+                let rest = &key[prefix.len()..];
+                if is_known_subkey_namespace(rest) {
+                    return None;
+                }
+                Some(key.to_vec())
+            }
+            Self::TableLocalV2 => {
+                let prefix = self.internal_prefix(db_index);
+                if key == KEY_ENCODING_LAYOUT_META_KEY
+                    || key
+                        .strip_prefix(prefix.as_slice())
+                        .is_some_and(is_known_subkey_namespace)
+                {
+                    return None;
+                }
+                Some(key.to_vec())
+            }
+        }
+    }
+
+    fn encode(self) -> &'static [u8] {
+        match self {
+            Self::DbPrefixedV1 => DB_PREFIXED_V1_LAYOUT_VALUE,
+            Self::TableLocalV2 => TABLE_LOCAL_V2_LAYOUT_VALUE,
+        }
+    }
+
+    fn decode(raw: &[u8]) -> Option<Self> {
+        match raw {
+            DB_PREFIXED_V1_LAYOUT_VALUE => Some(Self::DbPrefixedV1),
+            TABLE_LOCAL_V2_LAYOUT_VALUE => Some(Self::TableLocalV2),
+            _ => None,
+        }
+    }
+
+    fn open_or_initialize_for_table(store: &KvStore) -> Self {
+        if let Some(raw) = store.get_raw(KEY_ENCODING_LAYOUT_META_KEY) {
+            return Self::decode(&raw).unwrap_or_else(|| {
+                panic!(
+                    "unsupported onedis key encoding layout metadata: {:?}",
+                    String::from_utf8_lossy(&raw)
+                )
+            });
+        }
+        if !store.scan_range_raw_limited(&[], None, 1).is_empty() {
+            panic!(
+                "onedis table contains data without key encoding metadata; remove old data before starting with TableLocalV2"
+            );
+        }
+        store.put_raw(KEY_ENCODING_LAYOUT_META_KEY, Self::TableLocalV2.encode());
+        Self::TableLocalV2
+    }
+}
+
+/// 数据库索引前缀（2 字节大端序），用于兼容当前 DbPrefixedV1 磁盘格式。
+fn db_prefix(db_index: u16) -> Vec<u8> {
+    KeyEncodingLayout::CURRENT.db_prefix(db_index)
+}
+
+fn internal_prefix(db_index: u16) -> Vec<u8> {
+    KeyEncodingLayout::CURRENT.internal_prefix(db_index)
 }
 
 fn db_prefix_exclusive_upper_bound(db_index: u16) -> Option<Vec<u8>> {
-    let mut upper = db_prefix(db_index).to_vec();
-    for idx in (0..upper.len()).rev() {
-        if upper[idx] != u8::MAX {
-            upper[idx] += 1;
-            upper.truncate(idx + 1);
-            return Some(upper);
-        }
-    }
-    None
+    KeyEncodingLayout::CURRENT.db_prefix_exclusive_upper_bound(db_index)
 }
 
 fn prefix_exclusive_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
@@ -66,37 +225,85 @@ fn prefix_exclusive_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// 生成带数据库前缀的主键（用于 string/hash-meta/set-meta/list-meta/zset-meta 等直接键）。
+/// 生成 DbPrefixedV1 主键（用于 string/hash-meta/set-meta/list-meta/zset-meta 等直接键）。
 fn main_key(db_index: u16, key: &str) -> Vec<u8> {
-    let pfx = db_prefix(db_index);
-    let mut k = Vec::with_capacity(2 + key.len());
-    k.extend_from_slice(&pfx);
-    k.extend_from_slice(key.as_bytes());
-    k
+    KeyEncodingLayout::CURRENT.main_key(db_index, key)
 }
 
 fn main_key_bytes(db_index: u16, key: &[u8]) -> Vec<u8> {
-    let pfx = db_prefix(db_index);
-    let mut k = Vec::with_capacity(2 + key.len());
-    k.extend_from_slice(&pfx);
-    k.extend_from_slice(key);
-    k
+    KeyEncodingLayout::CURRENT.main_key_bytes(db_index, key)
 }
 
 fn sub_key_range_start_bytes(db_index: u16, ns: &[u8; 3], key: &[u8], version: u64) -> Vec<u8> {
-    let pfx = db_prefix(db_index);
-    let mut buf = Vec::with_capacity(2 + 3 + key.len() + 1 + 8);
-    buf.extend_from_slice(&pfx);
-    buf.extend_from_slice(ns);
-    buf.extend_from_slice(key);
-    buf.push(0x00);
-    buf.extend_from_slice(&version.to_be_bytes());
-    buf
+    KeyEncodingLayout::CURRENT.sub_key_range_start_bytes(db_index, ns, key, version)
 }
 
 #[inline]
 fn sub_key_range_end_bytes(db_index: u16, ns: &[u8; 3], key: &[u8], version: u64) -> Vec<u8> {
-    sub_key_range_start_bytes(db_index, ns, key, version + 1)
+    KeyEncodingLayout::CURRENT.sub_key_range_end_bytes(db_index, ns, key, version)
+}
+
+fn sub_key_namespaces_for_type(type_tag: u8) -> &'static [&'static [u8; 3]] {
+    match type_tag {
+        TYPE_HASH => &[&HASH_FIELD_NAMESPACE, &HASH_FIELD_EXPIRE_NAMESPACE],
+        TYPE_SET => &[&SET_MEMBER_NAMESPACE, &SET_SLOT_NAMESPACE, &SET_MEMBER_SLOT_NAMESPACE],
+        TYPE_SORTED_SET => &[&ZSET_MEMBER_NAMESPACE, &ZSET_RANK_NAMESPACE],
+        TYPE_LIST => &[&LIST_ITEM_NAMESPACE],
+        TYPE_STREAM => &[
+            &STREAM_ENTRY_NAMESPACE,
+            &STREAM_GROUP_NAMESPACE,
+            &STREAM_PEL_NAMESPACE,
+            &STREAM_CONSUMER_NAMESPACE,
+        ],
+        TYPE_JSON => &[&JSON_NODE_NAMESPACE],
+        TYPE_VECTOR => &[
+            &VECTOR_META_NAMESPACE,
+            &VECTOR_DOC_NAMESPACE,
+            &VECTOR_TAG_NAMESPACE,
+            &VECTOR_NUMERIC_NAMESPACE,
+            &VECTOR_SEGMENT_NAMESPACE,
+            &VECTOR_GRAPH_NAMESPACE,
+        ],
+        _ => &[],
+    }
+}
+
+fn delete_sub_keys_by_scan_to_batch_bytes(
+    store: &KvStore,
+    batch: &mut WriteBatch,
+    db_index: u16,
+    key: &[u8],
+    version: u64,
+    type_tag: u8,
+) {
+    for ns in sub_key_namespaces_for_type(type_tag) {
+        let start = sub_key_range_start_bytes(db_index, ns, key, version);
+        let end = sub_key_range_end_bytes(db_index, ns, key, version);
+        for (sub_key, _) in store.scan_range_raw_limited(&start, Some(end), usize::MAX) {
+            batch.delete(&sub_key);
+        }
+    }
+}
+
+fn delete_sub_keys_by_scan_to_batch(
+    store: &KvStore,
+    batch: &mut WriteBatch,
+    db_index: u16,
+    key: &str,
+    version: u64,
+    type_tag: u8,
+) {
+    delete_sub_keys_by_scan_to_batch_bytes(store, batch, db_index, key.as_bytes(), version, type_tag);
+}
+
+fn delete_sub_keys_to_batch(
+    batch: &mut WriteBatch,
+    db_index: u16,
+    key: &str,
+    version: u64,
+    type_tag: u8,
+) {
+    delete_sub_keys_to_batch_bytes(batch, db_index, key.as_bytes(), version, type_tag);
 }
 
 fn delete_sub_keys_to_batch_bytes(
@@ -196,6 +403,7 @@ fn delete_sub_keys_to_batch_bytes(
     }
 }
 
+#[cfg(test)]
 fn decode_db_prefix(key: &[u8]) -> Option<u16> {
     let prefix = key.get(..2)?;
     Some(u16::from_be_bytes(prefix.try_into().ok()?))
@@ -223,18 +431,19 @@ fn is_known_subkey_namespace(rest: &[u8]) -> bool {
         || rest.starts_with(&VECTOR_GRAPH_NAMESPACE)
 }
 
-fn logical_main_key_from_raw_key(key: &[u8]) -> Option<Vec<u8>> {
-    if key.len() <= 2 {
-        return None;
-    }
-    let rest = &key[2..];
-    if is_known_subkey_namespace(rest) {
-        return None;
-    }
-    Some(key.to_vec())
+fn logical_main_key_from_raw_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    key: &[u8],
+) -> Option<Vec<u8>> {
+    layout.logical_main_key_from_raw_key(db_index, key)
 }
 
-fn collect_logical_mutations(batch: &WriteBatch) -> (Vec<Vec<u8>>, Vec<u16>) {
+fn collect_logical_mutations(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    batch: &WriteBatch,
+) -> (Vec<Vec<u8>>, Vec<u16>) {
     let mut keys = Vec::new();
     let mut dbs = Vec::new();
     for (write_type, key, _) in batch.iter() {
@@ -244,14 +453,12 @@ fn collect_logical_mutations(batch: &WriteBatch) -> (Vec<Vec<u8>>, Vec<u16>) {
             | common::types::write_batch::WriteType::PutBlobExternal
             | common::types::write_batch::WriteType::Delete
             | common::types::write_batch::WriteType::Merge => {
-                if let Some(key) = logical_main_key_from_raw_key(key) {
+                if let Some(key) = logical_main_key_from_raw_key(layout, db_index, key) {
                     keys.push(key);
                 }
             }
             common::types::write_batch::WriteType::RangeDelete => {
-                if key.len() == 2
-                    && let Some(db_index) = decode_db_prefix(key)
-                {
+                if layout.is_db_range_delete_start(db_index, key) {
                     dbs.push(db_index);
                 }
             }

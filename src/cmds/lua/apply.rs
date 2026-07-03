@@ -1,25 +1,35 @@
 impl LuaCommand {
     pub fn apply(self, db: &Db) -> Result<Frame> {
         match self {
-            Self::Eval(eval) => lua_registry().eval(db, eval),
+            Self::Eval(eval) => {
+                let started = Instant::now();
+                let result = lua_registry().eval(db, eval);
+                global_metrics().record_lua_eval(elapsed_us(started), result.is_err());
+                result
+            }
             Self::EvalSha {
                 sha,
                 keys,
                 args,
                 read_only,
             } => {
-                let script = lua_registry()
-                    .get(&sha)?
-                    .ok_or_else(|| Error::msg("NOSCRIPT No matching script. Please use EVAL."))?;
-                lua_registry().eval(
-                    db,
-                    LuaEval {
-                        script,
-                        keys,
-                        args,
-                        read_only,
-                    },
-                )
+                let started = Instant::now();
+                let result = (|| {
+                    let script = lua_registry().get(&sha)?.ok_or_else(|| {
+                        Error::msg("NOSCRIPT No matching script. Please use EVAL.")
+                    })?;
+                    lua_registry().eval(
+                        db,
+                        LuaEval {
+                            script,
+                            keys,
+                            args,
+                            read_only,
+                        },
+                    )
+                })();
+                global_metrics().record_lua_eval(elapsed_us(started), result.is_err());
+                result
             }
             Self::ScriptLoad(script) => Ok(Frame::bulk_string(lua_registry().load(&script)?)),
             Self::ScriptExists(shas) => Ok(Frame::Array(

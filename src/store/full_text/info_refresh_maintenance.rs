@@ -31,13 +31,9 @@ impl Db {
         &self,
         raw_keys: &[Vec<u8>],
     ) -> Result<(), Error> {
-        let prefix = db_prefix(self.db_index);
         let mut keys = HashSet::new();
         for raw_key in raw_keys {
-            let Some(rest) = raw_key.strip_prefix(&prefix) else {
-                continue;
-            };
-            let Ok(key) = String::from_utf8(rest.to_vec()) else {
+            let Ok(key) = String::from_utf8(raw_key.clone()) else {
                 continue;
             };
             keys.insert(key);

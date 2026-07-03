@@ -103,6 +103,38 @@ pub struct StreamClaimedEntries {
     pub entries: Vec<StreamEntry>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TtlObservabilitySnapshot {
+    pub expired_keys: u64,
+    pub stale_entries_skipped: u64,
+    pub sweep_cycles: u64,
+    pub expires: usize,
+    pub avg_ttl_millis: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FullTextObservabilitySnapshot {
+    pub creating: u64,
+    pub backfilling: u64,
+    pub ready: u64,
+    pub dirty: u64,
+    pub rebuilding: u64,
+    pub dropping: u64,
+    pub outbox_pending: u64,
+    pub backfill_pending: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StreamObservabilitySnapshot {
+    pub groups: u64,
+    pub pending_entries: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VectorObservabilitySnapshot {
+    pub indexes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StreamId {
     pub ms: u64,

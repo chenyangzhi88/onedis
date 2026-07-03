@@ -13,13 +13,16 @@ impl Db {
             return Ok(false);
         }
 
+        let source_store = store.for_db_index(source_db_index);
+        let target_store = store.for_db_index(target_db_index);
+
         let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(store, source_db_index, source_key)
+            Self::load_live_raw_for_db_with_backend(&source_store, source_db_index, source_key)
         else {
             return Ok(false);
         };
         let target_raw =
-            Self::load_live_raw_for_db_with_backend(store, target_db_index, target_key);
+            Self::load_live_raw_for_db_with_backend(&target_store, target_db_index, target_key);
         if target_raw.is_some() && !replace {
             return Ok(false);
         }
@@ -44,7 +47,8 @@ impl Db {
             }
         }
         Self::copy_structure_between_dbs_to_batch(
-            store,
+            &source_store,
+            &target_store,
             &mut batch,
             source_db_index,
             source_key,
@@ -58,7 +62,7 @@ impl Db {
         {
             ttl_manager.add_to_batch(&mut batch, header.expire_ms, target_db_index, target_key);
         }
-        store.write_batch(&batch);
+        target_store.write_batch(&batch);
         Ok(true)
     }
 
@@ -76,13 +80,16 @@ impl Db {
             return Ok(false);
         }
 
+        let source_store = store.for_db_index(source_db_index);
+        let target_store = store.for_db_index(target_db_index);
+
         let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(store, source_db_index, source_key)
+            Self::load_live_raw_for_db_with_backend(&source_store, source_db_index, source_key)
         else {
             return Ok(false);
         };
         let target_raw =
-            Self::load_live_raw_for_db_with_backend(store, target_db_index, target_key);
+            Self::load_live_raw_for_db_with_backend(&target_store, target_db_index, target_key);
         if target_raw.is_some() && !replace {
             return Ok(false);
         }
@@ -107,7 +114,8 @@ impl Db {
             }
         }
         Self::copy_structure_between_dbs_to_batch_async(
-            store,
+            &source_store,
+            &target_store,
             &mut batch,
             source_db_index,
             source_key,
@@ -122,7 +130,7 @@ impl Db {
         {
             ttl_manager.add_to_batch(&mut batch, header.expire_ms, target_db_index, target_key);
         }
-        store.write_batch(&batch);
+        target_store.write_batch(&batch);
         Ok(true)
     }
 

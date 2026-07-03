@@ -10,10 +10,14 @@ impl Save {
     }
 
     pub fn apply_sync(self, db_manager: &DatabaseManager) -> Result<Frame, Error> {
-        let db = db_manager.store().db();
-        db.manual_compaction()
+        db_manager
+            .store()
+            .manual_compaction()
             .map_err(|err| Error::msg(err.to_string()))?;
-        db.sync_wal().map_err(|err| Error::msg(err.to_string()))?;
+        db_manager
+            .store()
+            .sync_wal()
+            .map_err(|err| Error::msg(err.to_string()))?;
         Ok(Frame::Ok)
     }
 }

@@ -17,7 +17,7 @@ use onedis_server::{
 };
 use tempfile::TempDir;
 
-const MATRIX: &str = include_str!("../../../docs/onedis-server/full_text_redis_compat_matrix.md");
+const MATRIX: &str = include_str!("../../docs/onedis-server/full_text_redis_compat_matrix.md");
 
 const REDIS_SEARCH_COMMANDS: &[&str] = &[
     "FT._LIST",

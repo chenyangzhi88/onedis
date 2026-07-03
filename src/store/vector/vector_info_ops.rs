@@ -129,4 +129,21 @@ impl Db {
             ),
         ])
     }
+
+    pub fn vector_observability_snapshot(&self) -> VectorObservabilitySnapshot {
+        let mut snapshot = VectorObservabilitySnapshot::default();
+        let now = super::now_ms();
+        for key in self.logical_keys() {
+            let Some(raw) = self.store.get_raw(&self.mk(&key)) else {
+                continue;
+            };
+            let Some(header) = decode_meta_header(&raw) else {
+                continue;
+            };
+            if header.type_tag == TYPE_VECTOR && (header.expire_ms == 0 || now < header.expire_ms) {
+                snapshot.indexes += 1;
+            }
+        }
+        snapshot
+    }
 }

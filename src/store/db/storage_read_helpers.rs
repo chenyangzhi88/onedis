@@ -1,25 +1,24 @@
 impl Db {
     fn logical_keys(&self) -> Vec<String> {
-        let prefix = db_prefix(self.db_index);
         self.store
-            .scan_prefix_raw(&prefix)
+            .scan_range_raw_limited(&[], None, usize::MAX)
             .into_iter()
             .filter_map(|(k, _)| {
-                // 去掉 2 字节 db 前缀后转为字符串；
-                // 命名空间子键（hash/list/set/zset）包含 0xFF/0x00 等非 UTF-8 字节，
-                // 会被 String::from_utf8 过滤掉，只保留主键。
-                String::from_utf8(k[prefix.len()..].to_vec()).ok()
+                let key = logical_main_key_from_raw_key(self.key_layout, self.db_index, &k)?;
+                String::from_utf8(key).ok()
             })
             .collect()
     }
 
     async fn logical_keys_async(&self) -> Vec<String> {
-        let prefix = db_prefix(self.db_index);
         self.store
-            .scan_prefix_raw_async(&prefix)
+            .scan_range_raw_limited_async(&[], None, usize::MAX)
             .await
             .into_iter()
-            .filter_map(|(k, _)| String::from_utf8(k[prefix.len()..].to_vec()).ok())
+            .filter_map(|(k, _)| {
+                let key = logical_main_key_from_raw_key(self.key_layout, self.db_index, &k)?;
+                String::from_utf8(key).ok()
+            })
             .collect()
     }
 
@@ -34,10 +33,12 @@ impl Db {
             if rows.len() >= limit {
                 break;
             }
-            let Some(key_bytes) = raw_key.strip_prefix(&db_prefix(self.db_index)) else {
+            let Some(key_bytes) =
+                logical_main_key_from_raw_key(self.key_layout, self.db_index, &raw_key)
+            else {
                 continue;
             };
-            let Ok(key) = String::from_utf8(key_bytes.to_vec()) else {
+            let Ok(key) = String::from_utf8(key_bytes) else {
                 continue;
             };
             if let Ok(Some(value)) = self.get_string_bytes_async(&key).await {

@@ -1,5 +1,12 @@
 impl Db {
     fn fulltext_refresh_index(&self, index: &str, force: bool) -> Result<(), Error> {
+        let started = Instant::now();
+        let result = self.fulltext_refresh_index_inner(index, force);
+        global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
+        result
+    }
+
+    fn fulltext_refresh_index_inner(&self, index: &str, force: bool) -> Result<(), Error> {
         let mut meta = self.read_fulltext_meta_direct(index)?;
         if matches!(meta.state, FullTextIndexState::Dropping) {
             return Ok(());

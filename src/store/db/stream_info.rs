@@ -129,4 +129,31 @@ impl Db {
             .collect())
     }
 
+    pub fn stream_observability_snapshot(&self) -> StreamObservabilitySnapshot {
+        let mut snapshot = StreamObservabilitySnapshot::default();
+        let now = now_ms();
+        for key in self.logical_keys() {
+            let Some(raw) = self.store.get_raw(&self.mk(&key)) else {
+                continue;
+            };
+            let Some(header) = decode_meta_header(&raw) else {
+                continue;
+            };
+            if header.type_tag != TYPE_STREAM {
+                continue;
+            }
+            if header.expire_ms > 0 && now >= header.expire_ms {
+                continue;
+            }
+            let prefix = stream_group_prefix(self.db_index, &key, header.version);
+            for (group_key, _) in self.store.scan_prefix_raw(&prefix) {
+                let name =
+                    String::from_utf8(group_key[prefix.len()..].to_vec()).unwrap_or_default();
+                snapshot.groups += 1;
+                snapshot.pending_entries +=
+                    self.stream_pending_raw(&key, header.version, &name).len() as u64;
+            }
+        }
+        snapshot
+    }
 }

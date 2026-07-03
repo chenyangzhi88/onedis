@@ -1,6 +1,6 @@
 fn stream_entry_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + STREAM_ENTRY_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_ENTRY_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -10,7 +10,7 @@ fn stream_entry_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
 
 fn stream_group_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + STREAM_GROUP_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_GROUP_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -20,7 +20,7 @@ fn stream_group_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
 
 fn stream_pel_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + STREAM_PEL_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_PEL_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -30,7 +30,7 @@ fn stream_pel_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
 
 fn stream_consumer_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + STREAM_CONSUMER_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_CONSUMER_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);

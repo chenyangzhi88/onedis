@@ -3,8 +3,11 @@ use anyhow::{Error, Result};
 use crate::{
     frame::Frame,
     lua::{LuaEval, lua_registry},
+    observability::metrics::{elapsed_us, global_metrics},
     store::db::Db,
 };
+
+use std::time::Instant;
 
 include!("lua/command_types.rs");
 include!("lua/parsing.rs");

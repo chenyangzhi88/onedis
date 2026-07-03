@@ -14,6 +14,8 @@ use crate::frame::Frame;
 use crate::network::connection::Connection;
 use crate::network::session::{Session, WatchedKey};
 use crate::network::session_manager::SessionManager;
+use crate::observability::metrics::{OnedisMetrics, global_metrics};
+use crate::observability::prometheus::spawn_prometheus_endpoint;
 use crate::store::db::decode_string_bytes_slice;
 use crate::store::db_manager::DatabaseManager;
 use crate::wasm::WasmRegistry;
@@ -25,6 +27,7 @@ pub struct Server {
     db_manager: Arc<DatabaseManager>,
     command_executor: Arc<CommandExecutor>,
     wasm_registry: Arc<WasmRegistry>,
+    metrics: Arc<OnedisMetrics>,
 }
 
 impl Server {
@@ -34,6 +37,17 @@ impl Server {
         let command_executor =
             Arc::new(CommandExecutor::from_env().expect("failed to start command executor"));
         let wasm_registry = Arc::new(WasmRegistry::new());
+        let metrics = global_metrics();
+        metrics.configure(args.databases, args.maxclients);
+        metrics.initialize_command_index();
+        if args.observability_enabled && args.metrics_port != 0 {
+            spawn_prometheus_endpoint(
+                metrics.clone(),
+                db_manager.clone(),
+                args.metrics_bind.clone(),
+                args.metrics_port,
+            );
+        }
         if let Some(mut monitor_config) =
             CoordinatorMonitorConfig::from_options(db_manager.options())
         {
@@ -43,7 +57,7 @@ impl Server {
             let session_manager_for_metrics = session_manager.clone();
             let args_for_metrics = args.clone();
             let _monitor_task = spawn_coordinator_monitor(
-                db_manager.store().db(),
+                db_manager.store().engine_handle_for_monitoring(),
                 monitor_config,
                 Arc::new(move || {
                     vec![
@@ -73,6 +87,7 @@ impl Server {
             db_manager,
             command_executor,
             wasm_registry,
+            metrics,
         }
     }
 
@@ -84,16 +99,19 @@ impl Server {
                 loop {
                     match listener.accept().await {
                         Ok((stream, _address)) => {
+                            self.metrics.connection_accepted();
                             // 检查 maxclients 限制
                             if self
                                 .session_manager
                                 .is_over_max_clients(self.args.maxclients)
                             {
+                                self.metrics.connection_rejected("maxclients");
                                 let mut connection =
                                     crate::network::connection::Connection::new(stream);
                                 let error_frame = crate::frame::Frame::Error(
                                     "ERR max number of clients reached".to_string(),
                                 );
+                                self.metrics.add_output_bytes(error_frame.as_bytes().len());
                                 tokio::spawn(async move {
                                     connection.write_bytes(error_frame.as_bytes()).await;
                                 });
@@ -143,6 +161,7 @@ pub struct Handler {
     wasm_registry: Arc<WasmRegistry>,
     args: Arc<ResolvedArgs>,
     transaction_db: Option<crate::store::db::Db>,
+    metrics: Arc<OnedisMetrics>,
 }
 
 impl Handler {

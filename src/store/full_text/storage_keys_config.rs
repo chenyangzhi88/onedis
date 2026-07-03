@@ -18,7 +18,7 @@ fn decode_fulltext_meta(raw: &[u8]) -> Result<FullTextIndexMeta, Error> {
 }
 
 fn fulltext_meta_prefix(db_index: u16) -> Vec<u8> {
-    let mut key = db_prefix(db_index).to_vec();
+    let mut key = internal_prefix(db_index);
     key.extend_from_slice(&FULLTEXT_META_NAMESPACE);
     key
 }
@@ -128,7 +128,7 @@ fn fulltext_syn_group_from_key(db_index: u16, index: &str, key: &[u8]) -> Option
 }
 
 fn fulltext_file_prefix(db_index: u16, index: &str) -> Vec<u8> {
-    let mut key = db_prefix(db_index).to_vec();
+    let mut key = internal_prefix(db_index);
     key.extend_from_slice(&FULLTEXT_FILE_NAMESPACE);
     key.extend_from_slice(index.as_bytes());
     key.push(0x00);
@@ -159,7 +159,7 @@ fn fulltext_index_from_meta_key(db_index: u16, key: &[u8]) -> Option<String> {
 }
 
 fn fulltext_outbox_prefix(db_index: u16, index: &str) -> Vec<u8> {
-    let mut key = db_prefix(db_index).to_vec();
+    let mut key = internal_prefix(db_index);
     key.extend_from_slice(&FULLTEXT_OUTBOX_NAMESPACE);
     key.extend_from_slice(index.as_bytes());
     key.push(0x00);

@@ -141,7 +141,7 @@ fn json_type_name(value: &JsonValue) -> &'static str {
 
 fn json_node_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + JSON_NODE_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&JSON_NODE_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);

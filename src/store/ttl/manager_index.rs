@@ -6,7 +6,7 @@ impl TtlManager {
         let mut batch = WriteBatch::new();
         self.add_to_batch(&mut batch, expire_ms, db_index, &key);
         if batch.count() > 0 {
-            self.store.write_batch(&batch);
+            self.store_for_db(db_index).write_batch(&batch);
         }
     }
 
@@ -14,6 +14,8 @@ impl TtlManager {
         if expire_ms == 0 {
             return;
         }
+        self.db_count
+            .fetch_max(db_index as u32 + 1, Ordering::AcqRel);
         batch.put(&ttl_index_key(expire_ms, db_index, key), TTL_INDEX_VALUE);
         self.notify.notify_one();
     }
@@ -22,7 +24,7 @@ impl TtlManager {
         let mut batch = WriteBatch::new();
         self.remove_to_batch(&mut batch, db_index, key);
         if batch.count() > 0 {
-            self.store.write_batch(&batch);
+            self.store_for_db(db_index).write_batch(&batch);
         }
     }
 
@@ -44,14 +46,14 @@ impl TtlManager {
     }
 
     pub fn remove_db_to_batch(&self, batch: &mut WriteBatch, db_index: u16) {
-        for (key, _) in self.store.scan_prefix_raw(&ttl_db_prefix(db_index)) {
+        for (key, _) in self.store_for_db(db_index).scan_prefix_raw(&ttl_db_prefix(db_index)) {
             batch.delete(&key);
         }
     }
 
     pub async fn remove_db_to_batch_async(&self, batch: &mut WriteBatch, db_index: u16) {
         for (key, _) in self
-            .store
+            .store_for_db(db_index)
             .scan_prefix_raw_async(&ttl_db_prefix(db_index))
             .await
         {
@@ -69,28 +71,24 @@ impl TtlManager {
             .store(num_dbs.max(1) as u32, Ordering::Release);
         let mut with_ttl = 0usize;
         for db_idx in 0..num_dbs {
-            for (ttl_key, _) in self.store.scan_prefix_raw(&ttl_db_prefix(db_idx)) {
+            for (ttl_key, _) in self.store_for_db(db_idx).scan_prefix_raw(&ttl_db_prefix(db_idx)) {
                 if parse_ttl_index_key(&ttl_key).is_some() {
                     with_ttl += 1;
                 }
             }
         }
 
-        if let Some(raw) = self.store.get_raw(VERSION_COUNTER_KEY) {
-            if raw.len() == 8 {
+        for db_idx in 0..num_dbs.max(1) {
+            if let Some(raw) = self.store_for_db(db_idx).get_raw(VERSION_COUNTER_KEY)
+                && raw.len() == 8
+            {
                 let max_version = u64::from_be_bytes(raw[0..8].try_into().unwrap());
                 version_counter.observe(max_version);
-                info!(
-                    "TTL index rebuilt from namespace: {} keys with TTL, checkpoint_version = {}",
-                    with_ttl,
-                    version_counter.current()
-                );
             }
-        }
-
-        for (version_key, _) in self.store.scan_prefix_raw(VERSION_MARK_PREFIX) {
-            if let Some(version) = parse_version_mark_key(&version_key) {
-                version_counter.observe(version);
+            for (version_key, _) in self.store_for_db(db_idx).scan_prefix_raw(VERSION_MARK_PREFIX) {
+                if let Some(version) = parse_version_mark_key(&version_key) {
+                    version_counter.observe(version);
+                }
             }
         }
 
@@ -99,7 +97,9 @@ impl TtlManager {
             let mut batch = WriteBatch::new();
             reserve_version_high_water_to_batch(&mut batch, max_version);
             if batch.count() > 0 {
-                self.store.write_batch(&batch);
+                for db_idx in 0..num_dbs.max(1) {
+                    self.store_for_db(db_idx).write_batch(&batch);
+                }
             }
         }
 
@@ -116,7 +116,7 @@ impl TtlManager {
         let mut with_ttl = 0usize;
         for db_idx in 0..num_dbs {
             for (ttl_key, _) in self
-                .store
+                .store_for_db(db_idx)
                 .scan_prefix_raw_async(&ttl_db_prefix(db_idx))
                 .await
             {
@@ -126,21 +126,21 @@ impl TtlManager {
             }
         }
 
-        if let Some(raw) = self.store.get_raw(VERSION_COUNTER_KEY)
-            && raw.len() == 8
-        {
-            let max_version = u64::from_be_bytes(raw[0..8].try_into().unwrap());
-            version_counter.observe(max_version);
-            info!(
-                "TTL index rebuilt from namespace: {} keys with TTL, checkpoint_version = {}",
-                with_ttl,
-                version_counter.current()
-            );
-        }
-
-        for (version_key, _) in self.store.scan_prefix_raw_async(VERSION_MARK_PREFIX).await {
-            if let Some(version) = parse_version_mark_key(&version_key) {
-                version_counter.observe(version);
+        for db_idx in 0..num_dbs.max(1) {
+            if let Some(raw) = self.store_for_db(db_idx).get_raw(VERSION_COUNTER_KEY)
+                && raw.len() == 8
+            {
+                let max_version = u64::from_be_bytes(raw[0..8].try_into().unwrap());
+                version_counter.observe(max_version);
+            }
+            for (version_key, _) in self
+                .store_for_db(db_idx)
+                .scan_prefix_raw_async(VERSION_MARK_PREFIX)
+                .await
+            {
+                if let Some(version) = parse_version_mark_key(&version_key) {
+                    version_counter.observe(version);
+                }
             }
         }
 
@@ -149,7 +149,9 @@ impl TtlManager {
             let mut batch = WriteBatch::new();
             reserve_version_high_water_to_batch(&mut batch, max_version);
             if batch.count() > 0 {
-                self.store.write_batch(&batch);
+                for db_idx in 0..num_dbs.max(1) {
+                    self.store_for_db(db_idx).write_batch(&batch);
+                }
             }
         }
 

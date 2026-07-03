@@ -15,7 +15,8 @@ impl Db {
     }
 
     async fn copy_structure_between_dbs_to_batch_async(
-        store: &KvStore,
+        source_store: &KvStore,
+        target_store: &KvStore,
         batch: &mut WriteBatch,
         source_db_index: u16,
         source_key: &str,
@@ -27,7 +28,7 @@ impl Db {
         let Some(header) = decode_meta_header(raw) else {
             return;
         };
-        let target_version = Self::next_persisted_version_for_store(store, version_counter);
+        let target_version = Self::next_persisted_version_for_store(target_store, version_counter);
 
         if let Some(meta) = decode_list_meta(raw) {
             batch.put(
@@ -35,7 +36,7 @@ impl Db {
                 &encode_list_meta(meta.expire_ms, target_version, meta.head, meta.tail),
             );
             Self::copy_prefixed_namespace_to_batch(
-                store,
+                source_store,
                 batch,
                 list_item_prefix(source_db_index, source_key, meta.version),
                 list_item_prefix(target_db_index, target_key, target_version),
@@ -70,7 +71,7 @@ impl Db {
                     stream_consumer_prefix(target_db_index, target_key, target_version),
                 ),
             ] {
-                Self::copy_prefixed_namespace_to_batch(store, batch, source_ns, target_ns).await;
+                Self::copy_prefixed_namespace_to_batch(source_store, batch, source_ns, target_ns).await;
             }
             return;
         }
@@ -82,14 +83,14 @@ impl Db {
                     &encode_hash_meta(header.expire_ms, target_version),
                 );
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     hash_field_prefix(source_db_index, source_key, header.version),
                     hash_field_prefix(target_db_index, target_key, target_version),
                 )
                 .await;
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     hash_field_expire_prefix(source_db_index, source_key, header.version),
                     hash_field_expire_prefix(target_db_index, target_key, target_version),
@@ -102,14 +103,14 @@ impl Db {
                     &encode_zset_meta(header.expire_ms, target_version),
                 );
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     zset_member_prefix(source_db_index, source_key, header.version),
                     zset_member_prefix(target_db_index, target_key, target_version),
                 )
                 .await;
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     zset_rank_prefix(source_db_index, source_key, header.version),
                     zset_rank_prefix(target_db_index, target_key, target_version),
@@ -125,21 +126,21 @@ impl Db {
                     &encode_set_meta(meta.expire_ms, target_version, meta.len),
                 );
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     set_member_prefix(source_db_index, source_key, meta.version),
                     set_member_prefix(target_db_index, target_key, target_version),
                 )
                 .await;
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     set_slot_prefix(source_db_index, source_key, meta.version),
                     set_slot_prefix(target_db_index, target_key, target_version),
                 )
                 .await;
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     set_member_slot_prefix(source_db_index, source_key, meta.version),
                     set_member_slot_prefix(target_db_index, target_key, target_version),
@@ -152,7 +153,7 @@ impl Db {
                     &re_encode_meta_with_version(raw, target_version),
                 );
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     json_node_prefix(source_db_index, source_key, header.version),
                     json_node_prefix(target_db_index, target_key, target_version),
@@ -165,7 +166,7 @@ impl Db {
                     &re_encode_meta_with_version(raw, target_version),
                 );
                 Self::copy_prefixed_namespace_to_batch(
-                    store,
+                    source_store,
                     batch,
                     list_item_prefix(source_db_index, source_key, header.version),
                     list_item_prefix(target_db_index, target_key, target_version),
@@ -196,7 +197,7 @@ impl Db {
                     ),
                 ] {
                     Self::copy_prefixed_namespace_to_batch(
-                        store,
+                source_store,
                         batch,
                         source_prefix,
                         target_prefix,

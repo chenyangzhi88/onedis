@@ -398,6 +398,10 @@ function zhSidebar(): DefaultTheme.SidebarItem[] {
           text: '主从同步',
           link: '/zh/docs/advance/replication',
         },
+        {
+          text: '可观测性',
+          link: '/zh/docs/advance/observability',
+        },
       ],
     }
   ]

@@ -53,7 +53,7 @@ impl Db {
     }
 
     fn record_or_publish_mutations(&self, batch: &WriteBatch) {
-        let (keys, dbs) = collect_logical_mutations(batch);
+        let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, batch);
         if keys.is_empty() && dbs.is_empty() {
             return;
         }
@@ -107,7 +107,7 @@ impl Db {
                 | common::types::write_batch::WriteType::PutBlobExternal
                 | common::types::write_batch::WriteType::Delete
                 | common::types::write_batch::WriteType::Merge => {
-                    if let Some(key) = logical_main_key_from_raw_key(key) {
+                    if let Some(key) = logical_main_key_from_raw_key(self.key_layout, self.db_index, key) {
                         keys.push(key);
                     }
                 }
@@ -144,7 +144,7 @@ impl Db {
                 | WriteType::PutBlobExternal
                 | WriteType::Delete
                 | WriteType::Merge => {
-                    if let Some(key) = logical_main_key_from_raw_key(key) {
+                    if let Some(key) = logical_main_key_from_raw_key(self.key_layout, self.db_index, key) {
                         keys.push(key);
                     }
                 }

@@ -10,17 +10,19 @@ use bytes::Bytes;
 use common::types::status::Status;
 use common::types::write_batch::{WriteBatch, WriteType};
 use dashmap::{DashMap, mapref::entry::Entry};
-use kv_engine::db::SchemalessCompareCondition as CompareCondition;
+use kv_engine::api::SchemalessCompareCondition as CompareCondition;
 use serde_json::Value as JsonValue;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::kv_store::KvStore;
 use super::ttl::{
     TYPE_HASH, TYPE_JSON, TYPE_LIST, TYPE_SET, TYPE_SORTED_SET, TYPE_STREAM, TYPE_STRING,
-    TYPE_VECTOR, TtlManager, VersionCounter, decode_meta_header, delete_sub_keys_to_batch,
-    patch_meta_expire_ms, reserve_version_high_water_to_batch,
+    TYPE_VECTOR, TtlManager, VersionCounter, decode_meta_header, patch_meta_expire_ms,
+    reserve_version_high_water_to_batch,
 };
-use crate::{command::Command, frame::Frame, tools::pattern};
+use crate::{
+    command::Command, frame::Frame, observability::metrics::global_metrics, tools::pattern,
+};
 
 #[path = "full_text.rs"]
 mod full_text;
@@ -49,6 +51,7 @@ include!("db/value_encoding.rs");
 pub struct Db {
     db_index: u16,
     store: KvStore,
+    key_layout: KeyEncodingLayout,
     pub changes: Arc<AtomicU64>,
     version_counter: Arc<VersionCounter>,
     ttl_manager: Arc<TtlManager>,

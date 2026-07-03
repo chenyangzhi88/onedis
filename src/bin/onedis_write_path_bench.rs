@@ -123,7 +123,7 @@ async fn main() {
         ops as f64 / elapsed.as_secs_f64(),
         elapsed.as_secs_f64() * 1_000_000.0 / ops as f64
     );
-    if let Ok(Some(stats)) = stats_store.db().get_property("db.write-thread-stats") {
+    if let Ok(Some(stats)) = stats_store.get_property("db.write-thread-stats") {
         println!("write_thread_stats {stats}");
     }
     for property in [
@@ -132,7 +132,7 @@ async fn main() {
         "db.read-path-detail-stats",
         "db.memtable-lifecycle-stats",
     ] {
-        if let Ok(Some(stats)) = stats_store.db().get_property(property) {
+        if let Ok(Some(stats)) = stats_store.get_property(property) {
             println!("{property} {stats}");
         }
     }

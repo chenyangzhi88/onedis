@@ -1,6 +1,6 @@
 fn list_item_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + LIST_ITEM_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&LIST_ITEM_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -16,7 +16,7 @@ fn list_item_key(db_index: u16, key: &str, version: u64, index: i64) -> Vec<u8> 
 
 fn set_member_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + SET_MEMBER_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&SET_MEMBER_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -38,7 +38,7 @@ fn set_member_key_bytes(db_index: u16, key: &str, version: u64, member: &[u8]) -
 
 fn set_slot_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + SET_SLOT_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&SET_SLOT_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -54,7 +54,7 @@ fn set_slot_key(db_index: u16, key: &str, version: u64, slot: u64) -> Vec<u8> {
 
 fn set_member_slot_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + SET_MEMBER_SLOT_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&SET_MEMBER_SLOT_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -70,7 +70,7 @@ fn set_member_slot_key(db_index: u16, key: &str, version: u64, member: &[u8]) ->
 
 fn zset_member_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + ZSET_MEMBER_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&ZSET_MEMBER_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);
@@ -86,7 +86,7 @@ fn zset_member_key(db_index: u16, key: &str, version: u64, member: &str) -> Vec<
 
 fn zset_rank_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + ZSET_RANK_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&db_prefix(db_index));
+    prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&ZSET_RANK_NAMESPACE);
     prefix.extend_from_slice(key.as_bytes());
     prefix.push(0x00);

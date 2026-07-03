@@ -34,15 +34,17 @@
 //!   version, enabling O(1) bulk cleanup via a single DeleteRange per
 //!   namespace instead of scan + individual delete.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::types::write_batch::WriteBatch;
 use log::{debug, info};
 
 use super::kv_store::KvStore;
+use crate::observability::metrics::{elapsed_us, global_metrics};
 
 include!("ttl/constants.rs");
 include!("ttl/meta_header.rs");

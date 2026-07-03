@@ -276,6 +276,8 @@
     #[test]
     fn ttl_manager_add_remove_db_rebuild_and_parse_edges_work() {
         let store = test_store();
+        let db0_store = store.for_db_index(0);
+        let db1_store = store.for_db_index(1);
         let manager = TtlManager::new(store.clone(), TtlConfig::default());
 
         manager.add(0, 0, "ignored".to_string());
@@ -289,7 +291,7 @@
         let mut db0_deletes = WriteBatch::new();
         manager.remove_db_to_batch(&mut db0_deletes, 0);
         assert_eq!(db0_deletes.count(), 2);
-        store.write_batch(&db0_deletes);
+        db0_store.write_batch(&db0_deletes);
         assert_eq!(manager.index_size(), 1);
 
         let mut known = WriteBatch::new();
@@ -297,7 +299,7 @@
         assert_eq!(known.count(), 0);
         manager.remove_known_to_batch(&mut known, 150, 1, "db1-a");
         assert_eq!(known.count(), 1);
-        store.write_batch(&known);
+        db1_store.write_batch(&known);
         assert_eq!(manager.index_size(), 0);
 
         assert!(parse_ttl_index_key(b"not-a-ttl-key").is_none());
@@ -314,7 +316,7 @@
             &[VERSION_MARK_PREFIX, &99u64.to_be_bytes()].concat(),
             b"mark",
         );
-        store.write_batch(&reserve);
+        db0_store.write_batch(&reserve);
 
         let vc = VersionCounter::new();
         manager.rebuild_from_store(2, &vc);
@@ -329,6 +331,7 @@
     #[tokio::test]
     async fn ttl_manager_async_remove_rebuild_index_size_and_empty_sweep_work() {
         let store = test_store();
+        let db0_store = store.for_db_index(0);
         let manager = TtlManager::new(
             store.clone(),
             TtlConfig {
@@ -343,7 +346,7 @@
         let mut deletes = WriteBatch::new();
         manager.remove_db_to_batch_async(&mut deletes, 0).await;
         assert_eq!(deletes.count(), 2);
-        store.write_batch(&deletes);
+        db0_store.write_batch(&deletes);
         assert_eq!(manager.index_size_async().await, 0);
 
         let mut reserve = WriteBatch::new();
@@ -352,7 +355,7 @@
             &[VERSION_MARK_PREFIX, &30u64.to_be_bytes()].concat(),
             b"mark",
         );
-        store.write_batch(&reserve);
+        db0_store.write_batch(&reserve);
         let vc = VersionCounter::new();
         manager.rebuild_from_store_async(1, &vc).await;
         assert_eq!(vc.current(), 30);
@@ -364,6 +367,7 @@
     #[test]
     fn ttl_sweep_deletes_valid_expired_keys_and_skips_not_found_stale_and_hook_rejected() {
         let store = test_store();
+        let db0_store = store.for_db_index(0);
         let manager = TtlManager::new(
             store.clone(),
             TtlConfig {
@@ -374,18 +378,18 @@
         let expired = now_ms().saturating_sub(1000);
         let future = now_ms().saturating_add(60_000);
 
-        store.put_raw(&main_key(0, "valid"), &regular_meta(expired, 1, TYPE_HASH));
+        db0_store.put_raw(&main_key(0, "valid"), &regular_meta(expired, 1, TYPE_HASH));
         manager.add(expired, 0, "valid".to_string());
 
         manager.add(expired, 0, "missing".to_string());
 
-        store.put_raw(&main_key(0, "stale"), &regular_meta(future, 2, TYPE_SET));
+        db0_store.put_raw(&main_key(0, "stale"), &regular_meta(future, 2, TYPE_SET));
         manager.add(expired, 0, "stale".to_string());
 
-        store.put_raw(&main_key(0, "bad-meta"), b"short");
+        db0_store.put_raw(&main_key(0, "bad-meta"), b"short");
         manager.add(expired, 0, "bad-meta".to_string());
 
-        store.put_raw(&main_key(0, "hooked"), &regular_meta(expired, 3, TYPE_LIST));
+        db0_store.put_raw(&main_key(0, "hooked"), &regular_meta(expired, 3, TYPE_LIST));
         manager.add(expired, 0, "hooked".to_string());
         manager.set_expire_hook(std::sync::Arc::new(|_, key, _, batch| {
             if key == "hooked" {
@@ -396,21 +400,21 @@
         }));
 
         assert!(!manager.sweep_once());
-        assert_eq!(store.get_raw(&main_key(0, "valid")), None);
-        assert_eq!(store.get_raw(&main_key(0, "missing")), None);
+        assert_eq!(db0_store.get_raw(&main_key(0, "valid")), None);
+        assert_eq!(db0_store.get_raw(&main_key(0, "missing")), None);
         assert_eq!(
-            store.get_raw(&main_key(0, "stale")),
+            db0_store.get_raw(&main_key(0, "stale")),
             Some(regular_meta(future, 2, TYPE_SET))
         );
         assert_eq!(
-            store.get_raw(&main_key(0, "bad-meta")),
+            db0_store.get_raw(&main_key(0, "bad-meta")),
             Some(b"short".to_vec())
         );
         assert_eq!(
-            store.get_raw(&main_key(0, "hooked")),
+            db0_store.get_raw(&main_key(0, "hooked")),
             Some(regular_meta(expired, 3, TYPE_LIST))
         );
-        assert_eq!(store.get_raw(b"hook:called"), Some(b"1".to_vec()));
+        assert_eq!(db0_store.get_raw(b"hook:called"), Some(b"1".to_vec()));
         assert_eq!(manager.stats().keys_expired.load(Ordering::Relaxed), 1);
         assert_eq!(
             manager
@@ -425,6 +429,7 @@
     #[tokio::test]
     async fn ttl_async_sweep_honors_batch_size_and_json_node_cleanup() {
         let store = test_store();
+        let db0_store = store.for_db_index(0);
         let manager = TtlManager::new(
             store.clone(),
             TtlConfig {
@@ -434,10 +439,10 @@
         );
         let expired = now_ms().saturating_sub(1000);
         for key in ["json-a", "json-b"] {
-            store.put_raw(&main_key(0, key), &regular_meta(expired, 8, TYPE_JSON));
+            db0_store.put_raw(&main_key(0, key), &regular_meta(expired, 8, TYPE_JSON));
             let mut node_key = json_node_prefix(0, key, 8);
             node_key.extend_from_slice(b":node");
-            store.put_raw(&node_key, b"node");
+            db0_store.put_raw(&node_key, b"node");
             manager.add(expired, 0, key.to_string());
         }
 
@@ -450,12 +455,12 @@
         assert_eq!(manager.stats().keys_expired.load(Ordering::Relaxed), 2);
         assert_eq!(manager.index_size(), 0);
         assert!(
-            store
+            db0_store
                 .scan_prefix_raw(&json_node_prefix(0, "json-a", 8))
                 .is_empty()
         );
         assert!(
-            store
+            db0_store
                 .scan_prefix_raw(&json_node_prefix(0, "json-b", 8))
                 .is_empty()
         );

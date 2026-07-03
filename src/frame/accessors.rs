@@ -1,3 +1,5 @@
+use super::*;
+
 impl Frame {
     /**
      * 获取指定索引的内容

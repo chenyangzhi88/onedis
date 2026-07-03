@@ -1,3 +1,5 @@
+use super::*;
+
 include!("parsing_entrypoints.rs");
 include!("parsing_frame_bounds.rs");
 include!("parsing_simple_values.rs");

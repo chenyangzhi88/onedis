@@ -1,3 +1,5 @@
+use super::*;
+
 impl Frame {
     /**
      * 将 frame 转化为字符串

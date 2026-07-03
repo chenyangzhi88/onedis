@@ -9,7 +9,6 @@ use tokio::net::TcpListener;
 
 use crate::args::ResolvedArgs;
 use crate::command::Command;
-use crate::command_executor::CommandExecutor;
 use crate::frame::Frame;
 use crate::network::connection::Connection;
 use crate::network::session::{Session, WatchedKey};
@@ -20,6 +19,10 @@ use crate::store::db::decode_string_bytes_slice;
 use crate::store::db_manager::DatabaseManager;
 use crate::wasm::WasmRegistry;
 use kv_engine::monitor::{CoordinatorMonitorConfig, MonitorMetric, spawn_coordinator_monitor};
+
+pub mod command_executor;
+
+use self::command_executor::CommandExecutor;
 
 pub struct Server {
     args: Arc<ResolvedArgs>,

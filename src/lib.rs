@@ -1,8 +1,6 @@
 pub mod args;
 pub mod cmds;
 pub mod command;
-pub mod command_dispatch;
-pub mod command_executor;
 pub mod frame;
 pub mod lua;
 pub mod network;
@@ -11,3 +9,6 @@ pub mod server;
 pub mod store;
 pub mod tools;
 pub mod wasm;
+
+pub use command::dispatch as command_dispatch;
+pub use server::command_executor;

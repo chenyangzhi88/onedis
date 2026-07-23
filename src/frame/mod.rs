@@ -22,9 +22,10 @@ pub enum Frame {
 mod accessors;
 mod parsing;
 mod serialization;
+pub(crate) use parsing::FrameScanResult;
 #[cfg(test)]
 mod tests {
-    use super::{Frame, MAX_ARRAY_ELEMENTS, MAX_BULK_STRING_BYTES};
+    use super::{Frame, FrameScanResult, MAX_ARRAY_ELEMENTS, MAX_BULK_STRING_BYTES};
 
     #[test]
     fn parse_multiple_frames_handles_client_setinfo_with_values() {
@@ -72,6 +73,43 @@ mod tests {
 
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].get_args(), vec!["PING"]);
+    }
+
+    #[test]
+    fn frame_scanner_distinguishes_ready_incomplete_and_invalid_input() {
+        let complete = b"*1\r\n$4\r\nPING\r\n";
+        assert_eq!(
+            Frame::scan_complete_frames(complete),
+            FrameScanResult::Ready(complete.len())
+        );
+        assert_eq!(
+            Frame::scan_complete_frames(b"*2\r\n$3\r\nGET\r\n$3\r\nke"),
+            FrameScanResult::Incomplete
+        );
+        assert!(matches!(
+            Frame::scan_complete_frames(b"$bad\r\n"),
+            FrameScanResult::Invalid(message) if message.contains("bulk string length")
+        ));
+
+        let mut complete_then_invalid = complete.to_vec();
+        complete_then_invalid.extend_from_slice(b"$bad\r\n");
+        assert_eq!(
+            Frame::scan_complete_frames(&complete_then_invalid),
+            FrameScanResult::Ready(complete.len())
+        );
+    }
+
+    #[test]
+    fn parse_multiple_frames_ignores_pipe_separator_before_binary_echo() {
+        let bytes = b"*1\r\n$4\r\nPING\r\n\r\n*2\r\n$4\r\nECHO\r\n$4\r\n\xff\x00\x80x\r\n";
+        let frames = Frame::parse_multiple_frames(bytes).unwrap();
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].get_args(), vec!["PING"]);
+        assert_eq!(
+            frames[1].get_arg_bytes(1),
+            Some(vec![0xff, 0x00, 0x80, b'x'])
+        );
     }
 
     #[test]

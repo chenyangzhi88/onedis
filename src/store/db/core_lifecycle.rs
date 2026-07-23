@@ -27,7 +27,11 @@ impl Db {
         mutation_tracker: Arc<KeyMutationTracker>,
     ) -> Self {
         let store = store.for_db_index(db_index);
-        let key_layout = KeyEncodingLayout::open_or_initialize_for_table(&store);
+        // The layout marker describes the table itself, not a user transaction.
+        // Initialize it through the durable table view before the transactional
+        // snapshot is first touched.
+        let key_layout =
+            KeyEncodingLayout::open_or_initialize_for_table(&store.non_transactional_view());
         Db {
             db_index,
             store,

@@ -56,7 +56,8 @@ impl Db {
             .filter(|field| matches!(field.kind, FullTextFieldKind::Text))
             .count();
         let runtime_loaded = self.fulltext_runtimes.get(self.db_index, &index).is_some();
-        let file_bytes = self.fulltext_file_bytes(&index);
+        let storage_name = self.fulltext_active_storage_name(&index, &meta);
+        let file_bytes = self.fulltext_file_bytes(&storage_name);
         let effective_policy = self.fulltext_effective_refresh_policy(&meta)?;
         let cluster_enabled = self.fulltext_cluster_enabled()?;
         let cluster_shards = self.fulltext_cluster_shards()?;

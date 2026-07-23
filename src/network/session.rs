@@ -23,16 +23,35 @@ pub struct Session {
     in_transaction: bool,
     transaction_dirty: bool,
     transaction_frames: Vec<Frame>,
+    transaction_bytes: usize,
     watched_keys: Vec<WatchedKey>,
     name: Option<String>,
     created_at: Instant,
+    last_interaction_at: Instant,
     last_cmd: Option<String>,
     user: String,
+    peer_addr: String,
+    local_addr: String,
 }
 
 impl Session {
     pub fn new(certification: bool, db: Arc<Db>) -> Self {
+        Self::new_with_addresses(
+            certification,
+            db,
+            "127.0.0.1:0".to_string(),
+            "127.0.0.1:0".to_string(),
+        )
+    }
+
+    pub fn new_with_addresses(
+        certification: bool,
+        db: Arc<Db>,
+        peer_addr: String,
+        local_addr: String,
+    ) -> Self {
         let id = SESSION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let now = Instant::now();
         Session {
             id,
             certification,
@@ -41,11 +60,15 @@ impl Session {
             in_transaction: false,
             transaction_dirty: false,
             transaction_frames: Vec::new(),
+            transaction_bytes: 0,
             watched_keys: Vec::new(),
             name: None,
-            created_at: Instant::now(),
+            created_at: now,
+            last_interaction_at: now,
             last_cmd: None,
             user: "default".to_string(),
+            peer_addr,
+            local_addr,
         }
     }
 
@@ -82,6 +105,7 @@ impl Session {
         self.in_transaction = true;
         self.transaction_dirty = false;
         self.transaction_frames.clear();
+        self.transaction_bytes = 0;
     }
 
     pub fn is_in_transaction(&self) -> bool {
@@ -89,7 +113,27 @@ impl Session {
     }
 
     pub fn add_transaction_frame(&mut self, frame: Frame) {
+        self.transaction_bytes = self
+            .transaction_bytes
+            .saturating_add(frame.as_bytes().len());
         self.transaction_frames.push(frame);
+    }
+
+    pub fn try_add_transaction_frame(
+        &mut self,
+        frame: Frame,
+        max_commands: usize,
+        max_bytes: usize,
+    ) -> bool {
+        let frame_bytes = frame.as_bytes().len();
+        if self.transaction_frames.len() >= max_commands
+            || self.transaction_bytes.saturating_add(frame_bytes) > max_bytes
+        {
+            return false;
+        }
+        self.transaction_bytes += frame_bytes;
+        self.transaction_frames.push(frame);
+        true
     }
 
     pub fn mark_transaction_dirty(&mut self) {
@@ -104,14 +148,19 @@ impl Session {
         &self.transaction_frames
     }
 
+    pub fn transaction_command_count(&self) -> usize {
+        self.transaction_frames.len()
+    }
+
+    pub fn transaction_bytes(&self) -> usize {
+        self.transaction_bytes
+    }
+
     pub fn clear_transaction(&mut self) {
         self.in_transaction = false;
         self.transaction_dirty = false;
         self.transaction_frames.clear();
-    }
-
-    pub fn get_transaction_frames_mut(&mut self) -> &mut Vec<Frame> {
-        &mut self.transaction_frames
+        self.transaction_bytes = 0;
     }
 
     pub fn watch_key(&mut self, watched: WatchedKey) {
@@ -144,6 +193,7 @@ impl Session {
 
     pub fn set_last_cmd(&mut self, command: String) {
         self.last_cmd = Some(command);
+        self.last_interaction_at = Instant::now();
     }
 
     pub fn last_cmd(&self) -> Option<&str> {
@@ -154,11 +204,31 @@ impl Session {
         self.created_at.elapsed().as_secs()
     }
 
+    pub fn idle_secs(&self) -> u64 {
+        self.last_interaction_at.elapsed().as_secs()
+    }
+
+    pub fn connected_at(&self) -> Instant {
+        self.created_at
+    }
+
+    pub fn last_interaction_at(&self) -> Instant {
+        self.last_interaction_at
+    }
+
     pub fn set_user(&mut self, user: String) {
         self.user = user;
     }
 
     pub fn user(&self) -> &str {
         &self.user
+    }
+
+    pub fn peer_addr(&self) -> &str {
+        &self.peer_addr
+    }
+
+    pub fn local_addr(&self) -> &str {
+        &self.local_addr
     }
 }

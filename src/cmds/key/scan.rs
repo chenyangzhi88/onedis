@@ -76,7 +76,7 @@ impl Scan {
         // 构造返回结果：第一个元素是游标，第二个元素是键数组
         let keys_frames: Vec<Frame> = keys_to_return.into_iter().map(Frame::bulk_string).collect();
         let result_array = vec![
-            Frame::Integer(next_cursor as i64),
+            Frame::bulk_string(next_cursor.to_string()),
             Frame::Array(keys_frames),
         ];
 
@@ -101,7 +101,7 @@ impl Scan {
         };
         let keys_frames: Vec<Frame> = keys_to_return.into_iter().map(Frame::bulk_string).collect();
         Ok(Frame::Array(vec![
-            Frame::Integer(next_cursor as i64),
+            Frame::bulk_string(next_cursor.to_string()),
             Frame::Array(keys_frames),
         ]))
     }

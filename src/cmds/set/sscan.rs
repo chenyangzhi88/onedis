@@ -55,7 +55,7 @@ impl Sscan {
 
         match db.set_scan(&self.key, self.cursor, &pattern, count) {
             Ok((next_cursor, members)) => Ok(Frame::Array(vec![
-                Frame::Integer(next_cursor as i64),
+                Frame::bulk_string(next_cursor.to_string()),
                 Frame::Array(members.into_iter().map(Frame::bulk_string).collect()),
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -71,7 +71,7 @@ impl Sscan {
             .await
         {
             Ok((next_cursor, members)) => Ok(Frame::Array(vec![
-                Frame::Integer(next_cursor as i64),
+                Frame::bulk_string(next_cursor.to_string()),
                 Frame::Array(members.into_iter().map(Frame::bulk_string).collect()),
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),

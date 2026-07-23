@@ -18,6 +18,10 @@ impl Handler {
                     Err(error) => append_error(&mut out, &error.to_string()),
                 }
             } else if command.eq_ignore_ascii_case(b"MGET") {
+                if args.len() < 2 {
+                    append_error(&mut out, "ERR wrong number of arguments for 'mget' command");
+                    continue;
+                }
                 append_array_len(&mut out, args.len().saturating_sub(1));
                 for key_bytes in &args[1..] {
                     match db.get_string_entry_raw_bytes_async(key_bytes).await {

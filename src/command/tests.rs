@@ -87,10 +87,20 @@ fn parse_dispatch_covers_aliases_and_extension_command_families() {
 #[test]
 fn parse_dispatch_reports_empty_and_unknown_commands() {
     assert!(Command::parse_from_frame(Frame::Array(Vec::new())).is_err());
+    let mget_error = Command::parse_from_frame(frame_args(&["MGET"]))
+        .err()
+        .expect("MGET without keys must fail");
+    assert!(
+        mget_error
+            .to_string()
+            .contains("wrong number of arguments for 'mget'")
+    );
     assert!(matches!(
         Command::parse_from_frame(frame_args(&["definitely-not-redis"])).unwrap(),
         Command::Unknown(_)
     ));
+    let unknown = Command::parse_from_frame(frame_args(&["definitely-not-redis"])).unwrap();
+    assert_eq!(unknown.effective_name(), "definitely-not-redis");
 }
 
 #[test]

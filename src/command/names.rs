@@ -1,6 +1,13 @@
 use super::*;
 
 impl Command {
+    pub fn effective_name(&self) -> &str {
+        match self {
+            Command::Unknown(command) => command.command_name(),
+            _ => self.name(),
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Command::Auth(_) => "AUTH",

@@ -61,7 +61,7 @@ impl Hscan {
                     items.push(Frame::bulk_string(value));
                 }
                 Ok(Frame::Array(vec![
-                    Frame::Integer(next_cursor as i64),
+                    Frame::bulk_string(next_cursor.to_string()),
                     Frame::Array(items),
                 ]))
             }
@@ -84,7 +84,7 @@ impl Hscan {
                     items.push(Frame::bulk_string(value));
                 }
                 Ok(Frame::Array(vec![
-                    Frame::Integer(next_cursor as i64),
+                    Frame::bulk_string(next_cursor.to_string()),
                     Frame::Array(items),
                 ]))
             }
@@ -151,7 +151,7 @@ mod tests {
         match frame {
             Frame::Array(items) => {
                 assert_eq!(items.len(), 2);
-                assert!(matches!(items[0], Frame::Integer(0)));
+                assert!(matches!(&items[0], Frame::BulkString(cursor) if cursor == b"0"));
                 match &items[1] {
                     Frame::Array(entries) => assert_eq!(entries.len(), 4),
                     other => panic!("expected entry array, got {}", other.to_string()),

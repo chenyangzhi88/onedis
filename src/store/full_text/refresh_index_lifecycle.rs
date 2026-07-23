@@ -1,4 +1,8 @@
 impl Db {
+    pub(crate) fn shutdown_fulltext_runtime(&self) {
+        self.fulltext_runtimes.remove_db(self.db_index);
+    }
+
     fn fulltext_refresh_index(&self, index: &str, force: bool) -> Result<(), Error> {
         let started = Instant::now();
         let result = self.fulltext_refresh_index_inner(index, force, None);
@@ -84,7 +88,10 @@ impl Db {
         }
     }
 
-    fn fulltext_refresh_progress(&self, index: &str) -> Result<(bool, usize, Option<String>), Error> {
+    fn fulltext_refresh_progress(
+        &self,
+        index: &str,
+    ) -> Result<(bool, usize, Option<String>), Error> {
         let meta = self.read_fulltext_meta_direct(index)?;
         let pending = self
             .store
@@ -102,6 +109,7 @@ impl Db {
 
     fn fulltext_rebuild_index(&self, index: &str) -> Result<(), Error> {
         let mut meta = self.read_fulltext_meta_direct(index)?;
+        let previous_storage = self.fulltext_active_storage_name(index, &meta);
         meta.state = FullTextIndexState::Rebuilding;
         meta.generation = new_fulltext_sequence();
         meta.backfill_cursor = None;
@@ -109,6 +117,9 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         self.delete_fulltext_index_storage_to_batch(&mut batch, index);
+        if previous_storage != index {
+            self.delete_fulltext_storage_to_batch(&mut batch, &previous_storage);
+        }
         batch.put(
             &fulltext_meta_key(self.db_index, index),
             &encode_record(&meta)?,
@@ -128,7 +139,14 @@ impl Db {
         }
         let meta = self.read_fulltext_meta_direct(index)?;
         self.fulltext_create_vector_indexes(index, &meta)?;
-        let runtime = FullTextRuntime::new(self.store.clone(), self.db_index, index, &meta)?;
+        let storage_name = self.fulltext_active_storage_name(index, &meta);
+        let runtime = FullTextRuntime::new(
+            self.store.clone(),
+            self.db_index,
+            index,
+            &storage_name,
+            &meta,
+        )?;
         self.fulltext_runtimes.insert(self.db_index, index, runtime);
         Ok(())
     }

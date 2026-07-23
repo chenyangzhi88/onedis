@@ -1,11 +1,12 @@
 impl TtlManager {
-    pub fn start_sweeper(self: &Arc<Self>) {
+    pub fn start_sweeper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let mgr = Arc::clone(self);
-        tokio::spawn(async move { mgr.sweeper_loop().await });
+        let task = tokio::spawn(async move { mgr.sweeper_loop().await });
         info!(
             "TTL sweeper started (interval = {} ms, batch = {})",
             self.config.sweep_interval_ms, self.config.batch_size
         );
+        task
     }
 
     /// Signal the sweeper to exit.
@@ -55,7 +56,7 @@ impl TtlManager {
         let mut batches: BTreeMap<u16, WriteBatch> = BTreeMap::new();
 
         for entry in expired.iter().take(self.config.batch_size) {
-            let batch = batches.entry(entry.db_index).or_insert_with(WriteBatch::new);
+            let batch = batches.entry(entry.db_index).or_default();
             match self.plan_expire_key(entry, batch) {
                 ExpireResult::Deleted => deleted += 1,
                 ExpireResult::Stale | ExpireResult::NotFound => stale += 1,
@@ -100,7 +101,7 @@ impl TtlManager {
         let mut batches: BTreeMap<u16, WriteBatch> = BTreeMap::new();
 
         for entry in expired.iter().take(self.config.batch_size) {
-            let batch = batches.entry(entry.db_index).or_insert_with(WriteBatch::new);
+            let batch = batches.entry(entry.db_index).or_default();
             match self.plan_expire_key(entry, batch) {
                 ExpireResult::Deleted => deleted += 1,
                 ExpireResult::Stale | ExpireResult::NotFound => stale += 1,

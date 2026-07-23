@@ -60,7 +60,7 @@ impl Zscan {
 
         match db.zset_scan(&self.key, self.cursor, &pattern, count) {
             Ok((next_cursor, entries)) => Ok(Frame::Array(vec![
-                Frame::Integer(next_cursor as i64),
+                Frame::bulk_string(next_cursor.to_string()),
                 Frame::Array(flatten_entries(entries, true)),
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -76,7 +76,7 @@ impl Zscan {
             .await
         {
             Ok((next_cursor, entries)) => Ok(Frame::Array(vec![
-                Frame::Integer(next_cursor as i64),
+                Frame::bulk_string(next_cursor.to_string()),
                 Frame::Array(flatten_entries(entries, true)),
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),

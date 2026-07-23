@@ -3,6 +3,7 @@ impl FullTextRuntime {
         store: crate::store::kv_store::KvStore,
         db_index: u16,
         index_name: &str,
+        storage_name: &str,
         meta: &FullTextIndexMeta,
     ) -> Result<Self, Error> {
         let mut builder = Schema::builder();
@@ -86,7 +87,7 @@ impl FullTextRuntime {
         }
         let schema = builder.build();
         let synonyms = load_fulltext_synonyms_from_store(&store, db_index, index_name)?;
-        let directory = KvTantivyDirectory::new(store, db_index, index_name);
+        let directory = KvTantivyDirectory::new(store, db_index, storage_name);
         let index = Index::open_or_create(directory, schema)?;
         let reader = index.reader()?;
         let writer = index.writer(FULLTEXT_WRITER_HEAP_BYTES)?;

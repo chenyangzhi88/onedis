@@ -1,16 +1,51 @@
 impl Handler {
+    const MAX_TRANSACTION_COMMANDS: usize = 10_000;
+    const MAX_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
+
     fn queue_transaction_frame(&mut self, frame: Frame, response_bytes: &mut Vec<u8>) {
         match Command::parse_from_frame(frame.clone()) {
+            Ok(_command)
+                if self.args.requirepass.is_some() && !self.session.get_certification() =>
+            {
+                self.session.mark_transaction_dirty();
+                response_bytes.extend(
+                    Frame::Error("NOAUTH Authentication required.".to_string()).as_bytes(),
+                );
+            }
+            Ok(command)
+                if !self
+                    .session_manager
+                    .acl_allows(self.session.user(), command.effective_name()) =>
+            {
+                self.session.mark_transaction_dirty();
+                response_bytes.extend(
+                    Frame::Error(format!(
+                        "NOPERM this user has no permissions to run the '{}' command",
+                        command.effective_name().to_ascii_lowercase()
+                    ))
+                    .as_bytes(),
+                );
+            }
             Ok(command) if Self::can_queue_transaction_command(&command) => {
-                self.session.add_transaction_frame(frame);
-                response_bytes.extend(Frame::SimpleString("QUEUED".to_string()).as_bytes());
+                if self.session.try_add_transaction_frame(
+                    frame,
+                    Self::MAX_TRANSACTION_COMMANDS,
+                    Self::MAX_TRANSACTION_BYTES,
+                ) {
+                    response_bytes.extend(Frame::SimpleString("QUEUED".to_string()).as_bytes());
+                } else {
+                    self.session.mark_transaction_dirty();
+                    response_bytes.extend(
+                        Frame::Error("ERR transaction queue limit exceeded".to_string()).as_bytes(),
+                    );
+                }
             }
             Ok(command) => {
                 self.session.mark_transaction_dirty();
                 response_bytes.extend(
                     Frame::Error(format!(
                         "ERR command '{}' is not allowed in MULTI",
-                        command.name()
+                        command.effective_name()
                     ))
                     .as_bytes(),
                 );
@@ -20,6 +55,7 @@ impl Handler {
                 response_bytes.extend(Frame::Error(error.to_string()).as_bytes());
             }
         }
+        self.session_manager.update_session(&self.session);
     }
 
     fn can_queue_transaction_command(command: &Command) -> bool {

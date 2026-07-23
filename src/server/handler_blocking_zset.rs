@@ -1,11 +1,21 @@
 impl Handler {
-    async fn apply_blocking_zset_command(&self, command: Command) -> Result<Vec<u8>, Error> {
+    async fn apply_blocking_zset_command(&mut self, command: Command) -> Result<Vec<u8>, Error> {
         let timeout_secs = Self::blocking_zset_timeout_secs(&command);
-        let deadline = (timeout_secs > 0.0).then(|| {
-            Instant::now() + Duration::from_micros((timeout_secs * 1_000_000.0).ceil() as u64)
-        });
+        let deadline = if timeout_secs > 0.0 {
+            Some(
+                Instant::now()
+                    .checked_add(Duration::from_micros(
+                        (timeout_secs * 1_000_000.0).ceil() as u64,
+                    ))
+                    .ok_or_else(|| Error::msg("ERR timeout is out of range"))?,
+            )
+        } else {
+            None
+        };
         loop {
             let notified = self.db_manager.zset_notify().notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(frame) = self.try_blocking_zset_command_once(&command).await? {
                 if !matches!(frame, Frame::Null | Frame::Error(_)) {
                     self.db_manager.notify_zset_waiters();
@@ -18,11 +28,27 @@ impl Handler {
                     if now >= deadline {
                         return Ok(Frame::Null.as_bytes());
                     }
-                    if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                        return Ok(Frame::Null.as_bytes());
+                    tokio::select! {
+                        result = tokio::time::timeout_at(deadline, notified.as_mut()) => {
+                            if result.is_err() {
+                                return Ok(Frame::Null.as_bytes());
+                            }
+                        }
+                        result = self.connection.wait_read_closed() => {
+                            result?;
+                            return Err(Error::msg("Connection closed by peer"));
+                        }
                     }
                 }
-                None => notified.await,
+                None => {
+                    tokio::select! {
+                        _ = notified.as_mut() => {}
+                        result = self.connection.wait_read_closed() => {
+                            result?;
+                            return Err(Error::msg("Connection closed by peer"));
+                        }
+                    }
+                }
             }
         }
     }

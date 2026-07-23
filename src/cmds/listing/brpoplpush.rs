@@ -20,6 +20,9 @@ impl Brpoplpush {
             .unwrap()
             .parse::<f64>()
             .map_err(|_| Error::msg("ERR timeout is not a float or out of range"))?;
+        if !timeout_secs.is_finite() {
+            return Err(Error::msg("ERR timeout is not a float or out of range"));
+        }
         if timeout_secs < 0.0 {
             return Err(Error::msg("ERR timeout is negative"));
         }

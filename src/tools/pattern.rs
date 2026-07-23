@@ -2,7 +2,6 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-// 使用 Mutex 保护的 HashMap 来缓存编译后的正则表达式
 fn regex_cache() -> &'static Mutex<HashMap<String, Regex>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))

@@ -99,12 +99,11 @@ impl Db {
         old_raw: Option<&[u8]>,
     ) {
         let key_bytes = self.mk(key);
-        let stored_raw = old_raw
-            .is_none()
-            .then(|| self.store.get_raw(&key_bytes))
-            .flatten();
-        let old_raw = old_raw.or(stored_raw.as_deref());
-        self.cleanup_old_complex_subkeys_for_string_overwrite(batch, key, old_raw);
+        if let Some(old_raw) = old_raw {
+            self.cleanup_old_complex_subkeys_for_string_overwrite(batch, key, Some(old_raw));
+        } else if let Some(stored_raw) = self.store.get_raw(&key_bytes) {
+            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, &stored_raw);
+        }
         batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
         if expire_ms > 0 {
             self.ttl_manager
@@ -127,20 +126,49 @@ impl Db {
             .is_none()
             .then(|| self.store.get_raw(&key_bytes))
             .flatten();
-        let old_raw = old_raw.or(stored_raw.as_deref());
-        self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(batch, key, old_raw);
+        if let Some(old_raw) = old_raw {
+            self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
+                batch,
+                key,
+                Some(old_raw),
+            );
+        } else if let Some(stored_raw) = stored_raw.as_deref()
+            && let Ok(key) = std::str::from_utf8(key)
+        {
+            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, stored_raw);
+        }
+        let effective_old_raw = old_raw.or(stored_raw.as_deref());
         batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
         if expire_ms > 0
             && let Ok(key) = std::str::from_utf8(key)
         {
             self.ttl_manager
                 .add_to_batch(batch, expire_ms, self.db_index, key);
-        } else if let Some(header) = old_raw.and_then(decode_meta_header)
+        } else if let Some(header) = effective_old_raw.and_then(decode_meta_header)
             && header.expire_ms > 0
             && let Ok(key) = std::str::from_utf8(key)
         {
             self.ttl_manager
                 .remove_known_to_batch(batch, header.expire_ms, self.db_index, key);
+        }
+    }
+
+    fn enqueue_fulltext_delete_for_string_overwrite(
+        &self,
+        batch: &mut WriteBatch,
+        key: &str,
+        old_raw: &[u8],
+    ) {
+        let Some(header) = decode_meta_header(old_raw) else {
+            return;
+        };
+        let result = match header.type_tag {
+            TYPE_HASH => self.fulltext_enqueue_hash_delete_to_batch(batch, key),
+            TYPE_JSON => self.fulltext_enqueue_json_delete_to_batch(batch, key),
+            _ => Ok(()),
+        };
+        if let Err(err) = result {
+            log::error!("failed to enqueue fulltext delete for overwritten {key}: {err}");
         }
     }
 

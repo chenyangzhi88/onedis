@@ -120,21 +120,42 @@ impl Db {
     }
 
     fn delete_fulltext_index_storage_to_batch(&self, batch: &mut WriteBatch, index: &str) {
-        delete_prefix_to_batch(
-            batch,
-            &self.store,
-            &fulltext_file_prefix(self.db_index, index),
-        );
-        delete_prefix_to_batch(
-            batch,
-            &self.store,
-            &fulltext_legacy_file_prefix(self.db_index, index),
-        );
+        self.delete_fulltext_storage_to_batch(batch, index);
         delete_prefix_to_batch(
             batch,
             &self.store,
             &fulltext_outbox_prefix(self.db_index, index),
         );
+    }
+
+    fn delete_fulltext_storage_to_batch(&self, batch: &mut WriteBatch, storage_name: &str) {
+        delete_prefix_to_batch(
+            batch,
+            &self.store,
+            &fulltext_file_prefix(self.db_index, storage_name),
+        );
+        delete_prefix_to_batch(
+            batch,
+            &self.store,
+            &fulltext_legacy_file_prefix(self.db_index, storage_name),
+        );
+    }
+
+    fn fulltext_active_storage_name(&self, index: &str, meta: &FullTextIndexMeta) -> String {
+        let generated = fulltext_generation_storage_name(index, meta.generation);
+        let generated_exists = !self
+            .store
+            .scan_prefix_raw(&fulltext_file_prefix(self.db_index, &generated))
+            .is_empty()
+            || !self
+                .store
+                .scan_prefix_raw(&fulltext_legacy_file_prefix(self.db_index, &generated))
+                .is_empty();
+        if generated_exists {
+            generated
+        } else {
+            index.to_string()
+        }
     }
 
     fn fulltext_config_value(&self, name: &str) -> Result<Option<String>, Error> {
@@ -267,8 +288,7 @@ impl Db {
             .and_then(|raw| raw.try_into().ok())
             .map(u64::from_be_bytes)
             .unwrap_or(meta.generation >> 16);
-        current_fulltext_millis()
-            >= last_activity_ms.saturating_add(seconds.saturating_mul(1_000))
+        current_fulltext_millis() >= last_activity_ms.saturating_add(seconds.saturating_mul(1_000))
     }
 
     fn fulltext_touch_temporary_index(&self, index: &str, meta: &FullTextIndexMeta) {
@@ -359,5 +379,4 @@ impl Db {
         }
         Ok(out)
     }
-
 }

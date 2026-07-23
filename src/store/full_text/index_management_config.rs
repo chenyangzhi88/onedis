@@ -88,11 +88,8 @@ impl Db {
         Ok(Frame::Ok)
     }
 
-    fn fulltext_purge_index(
-        &self,
-        index: &str,
-        meta: &FullTextIndexMeta,
-    ) -> Result<(), Error> {
+    fn fulltext_purge_index(&self, index: &str, meta: &FullTextIndexMeta) -> Result<(), Error> {
+        let active_storage = self.fulltext_active_storage_name(index, meta);
         let mut batch = WriteBatch::new();
         batch.delete(&fulltext_meta_key(self.db_index, index));
         batch.delete(&fulltext_temporary_activity_key(self.db_index, index));
@@ -100,6 +97,9 @@ impl Db {
             batch.delete(&fulltext_alias_key(self.db_index, &alias));
         }
         self.delete_fulltext_index_storage_to_batch(&mut batch, index);
+        if active_storage != index {
+            self.delete_fulltext_storage_to_batch(&mut batch, &active_storage);
+        }
         self.write_batch_if_not_empty(&batch);
         self.fulltext_delete_vector_indexes(index, meta);
         self.fulltext_runtimes.remove(self.db_index, index);
@@ -125,6 +125,8 @@ impl Db {
         let index = self.resolve_fulltext_index(index)?;
         let mut meta = self.read_fulltext_meta_direct(&index)?;
         let old_meta = meta.clone();
+        let old_storage = self.fulltext_active_storage_name(&index, &old_meta);
+        let added_fields = fields.clone();
         let mut merged = meta.schema.clone();
         merged.extend(fields);
         let validation_options = FullTextCreateOptions {
@@ -144,18 +146,106 @@ impl Db {
         meta.backfill_cursor = None;
         meta.last_indexed_outbox_seq = 0;
 
+        for field in added_fields
+            .iter()
+            .filter(|field| matches!(field.kind, FullTextFieldKind::Vector))
+        {
+            fulltext_vector_create_options(field)?;
+        }
+
+        let staged_storage = fulltext_generation_storage_name(&index, meta.generation);
+        let mut cleanup_batch = WriteBatch::new();
+        self.delete_fulltext_storage_to_batch(&mut cleanup_batch, &staged_storage);
+        self.write_batch_if_not_empty(&cleanup_batch);
+        let staged_runtime = match FullTextRuntime::new(
+            self.store.clone(),
+            self.db_index,
+            &index,
+            &staged_storage,
+            &meta,
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let mut batch = WriteBatch::new();
+                self.delete_fulltext_storage_to_batch(&mut batch, &staged_storage);
+                self.write_batch_if_not_empty(&batch);
+                return Err(error);
+            }
+        };
+        drop(staged_runtime);
+
+        let mut created_vector_indexes = Vec::new();
+        for field in added_fields
+            .iter()
+            .filter(|field| matches!(field.kind, FullTextFieldKind::Vector))
+        {
+            let internal = fulltext_vector_index_name(&index, field.attribute_name());
+            if self.store.get_raw(&self.mk(&internal)).is_some() {
+                self.fulltext_cleanup_alter_stage(&staged_storage, &created_vector_indexes);
+                return Err(Error::msg(
+                    "ERR vector index for added fulltext field already exists",
+                ));
+            }
+            if let Err(error) =
+                self.vector_create(&internal, fulltext_vector_create_options(field)?)
+            {
+                self.fulltext_cleanup_alter_stage(&staged_storage, &created_vector_indexes);
+                return Err(error);
+            }
+            created_vector_indexes.push(internal);
+        }
+
         let mut batch = WriteBatch::new();
-        self.delete_fulltext_index_storage_to_batch(&mut batch, &index);
         batch.put(
             &fulltext_meta_key(self.db_index, &index),
             &encode_record(&meta)?,
         );
         self.write_batch_if_not_empty(&batch);
-        self.fulltext_delete_vector_indexes(&index, &old_meta);
-        self.fulltext_create_vector_indexes(&index, &meta)?;
         self.fulltext_runtimes.remove(self.db_index, &index);
-        self.ensure_fulltext_runtime(&index)?;
+        #[cfg(test)]
+        let runtime_result = if FULLTEXT_ALTER_FAIL_AFTER_SWAP.swap(false, AtomicOrdering::SeqCst) {
+            Err(Error::msg("ERR injected FT.ALTER runtime failure"))
+        } else {
+            self.ensure_fulltext_runtime(&index)
+        };
+        #[cfg(not(test))]
+        let runtime_result = self.ensure_fulltext_runtime(&index);
+        if let Err(error) = runtime_result {
+            let mut rollback = WriteBatch::new();
+            rollback.put(
+                &fulltext_meta_key(self.db_index, &index),
+                &encode_record(&old_meta)?,
+            );
+            self.write_batch_if_not_empty(&rollback);
+            self.fulltext_runtimes.remove(self.db_index, &index);
+            self.fulltext_cleanup_alter_stage(&staged_storage, &created_vector_indexes);
+            if let Err(rollback_error) = self.ensure_fulltext_runtime(&index) {
+                return Err(Error::msg(format!(
+                    "{error}; FT.ALTER rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+
+        if old_storage != staged_storage {
+            let mut cleanup = WriteBatch::new();
+            self.delete_fulltext_storage_to_batch(&mut cleanup, &old_storage);
+            self.write_batch_if_not_empty(&cleanup);
+        }
         Ok(Frame::Ok)
+    }
+
+    fn fulltext_cleanup_alter_stage(
+        &self,
+        staged_storage: &str,
+        created_vector_indexes: &[String],
+    ) {
+        let mut batch = WriteBatch::new();
+        self.delete_fulltext_storage_to_batch(&mut batch, staged_storage);
+        self.write_batch_if_not_empty(&batch);
+        for vector_index in created_vector_indexes {
+            self.delete_key(vector_index);
+        }
     }
 
     pub async fn fulltext_alter_async(
@@ -271,6 +361,4 @@ impl Db {
     pub async fn fulltext_config_set_async(&self, name: &str, value: &str) -> Result<Frame, Error> {
         self.fulltext_config_set(name, value)
     }
-
-
 }

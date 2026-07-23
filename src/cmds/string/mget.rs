@@ -8,6 +8,11 @@ pub struct Mget {
 impl Mget {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let args = frame.get_args_from_index(1);
+        if args.is_empty() {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'mget' command",
+            ));
+        }
 
         Ok(Mget { keys: args })
     }

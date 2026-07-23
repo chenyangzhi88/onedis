@@ -1,4 +1,6 @@
 impl Handler {
+    const MAX_SUBSCRIPTIONS_PER_CLIENT: usize = 10_000;
+
     async fn try_apply_pubsub_or_monitor(
         &mut self,
         command: &Command,
@@ -28,14 +30,42 @@ impl Handler {
                 }
                 let delivered = self
                     .session_manager
-                    .publish(&args[0], &args[1], name == "SPUBLISH")
-                    .await;
+                    .publish(&args[0], &args[1], name == "SPUBLISH");
                 Ok(Some(Frame::Integer(delivered as i64).as_bytes()))
             }
             "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" => {
+                if args.is_empty() {
+                    return Ok(Some(
+                        Frame::Error(format!(
+                            "ERR wrong number of arguments for '{}' command",
+                            name.to_ascii_lowercase()
+                        ))
+                        .as_bytes(),
+                    ));
+                }
+                let current_count = self
+                    .session_manager
+                    .subscription_count(self.session.get_id());
+                let kind = match name.as_str() {
+                    "SUBSCRIBE" => SubscriptionKind::Channel,
+                    "PSUBSCRIBE" => SubscriptionKind::Pattern,
+                    "SSUBSCRIBE" => SubscriptionKind::ShardChannel,
+                    _ => unreachable!(),
+                };
+                let additional = self.session_manager.additional_subscription_count(
+                    self.session.get_id(),
+                    args,
+                    kind,
+                );
+                if current_count.saturating_add(additional) > Self::MAX_SUBSCRIPTIONS_PER_CLIENT {
+                    return Ok(Some(
+                        Frame::Error("ERR maximum number of subscriptions reached".to_string())
+                            .as_bytes(),
+                    ));
+                }
                 let writer = self.connection.shared_writer();
                 let mut frames = Vec::new();
-                for (idx, channel) in args.iter().enumerate() {
+                for channel in args {
                     match name.as_str() {
                         "SUBSCRIBE" => self.session_manager.register_channel(
                             channel,
@@ -58,7 +88,11 @@ impl Handler {
                         Frame::Array(vec![
                             Frame::bulk_string(name.to_ascii_lowercase()),
                             Frame::bulk_string(channel.clone()),
-                            Frame::Integer((idx + 1) as i64),
+                            Frame::Integer(
+                                self.session_manager
+                                    .subscription_ack_count(self.session.get_id(), kind)
+                                    as i64,
+                            ),
                         ])
                         .as_bytes(),
                     );
@@ -67,14 +101,28 @@ impl Handler {
             }
             "UNSUBSCRIBE" | "PUNSUBSCRIBE" | "SUNSUBSCRIBE" => {
                 let channels = if args.is_empty() {
-                    Vec::new()
+                    match name.as_str() {
+                        "UNSUBSCRIBE" => self
+                            .session_manager
+                            .channel_subscriptions(self.session.get_id()),
+                        "PUNSUBSCRIBE" => self
+                            .session_manager
+                            .pattern_subscriptions(self.session.get_id()),
+                        "SUNSUBSCRIBE" => self
+                            .session_manager
+                            .shard_subscriptions(self.session.get_id()),
+                        _ => Vec::new(),
+                    }
                 } else {
                     args.to_vec()
                 };
-                if channels.is_empty() {
-                    self.session_manager.unsubscribe_all(self.session.get_id());
-                }
                 let mut frames = Vec::new();
+                let kind = match name.as_str() {
+                    "UNSUBSCRIBE" => SubscriptionKind::Channel,
+                    "PUNSUBSCRIBE" => SubscriptionKind::Pattern,
+                    "SUNSUBSCRIBE" => SubscriptionKind::ShardChannel,
+                    _ => unreachable!(),
+                };
                 for channel in channels {
                     match name.as_str() {
                         "UNSUBSCRIBE" => self
@@ -92,7 +140,11 @@ impl Handler {
                         Frame::Array(vec![
                             Frame::bulk_string(name.to_ascii_lowercase()),
                             Frame::bulk_string(channel),
-                            Frame::Integer(0),
+                            Frame::Integer(
+                                self.session_manager
+                                    .subscription_ack_count(self.session.get_id(), kind)
+                                    as i64,
+                            ),
                         ])
                         .as_bytes(),
                     );
@@ -102,7 +154,11 @@ impl Handler {
                         Frame::Array(vec![
                             Frame::bulk_string(name.to_ascii_lowercase()),
                             Frame::Null,
-                            Frame::Integer(0),
+                            Frame::Integer(
+                                self.session_manager
+                                    .subscription_ack_count(self.session.get_id(), kind)
+                                    as i64,
+                            ),
                         ])
                         .as_bytes(),
                     );
@@ -168,22 +224,24 @@ impl Handler {
                 }
                 Frame::Array(frames)
             }
-            Some("NUMPAT") => Frame::Integer(self.session_manager.pattern_count() as i64),
-            Some("CHANNELS") => Frame::Array(
+            Some("NUMPAT") if args.len() == 1 => {
+                Frame::Integer(self.session_manager.pattern_count() as i64)
+            }
+            Some("CHANNELS") if args.len() <= 2 => Frame::Array(
                 self.session_manager
-                    .channel_names(false)
+                    .channel_names_matching(false, args.get(1).map(String::as_str))
                     .into_iter()
                     .map(Frame::bulk_string)
                     .collect(),
             ),
-            Some("SHARDCHANNELS") => Frame::Array(
+            Some("SHARDCHANNELS") if args.len() <= 2 => Frame::Array(
                 self.session_manager
-                    .channel_names(true)
+                    .channel_names_matching(true, args.get(1).map(String::as_str))
                     .into_iter()
                     .map(Frame::bulk_string)
                     .collect(),
             ),
-            _ => Frame::Array(Vec::new()),
+            _ => Frame::Error("ERR syntax error".to_string()),
         }
     }
 }

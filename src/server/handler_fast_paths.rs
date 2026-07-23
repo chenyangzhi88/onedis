@@ -1,8 +1,18 @@
 impl Handler {
-    fn try_handle_ping_fast_batch(&self, bytes: &[u8]) -> Option<Vec<u8>> {
+    fn try_handle_ping_fast_batch(&mut self, bytes: &[u8]) -> Option<Vec<u8>> {
         let started = std::time::Instant::now();
         if self.session.is_in_transaction()
+            || self
+                .session_manager
+                .is_monitoring(self.session.get_id())
+            || self
+                .session_manager
+                .subscription_count(self.session.get_id())
+                > 0
             || (self.args.requirepass.is_some() && !self.session.get_certification())
+            || !self
+                .session_manager
+                .acl_allows(self.session.user(), "PING")
         {
             return None;
         }
@@ -24,6 +34,7 @@ impl Handler {
                 None,
                 self.slow_command_threshold_us(),
             );
+            self.observe_fast_command_batch("PING", count);
             return Some(out);
         }
 
@@ -44,6 +55,7 @@ impl Handler {
                 None,
                 self.slow_command_threshold_us(),
             );
+            self.observe_fast_command_batch("PING", count);
             return Some(out);
         }
 
@@ -53,27 +65,47 @@ impl Handler {
     async fn try_handle_borrowed_fast_batch(&mut self, bytes: &[u8]) -> Option<Vec<u8>> {
         let started = std::time::Instant::now();
         if self.session.is_in_transaction()
+            || self
+                .session_manager
+                .is_monitoring(self.session.get_id())
+            || self
+                .session_manager
+                .subscription_count(self.session.get_id())
+                > 0
             || (self.args.requirepass.is_some() && !self.session.get_certification())
         {
+            return None;
+        }
+        let commands = parse_borrowed_resp_commands(bytes)?;
+        if commands.iter().any(|args| {
+            let Some(command) = args.first().and_then(|name| std::str::from_utf8(name).ok()) else {
+                return true;
+            };
+            !self
+                .session_manager
+                .acl_allows(self.session.user(), command)
+        }) {
             return None;
         }
         if let Some(commands) = parse_borrowed_plain_set_commands(bytes) {
             let count = commands.len();
             let response = self.handle_borrowed_set_byte_commands(commands).await;
             self.record_fast_command_batch("SET", count, started, &response);
+            self.observe_fast_command_batch("SET", count);
             return Some(response);
         }
         if let Some(commands) = parse_borrowed_plain_hset_commands(bytes) {
             let count = commands.len();
             let response = self.handle_borrowed_hset_commands(commands).await;
             self.record_fast_command_batch("HSET", count, started, &response);
+            self.observe_fast_command_batch("HSET", count);
             return Some(response);
         }
-        let commands = parse_borrowed_resp_commands(bytes)?;
         if commands.iter().all(|args| borrowed_read_supported(args)) {
             let names = borrowed_fast_names(&commands);
             let response = self.handle_borrowed_read_commands(commands).await;
             self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
             return Some(response);
         }
         if commands
@@ -83,6 +115,7 @@ impl Handler {
             let count = commands.len();
             let response = self.handle_borrowed_set_commands(commands).await;
             self.record_fast_command_batch("SET", count, started, &response);
+            self.observe_fast_command_batch("SET", count);
             return Some(response);
         }
         if commands
@@ -93,15 +126,51 @@ impl Handler {
             let response = self.handle_borrowed_list_push_commands(commands).await;
             self.db_manager.notify_list_waiters();
             self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
             return Some(response);
         }
         if commands.iter().all(|args| borrowed_lrange_supported(args)) {
             let count = commands.len();
             let response = self.handle_borrowed_lrange_commands(commands).await;
             self.record_fast_command_batch("LRANGE", count, started, &response);
+            self.observe_fast_command_batch("LRANGE", count);
             return Some(response);
         }
         None
+    }
+
+    fn observe_fast_command_batch(&mut self, command: &'static str, count: usize) {
+        for _ in 0..count {
+            self.session_manager.broadcast_monitor(
+                self.session.get_id(),
+                format_command_name_for_monitor_context(
+                    command,
+                    self.session.get_current_db(),
+                    self.session.peer_addr(),
+                ),
+            );
+        }
+        if count > 0 {
+            self.session.set_last_cmd(command.to_ascii_lowercase());
+            self.session_manager.update_session(&self.session);
+        }
+    }
+
+    fn observe_fast_command_names(&mut self, commands: &[&'static str]) {
+        for command in commands {
+            self.session_manager.broadcast_monitor(
+                self.session.get_id(),
+                format_command_name_for_monitor_context(
+                    command,
+                    self.session.get_current_db(),
+                    self.session.peer_addr(),
+                ),
+            );
+        }
+        if let Some(command) = commands.last() {
+            self.session.set_last_cmd(command.to_ascii_lowercase());
+            self.session_manager.update_session(&self.session);
+        }
     }
 
     fn record_fast_command_batch(

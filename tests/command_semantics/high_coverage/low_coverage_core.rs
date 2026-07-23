@@ -47,8 +47,10 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
     let first_page = apply(&db, &["SCAN", "0", "MATCH", "scan:*", "COUNT", "3"]);
     let next_cursor = match first_page {
         Frame::Array(values) => match values.first() {
-            Some(Frame::Integer(cursor)) => *cursor,
-            _ => panic!("expected integer cursor"),
+            Some(Frame::BulkString(cursor)) => {
+                std::str::from_utf8(cursor).unwrap().parse::<u64>().unwrap()
+            }
+            _ => panic!("expected bulk string cursor"),
         },
         other => panic!("expected scan array, got {}", other.to_string()),
     };
@@ -177,5 +179,3 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
     assert!(parse_err(&["CONFIG", "HELP", "extra"]).contains("wrong"));
     assert!(parse_err(&["CONFIG", "SET", "x", "y"]).contains("unknown"));
 }
-
-

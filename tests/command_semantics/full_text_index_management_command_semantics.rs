@@ -215,10 +215,24 @@ fn ft_alter_adds_schema_and_survives_reopen() {
         Frame::Ok
     ));
     wait_for_search_ids(&db, &["FT.SEARCH", "idx", "beta"], &["doc:1"]);
+    apply(&db, &["HSET", "doc:1", "category", "book"]);
+    assert!(matches!(
+        apply(
+            &db,
+            &["FT.ALTER", "idx", "SCHEMA", "ADD", "category", "TAG"]
+        ),
+        Frame::Ok
+    ));
+    wait_for_search_ids(&db, &["FT.SEARCH", "idx", "@category:{book}"], &["doc:1"]);
     drop(db);
 
     let reopened = open_db_at(&dir);
     wait_for_search_ids(&reopened, &["FT.SEARCH", "idx", "beta"], &["doc:1"]);
+    wait_for_search_ids(
+        &reopened,
+        &["FT.SEARCH", "idx", "@category:{book}"],
+        &["doc:1"],
+    );
 }
 
 #[test]

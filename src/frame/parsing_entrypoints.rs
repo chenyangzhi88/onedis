@@ -30,13 +30,19 @@ impl Frame {
         let mut position = 0;
 
         while position < bytes.len() {
-            if let Some(frame_end) = Frame::find_frame_end(&bytes[position..]) {
-                let frame_bytes = &bytes[position..position + frame_end];
-                let frame = Frame::parse_from_bytes(frame_bytes)?;
-                frames.push(frame);
-                position += frame_end;
-            } else {
-                break;
+            if bytes[position..].starts_with(b"\r\n") {
+                position += 2;
+                continue;
+            }
+            match frame_boundary(&bytes[position..], true) {
+                FrameBoundary::Complete(frame_end) => {
+                    let frame_bytes = &bytes[position..position + frame_end];
+                    let frame = Frame::parse_from_bytes(frame_bytes)?;
+                    frames.push(frame);
+                    position += frame_end;
+                }
+                FrameBoundary::Incomplete => break,
+                FrameBoundary::Invalid(message) => return Err(Error::msg(message)),
             }
         }
 

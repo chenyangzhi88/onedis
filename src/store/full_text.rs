@@ -9,6 +9,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+
 use anyhow::Error;
 use bincode::{Decode, Encode};
 use common::types::write_batch::WriteBatch;
@@ -47,6 +50,9 @@ const DEFAULT_REFRESH_MAX_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_REFRESH_TIMEOUT_MS: u64 = 500;
 const DEFAULT_OUTBOX_COMPACT_THRESHOLD: usize = 1024;
 const DEFAULT_REPAIR_THROTTLE_MS: u64 = 1_000;
+
+#[cfg(test)]
+static FULLTEXT_ALTER_FAIL_AFTER_SWAP: AtomicBool = AtomicBool::new(false);
 
 include!("full_text/types.rs");
 include!("full_text/runtime.rs");

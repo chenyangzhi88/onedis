@@ -91,8 +91,14 @@ impl Client {
 
     pub fn apply_with_handler(self, handler: &mut Handler) -> Result<Frame, Error> {
         match self.subcommand.as_str() {
-            "LIST" | "INFO" => Ok(Frame::bulk_string(
+            "LIST" => Ok(Frame::bulk_string(
                 handler.get_session_manager().client_list(),
+            )),
+            "INFO" => Ok(Frame::bulk_string(
+                handler
+                    .get_session_manager()
+                    .client_info(handler.get_session().get_id())
+                    .unwrap_or_default(),
             )),
             "SETNAME" => {
                 if self.args.len() != 1 {
@@ -100,7 +106,14 @@ impl Client {
                         "ERR wrong number of arguments for 'client|setname' command".to_string(),
                     ));
                 }
-                handler.set_client_name(Some(self.args[0].clone()));
+                let name = &self.args[0];
+                if !name.bytes().all(|byte| (b'!'..=b'~').contains(&byte)) {
+                    return Ok(Frame::Error(
+                        "ERR Client names cannot contain spaces, newlines or special characters."
+                            .to_string(),
+                    ));
+                }
+                handler.set_client_name((!name.is_empty()).then(|| name.clone()));
                 Ok(Frame::Ok)
             }
             "GETNAME" => {

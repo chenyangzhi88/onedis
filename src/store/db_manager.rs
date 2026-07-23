@@ -78,9 +78,39 @@ pub struct DatabaseManager {
     list_notify: Arc<Notify>,
     zset_notify: Arc<Notify>,
     stream_notify: Arc<Notify>,
+    background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl DatabaseManager {
+    fn request_shutdown(&self) {
+        self.fulltext_shutdown.store(true, Ordering::Release);
+        self.retired_gc_shutdown.store(true, Ordering::Release);
+        self.ttl_manager.shutdown();
+    }
+
+    pub async fn shutdown(&self) {
+        self.request_shutdown();
+        let tasks = {
+            let mut tasks = self
+                .background_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *tasks)
+        };
+        for mut task in tasks {
+            if tokio::time::timeout(Duration::from_secs(1), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        for db in &self.dbs {
+            db.shutdown_fulltext_runtime();
+        }
+    }
+
     pub async fn new_async(args: Arc<ResolvedArgs>) -> Self {
         let options = FileConfig::load_from_path(std::path::Path::new(&args.config))
             .and_then(FileConfig::into_options)
@@ -135,7 +165,7 @@ impl DatabaseManager {
         let fulltext_shutdown = Arc::new(AtomicBool::new(false));
         let fulltext_worker_shutdown = fulltext_shutdown.clone();
         let fulltext_worker_dbs = dbs.clone();
-        tokio::spawn(async move {
+        let fulltext_task = tokio::spawn(async move {
             while !fulltext_worker_shutdown.load(Ordering::Acquire) {
                 for db in &fulltext_worker_dbs {
                     if let Err(err) = db.fulltext_maintenance_tick() {
@@ -149,7 +179,7 @@ impl DatabaseManager {
         let retired_gc_shutdown = Arc::new(AtomicBool::new(false));
         let retired_gc_worker_shutdown = retired_gc_shutdown.clone();
         let retired_gc_worker_dbs = dbs.clone();
-        tokio::spawn(async move {
+        let retired_gc_task = tokio::spawn(async move {
             while !retired_gc_worker_shutdown.load(Ordering::Acquire) {
                 for db in &retired_gc_worker_dbs {
                     let reclaimed = db.retired_version_gc_tick();
@@ -164,7 +194,7 @@ impl DatabaseManager {
         });
 
         // Start background TTL sweeper
-        ttl_manager.start_sweeper();
+        let ttl_task = ttl_manager.start_sweeper();
 
         DatabaseManager {
             dbs,
@@ -177,6 +207,7 @@ impl DatabaseManager {
             list_notify,
             zset_notify,
             stream_notify,
+            background_tasks: std::sync::Mutex::new(vec![fulltext_task, retired_gc_task, ttl_task]),
         }
     }
 
@@ -385,8 +416,16 @@ fn sanitize_property_field(field: &str) -> String {
 
 impl Drop for DatabaseManager {
     fn drop(&mut self) {
-        self.fulltext_shutdown.store(true, Ordering::Release);
-        self.retired_gc_shutdown.store(true, Ordering::Release);
-        self.ttl_manager.shutdown();
+        self.request_shutdown();
+        let tasks = self
+            .background_tasks
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for task in tasks.drain(..) {
+            task.abort();
+        }
+        for db in &self.dbs {
+            db.shutdown_fulltext_runtime();
+        }
     }
 }

@@ -163,7 +163,7 @@ async fn session_manager_tracks_sessions_acl_and_pubsub_lifecycle() {
     session.set_name(Some("client-a".to_string()));
     session.set_last_cmd("get".to_string());
     let session_id = session.get_id();
-    manager.create_session(session.clone());
+    manager.create_session(&session);
 
     assert_eq!(manager.get_connection_count(), 1);
     assert!(manager.is_over_max_clients(1));
@@ -175,7 +175,7 @@ async fn session_manager_tracks_sessions_acl_and_pubsub_lifecycle() {
 
     session.set_current_db(3);
     session.set_user("limited".to_string());
-    manager.update_session(session);
+    manager.update_session(&session);
     assert_eq!(manager.acl_whoami(session_id), "limited");
     assert!(manager.acl_authenticate("default", ""));
     assert!(
@@ -207,12 +207,18 @@ async fn session_manager_tracks_sessions_acl_and_pubsub_lifecycle() {
     manager.register_channel("news", session_id, writer.clone());
     manager.register_pattern("n*", session_id, writer.clone());
     manager.register_shard_channel("news", session_id, writer);
+    let client_info = manager.client_info(session_id).unwrap();
+    assert!(client_info.contains("sub=1"));
+    assert!(client_info.contains("psub=1"));
+    assert!(client_info.contains("ssub=1"));
+    assert!(client_info.contains("flags=P"));
+    assert!(client_info.contains("user=limited"));
     assert_eq!(manager.channel_count("news", false), 1);
     assert_eq!(manager.channel_count("news", true), 1);
     assert_eq!(manager.pattern_count(), 1);
     assert!(manager.channel_names(false).contains(&"news".to_string()));
 
-    assert_eq!(manager.publish("news", "hello", false).await, 2);
+    assert_eq!(manager.publish("news", "hello", false), 2);
     let mut buf = vec![0; 256];
     let read = client_stream.read(&mut buf).await.unwrap();
     let payload = String::from_utf8_lossy(&buf[..read]);

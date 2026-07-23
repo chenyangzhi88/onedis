@@ -200,7 +200,9 @@ async fn assert_scan_commands(db: &Db) {
     );
     assert!(matches!(
         scan,
-        Frame::Array(values) if values.len() == 2 && matches!(values.first(), Some(Frame::Integer(_)))
+        Frame::Array(values)
+            if values.len() == 2
+                && matches!(values.first(), Some(Frame::BulkString(_)))
     ));
     let async_scan = apply_async(db, &["sscan", "out-union", "0"]).await;
     assert!(matches!(async_scan, Frame::Array(values) if values.len() == 2));

@@ -135,6 +135,10 @@ fn fulltext_file_prefix(db_index: u16, index: &str) -> Vec<u8> {
     key
 }
 
+fn fulltext_generation_storage_name(index: &str, generation: u64) -> String {
+    format!("__onedis_fulltext_generation__:{generation}:{index}")
+}
+
 fn fulltext_legacy_file_prefix(db_index: u16, index: &str) -> Vec<u8> {
     let mut key = db_index.to_be_bytes().to_vec();
     key.extend_from_slice(&FULLTEXT_FILE_NAMESPACE);

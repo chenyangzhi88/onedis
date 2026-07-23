@@ -1,12 +1,17 @@
 impl Db {
     fn fulltext_refresh_index(&self, index: &str, force: bool) -> Result<(), Error> {
         let started = Instant::now();
-        let result = self.fulltext_refresh_index_inner(index, force);
+        let result = self.fulltext_refresh_index_inner(index, force, None);
         global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
         result
     }
 
-    fn fulltext_refresh_index_inner(&self, index: &str, force: bool) -> Result<(), Error> {
+    fn fulltext_refresh_index_inner(
+        &self,
+        index: &str,
+        force: bool,
+        external_deadline: Option<Instant>,
+    ) -> Result<(), Error> {
         let mut meta = self.read_fulltext_meta_direct(index)?;
         if matches!(meta.state, FullTextIndexState::Dropping) {
             return Ok(());
@@ -33,7 +38,16 @@ impl Db {
 
         let threshold = self.fulltext_outbox_compact_threshold()?;
         self.fulltext_compact_outbox_if_needed(index, meta.generation, threshold)?;
-        let deadline = Instant::now() + Duration::from_millis(self.fulltext_refresh_timeout_ms()?);
+        let refresh_timeout_ms = self.fulltext_refresh_timeout_ms()?;
+        let deadline = match (external_deadline, refresh_timeout_ms) {
+            (_, 0) => Instant::now(),
+            (Some(deadline), _) => deadline,
+            (None, timeout_ms) => {
+                let now = Instant::now();
+                now.checked_add(Duration::from_millis(timeout_ms))
+                    .unwrap_or_else(|| now + Duration::from_secs(100 * 365 * 24 * 60 * 60))
+            }
+        };
         let result = self.fulltext_apply_pending(index, &mut meta, &runtime, &policy, deadline);
         if let Err(err) = result {
             self.fulltext_mark_dirty(index)?;
@@ -41,6 +55,49 @@ impl Db {
             return Err(err);
         }
         Ok(())
+    }
+
+    fn fulltext_refresh_index_until_caught_up(
+        &self,
+        index: &str,
+        deadline: Instant,
+    ) -> Result<bool, Error> {
+        loop {
+            let before = self.fulltext_refresh_progress(index)?;
+            if before.0 {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            let started = Instant::now();
+            let result = self.fulltext_refresh_index_inner(index, true, Some(deadline));
+            global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
+            result?;
+            let after = self.fulltext_refresh_progress(index)?;
+            if after.0 {
+                return Ok(true);
+            }
+            if after == before || Instant::now() >= deadline {
+                return Ok(false);
+            }
+        }
+    }
+
+    fn fulltext_refresh_progress(&self, index: &str) -> Result<(bool, usize, Option<String>), Error> {
+        let meta = self.read_fulltext_meta_direct(index)?;
+        let pending = self
+            .store
+            .scan_prefix_raw(&fulltext_outbox_prefix(self.db_index, index))
+            .len();
+        let complete = pending == 0
+            && !matches!(
+                meta.state,
+                FullTextIndexState::Backfilling
+                    | FullTextIndexState::Rebuilding
+                    | FullTextIndexState::Dirty
+            );
+        Ok((complete, pending, meta.backfill_cursor))
     }
 
     fn fulltext_rebuild_index(&self, index: &str) -> Result<(), Error> {

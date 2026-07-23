@@ -121,7 +121,7 @@ fn seed_db() -> (TempDir, Db) {
                 "title",
                 "quick fox",
                 "category",
-                "book|animal",
+                "book,animal",
                 "price",
                 "10"
             ],

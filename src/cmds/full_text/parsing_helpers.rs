@@ -268,6 +268,7 @@ fn default_fulltext_search_options() -> FullTextSearchOptions {
         inorder: false,
         language: None,
         payload: None,
+        scorer: FullTextScorer::Bm25Std,
         summarize: false,
         highlight: false,
         explain_score: false,
@@ -343,5 +344,4 @@ fn skip_search_display_options(frame: &Frame, mut idx: usize) -> usize {
     }
     idx
 }
-
 

@@ -9,8 +9,12 @@ impl FullTextRuntime {
         let key_field = builder.add_text_field(FULLTEXT_KEY_FIELD, STRING | STORED);
         let mut text_fields = Vec::new();
         let mut text_field_settings = HashMap::new();
+        let mut tag_field_settings = HashMap::new();
         let mut source_fields = HashMap::new();
         let mut query_fields = HashMap::new();
+        let default_language = normalize_fulltext_language(
+            meta.index_options.language.as_deref().unwrap_or("english"),
+        )?;
         let index_stopwords = meta
             .index_options
             .stopwords
@@ -26,7 +30,17 @@ impl FullTextRuntime {
             let attribute = field.attribute_name();
             let tantivy_field = match field.kind {
                 FullTextFieldKind::Text => {
-                    let field_id = builder.add_text_field(attribute, TEXT);
+                    let index_option = if meta.index_options.no_freqs {
+                        IndexRecordOption::Basic
+                    } else if meta.index_options.no_offsets || meta.index_options.no_hl {
+                        IndexRecordOption::WithFreqs
+                    } else {
+                        IndexRecordOption::WithFreqsAndPositions
+                    };
+                    let text_options = TextOptions::default().set_indexing_options(
+                        TextFieldIndexing::default().set_index_option(index_option),
+                    );
+                    let field_id = builder.add_text_field(attribute, text_options);
                     text_fields.push(field_id);
                     text_field_settings.insert(
                         field_id,
@@ -35,11 +49,28 @@ impl FullTextRuntime {
                             phonetic: field.options.phonetic.is_some(),
                             with_suffix_trie: field.options.with_suffix_trie,
                             stopwords: index_stopwords.clone(),
+                            language: default_language.clone(),
+                            weight: field.options.weight.unwrap_or(1.0),
                         },
                     );
                     field_id
                 }
-                FullTextFieldKind::Tag => builder.add_text_field(attribute, STRING),
+                FullTextFieldKind::Tag => {
+                    let field_id = builder.add_text_field(attribute, STRING);
+                    tag_field_settings.insert(
+                        field_id,
+                        FullTextTagFieldSettings {
+                            separator: field
+                                .options
+                                .separator
+                                .as_deref()
+                                .and_then(|separator| separator.chars().next())
+                                .unwrap_or(','),
+                            case_sensitive: field.options.case_sensitive,
+                        },
+                    );
+                    field_id
+                }
                 FullTextFieldKind::Numeric => builder.add_f64_field(attribute, INDEXED),
                 FullTextFieldKind::Geo
                 | FullTextFieldKind::GeoShape
@@ -66,9 +97,16 @@ impl FullTextRuntime {
             key_field,
             text_fields,
             text_field_settings,
+            tag_field_settings,
             synonyms,
             source_fields,
             query_fields,
+            default_language,
+            language_field: meta.index_options.language_field.clone(),
+            no_fields: meta.index_options.no_fields,
+            has_positions: !(meta.index_options.no_freqs
+                || meta.index_options.no_offsets
+                || meta.index_options.no_hl),
             last_refresh_at: Instant::now(),
         })
     }

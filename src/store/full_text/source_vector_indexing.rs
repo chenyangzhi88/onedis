@@ -66,32 +66,6 @@ impl Db {
         Ok(Frame::Ok)
     }
 
-    fn fulltext_revalidate_hash_candidates(
-        &self,
-        runtime: &Arc<RwLock<FullTextRuntime>>,
-        candidate_keys: &[String],
-    ) -> Result<bool, Error> {
-        if candidate_keys.is_empty() {
-            return Ok(false);
-        }
-        let mut live = Vec::with_capacity(candidate_keys.len());
-        for key in candidate_keys {
-            live.push((key.clone(), self.hash_get_all(key)?));
-        }
-        let mut runtime = runtime
-            .write()
-            .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
-        for (key, fields) in live {
-            if fields.is_empty() {
-                runtime.delete_hash(&key);
-            } else {
-                runtime.upsert_hash(&key, &fields)?;
-            }
-        }
-        runtime.publish()?;
-        Ok(true)
-    }
-
     fn fulltext_json_fields(
         &self,
         key: &str,
@@ -141,6 +115,31 @@ impl Db {
                     }
                 }
                 FullTextFieldKind::Vector => {}
+            }
+        }
+        for field in [
+            meta.index_options.language_field.as_deref(),
+            meta.index_options.score_field.as_deref(),
+            meta.index_options.payload_field.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if fields.iter().any(|(name, _)| name == field) {
+                continue;
+            }
+            if let Some(value) = self
+                .fulltext_json_values(key, field)?
+                .into_iter()
+                .next()
+                .and_then(|value| match value {
+                    serde_json::Value::String(value) => Some(value),
+                    serde_json::Value::Number(value) => Some(value.to_string()),
+                    serde_json::Value::Bool(value) => Some(value.to_string()),
+                    _ => None,
+                })
+            {
+                fields.push((field.to_string(), value));
             }
         }
         Ok(Some(fields))

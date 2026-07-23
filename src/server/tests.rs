@@ -593,7 +593,7 @@ maxclients = 0
             .is_some()
         );
 
-        let response = handler.handle_borrowed_read_commands(vec![
+        let response = rt.block_on(handler.handle_borrowed_read_commands(vec![
             vec![b"GET".as_slice()],
             vec![b"EXISTS".as_slice()],
             vec![b"TTL".as_slice(), &[0xff]],
@@ -602,7 +602,7 @@ maxclients = 0
             vec![b"TYPE".as_slice(), &[0xff]],
             vec![b"EXISTS".as_slice(), &[0xff], b"missing".as_slice()],
             vec![b"MGET".as_slice(), b"missing".as_slice(), &[0xff]],
-        ]);
+        ]));
         let response_text = text(&response);
         assert!(response_text.contains("wrong number of arguments for 'get' command"));
         assert!(response_text.contains("wrong number of arguments for 'exists' command"));

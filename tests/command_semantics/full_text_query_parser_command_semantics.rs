@@ -236,7 +236,7 @@ fn ft_search_query_parser_rejects_bad_syntax_and_unimplemented_plans() {
     let err = apply_err(&db, &["FT.SEARCH", "idx", "@price:[10 nope]"]);
     assert!(err.to_string().contains("invalid numeric range"));
 
-    assert_search_ids(
+    let err = apply_err(
         &db,
         &[
             "FT.SEARCH",
@@ -249,8 +249,8 @@ fn ft_search_query_parser_rejects_bad_syntax_and_unimplemented_plans() {
             "DIALECT",
             "2",
         ],
-        &[],
     );
+    assert!(err.to_string().contains("vector dimension mismatch"));
 
     assert_search_ids(&db, &["FT.SEARCH", "idx", "@location:[0 0 1 km]"], &[]);
 }

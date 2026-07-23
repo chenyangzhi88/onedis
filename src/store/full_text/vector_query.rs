@@ -1,4 +1,4 @@
-fn fulltext_vector_plan(ast: &FullTextQueryAst) -> Result<FullTextVectorPlan<'_>, Error> {
+fn fulltext_vector_plan(ast: &FullTextQueryAst) -> Result<FullTextVectorPlan, Error> {
     match ast {
         FullTextQueryAst::VectorKnn {
             filter,
@@ -7,7 +7,8 @@ fn fulltext_vector_plan(ast: &FullTextQueryAst) -> Result<FullTextVectorPlan<'_>
             blob_param,
         } => Ok(FullTextVectorPlan {
             kind: FullTextVectorPlanKind::Knn { k: *k },
-            filter: Some(filter),
+            filter: (!matches!(filter.as_ref(), FullTextQueryAst::All))
+                .then(|| filter.as_ref().clone()),
             field: field.clone(),
             blob_param: blob_param.clone(),
         }),
@@ -24,9 +25,59 @@ fn fulltext_vector_plan(ast: &FullTextQueryAst) -> Result<FullTextVectorPlan<'_>
             blob_param: blob_param.clone(),
         }),
         FullTextQueryAst::Attributed { expr, .. } => fulltext_vector_plan(expr),
+        FullTextQueryAst::Field { fields, expr } => {
+            let mut plan = fulltext_vector_plan(expr)?;
+            if let Some(filter) = plan.filter.take() {
+                plan.filter = Some(FullTextQueryAst::Field {
+                    fields: fields.clone(),
+                    expr: Box::new(filter),
+                });
+            }
+            Ok(plan)
+        }
+        FullTextQueryAst::And(children) => {
+            let mut vector_plan = None;
+            let mut scalar_filters = Vec::new();
+            for child in children {
+                if contains_fulltext_vector_query(child) {
+                    if vector_plan.is_some() {
+                        return Err(Error::msg(
+                            "ERR multiple vector clauses are not supported in one query",
+                        ));
+                    }
+                    vector_plan = Some(fulltext_vector_plan(child)?);
+                } else {
+                    scalar_filters.push(child.clone());
+                }
+            }
+            let mut plan = vector_plan.ok_or_else(|| {
+                Error::msg("ERR fulltext vector query execution is not implemented")
+            })?;
+            if let Some(filter) = plan.filter.take() {
+                scalar_filters.push(filter);
+            }
+            plan.filter = fulltext_combine_vector_filters(scalar_filters);
+            Ok(plan)
+        }
+        FullTextQueryAst::Or(_)
+        | FullTextQueryAst::Not(_)
+        | FullTextQueryAst::Optional(_) => Err(Error::msg(
+            "ERR vector clauses support scalar filters through conjunction only",
+        )),
         _ => Err(Error::msg(
             "ERR fulltext vector query execution is not implemented",
         )),
+    }
+}
+
+fn fulltext_combine_vector_filters(
+    mut filters: Vec<FullTextQueryAst>,
+) -> Option<FullTextQueryAst> {
+    filters.retain(|filter| !matches!(filter, FullTextQueryAst::All));
+    match filters.len() {
+        0 => None,
+        1 => filters.pop(),
+        _ => Some(FullTextQueryAst::And(filters)),
     }
 }
 
@@ -193,4 +244,3 @@ fn fulltext_vector_distance(distance: &str, lhs: &[f32], rhs: &[f32]) -> Result<
         _ => Err(Error::msg("ERR invalid VECTOR DISTANCE_METRIC")),
     }
 }
-

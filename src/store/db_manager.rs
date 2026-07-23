@@ -74,6 +74,7 @@ pub struct DatabaseManager {
     version_counter: Arc<VersionCounter>,
     ttl_manager: Arc<TtlManager>,
     fulltext_shutdown: Arc<AtomicBool>,
+    retired_gc_shutdown: Arc<AtomicBool>,
     list_notify: Arc<Notify>,
     zset_notify: Arc<Notify>,
     stream_notify: Arc<Notify>,
@@ -145,6 +146,23 @@ impl DatabaseManager {
             }
         });
 
+        let retired_gc_shutdown = Arc::new(AtomicBool::new(false));
+        let retired_gc_worker_shutdown = retired_gc_shutdown.clone();
+        let retired_gc_worker_dbs = dbs.clone();
+        tokio::spawn(async move {
+            while !retired_gc_worker_shutdown.load(Ordering::Acquire) {
+                for db in &retired_gc_worker_dbs {
+                    let reclaimed = db.retired_version_gc_tick();
+                    if reclaimed > 0 {
+                        log::debug!(
+                            "retired version GC reclaimed {reclaimed} version namespace(s)"
+                        );
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
         // Start background TTL sweeper
         ttl_manager.start_sweeper();
 
@@ -155,6 +173,7 @@ impl DatabaseManager {
             version_counter,
             ttl_manager,
             fulltext_shutdown,
+            retired_gc_shutdown,
             list_notify,
             zset_notify,
             stream_notify,
@@ -367,6 +386,7 @@ fn sanitize_property_field(field: &str) -> String {
 impl Drop for DatabaseManager {
     fn drop(&mut self) {
         self.fulltext_shutdown.store(true, Ordering::Release);
+        self.retired_gc_shutdown.store(true, Ordering::Release);
         self.ttl_manager.shutdown();
     }
 }

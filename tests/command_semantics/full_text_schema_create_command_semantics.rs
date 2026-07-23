@@ -66,6 +66,16 @@ fn resp_text(frame: Frame) -> String {
     String::from_utf8(frame.as_bytes()).expect("frame should be UTF-8")
 }
 
+fn total(frame: Frame) -> i64 {
+    let Frame::Array(items) = frame else {
+        panic!("expected array");
+    };
+    let Some(Frame::Integer(total)) = items.first() else {
+        panic!("expected total");
+    };
+    *total
+}
+
 #[test]
 fn ft_create_parses_and_persists_hash_schema() {
     let (dir, db) = make_db();
@@ -305,4 +315,70 @@ fn ft_create_rejects_invalid_schema_combinations() {
         ],
     );
     assert!(err.to_string().contains("invalid fulltext schema"));
+}
+
+#[test]
+fn ft_create_filter_participates_in_backfill_and_incremental_updates() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &["HSET", "doc:1", "title", "visible", "published", "1"],
+    );
+    apply(&db, &["HSET", "doc:2", "title", "hidden", "published", "0"]);
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "idx",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "doc:",
+            "FILTER",
+            "@published==1",
+            "SCHEMA",
+            "title",
+            "TEXT",
+        ],
+    );
+
+    assert_eq!(total(apply(&db, &["FT.SEARCH", "idx", "*"])), 1);
+    assert_eq!(total(apply(&db, &["FT.SEARCH", "idx", "hidden"])), 0);
+
+    apply(&db, &["HSET", "doc:2", "published", "1"]);
+    assert_eq!(total(apply(&db, &["FT.SEARCH", "idx", "hidden"])), 1);
+}
+
+#[test]
+fn ft_create_temporary_index_expires_and_is_purged_from_list() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "ephemeral",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "doc:",
+            "TEMPORARY",
+            "1",
+            "SCHEMA",
+            "title",
+            "TEXT",
+        ],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert_eq!(total(apply(&db, &["FT.SEARCH", "ephemeral", "*"])), 0);
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let listed = resp_text(apply(&db, &["FT._LIST"]));
+    assert!(listed.contains("ephemeral"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let listed = resp_text(apply(&db, &["FT._LIST"]));
+    assert!(!listed.contains("ephemeral"));
+    let err = apply_err(&db, &["FT.SEARCH", "ephemeral", "*"]);
+    assert!(err.to_string().contains("index does not exist"));
 }

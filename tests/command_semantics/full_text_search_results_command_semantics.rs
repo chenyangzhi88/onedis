@@ -316,3 +316,172 @@ fn ft_search_results_parses_execution_options_and_rejects_unsupported_ones() {
     );
     assert!(err.to_string().contains("invalid geo field"));
 }
+
+#[test]
+fn ft_search_executes_field_weights_optional_terms_and_selected_scorers() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "weighted",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "weight:",
+            "SCHEMA",
+            "title",
+            "TEXT",
+            "WEIGHT",
+            "5",
+            "body",
+            "TEXT",
+        ],
+    );
+    apply(
+        &db,
+        &["HSET", "weight:1", "title", "needle", "body", "plain"],
+    );
+    apply(
+        &db,
+        &["HSET", "weight:2", "title", "plain", "body", "needle"],
+    );
+
+    let weighted = array(apply(
+        &db,
+        &["FT.SEARCH", "weighted", "needle", "WITHSCORES", "NOCONTENT"],
+    ));
+    assert_eq!(bulk_text(&weighted[1]), "weight:1");
+
+    let standard_score = bulk_text(&weighted[2]).parse::<f32>().unwrap();
+    let legacy = array(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "weighted",
+            "needle",
+            "SCORER",
+            "BM25",
+            "WITHSCORES",
+            "NOCONTENT",
+        ],
+    ));
+    let legacy_score = bulk_text(&legacy[2]).parse::<f32>().unwrap();
+    assert_ne!(standard_score, legacy_score);
+
+    apply(
+        &db,
+        &["HSET", "weight:3", "title", "unrelated", "body", "plain"],
+    );
+    let optional = array(apply(
+        &db,
+        &["FT.SEARCH", "weighted", "~needle", "NOCONTENT"],
+    ));
+    assert_eq!(integer(&optional[0]), 3);
+    assert_eq!(bulk_text(&optional[1]), "weight:1");
+}
+
+#[test]
+fn ft_search_executes_score_and_payload_fields() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "scored",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "score:",
+            "SCORE_FIELD",
+            "rank",
+            "PAYLOAD_FIELD",
+            "payload",
+            "SCHEMA",
+            "title",
+            "TEXT",
+        ],
+    );
+    apply(
+        &db,
+        &[
+            "HSET", "score:1", "title", "same", "rank", "0.2", "payload", "first",
+        ],
+    );
+    apply(
+        &db,
+        &[
+            "HSET", "score:2", "title", "same", "rank", "0.9", "payload", "second",
+        ],
+    );
+
+    let result = array(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "scored",
+            "same",
+            "SCORER",
+            "DOCSCORE",
+            "WITHSCORES",
+            "WITHPAYLOADS",
+            "NOCONTENT",
+        ],
+    ));
+    assert_eq!(integer(&result[0]), 2);
+    assert_eq!(bulk_text(&result[1]), "score:2");
+    assert_eq!(bulk_text(&result[2]), "0.9");
+    assert_eq!(bulk_text(&result[3]), "second");
+}
+
+#[test]
+fn ft_search_slop_and_inorder_change_phrase_execution() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "phrases",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "phrase:",
+            "SCHEMA",
+            "body",
+            "TEXT",
+        ],
+    );
+    apply(&db, &["HSET", "phrase:1", "body", "quick brown fox"]);
+    apply(&db, &["HSET", "phrase:2", "body", "fox brown quick"]);
+
+    let relaxed = array(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "phrases",
+            "\"quick fox\"",
+            "SLOP",
+            "4",
+            "NOCONTENT",
+        ],
+    ));
+    assert_eq!(integer(&relaxed[0]), 2);
+
+    let ordered = array(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "phrases",
+            "\"quick fox\"",
+            "SLOP",
+            "4",
+            "INORDER",
+            "NOCONTENT",
+        ],
+    ));
+    assert_eq!(integer(&ordered[0]), 1);
+    assert_eq!(bulk_text(&ordered[1]), "phrase:1");
+}

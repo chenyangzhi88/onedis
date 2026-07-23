@@ -6,16 +6,18 @@ impl Db {
         runtime: &Arc<RwLock<FullTextRuntime>>,
         ast: &FullTextQueryAst,
         options: &FullTextSearchOptions,
+        deadline: Instant,
+        fail_on_timeout: bool,
     ) -> Result<Vec<FullTextLiveHit>, Error> {
         let plan = fulltext_vector_plan(ast)?;
         let query_vector = parse_fulltext_vector_param(&options.params, &plan.blob_param)?;
         let vector_field = fulltext_vector_schema_field(meta, &plan.field)?;
         let vector_index = fulltext_vector_index_name(index, vector_field.attribute_name());
-        let allow = if let Some(filter) = plan.filter {
+        let allow = if let Some(filter) = plan.filter.as_ref() {
             let hits = runtime
                 .read()
                 .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
-                .search_ast(filter, &options)?;
+                .search_ast(filter, options)?;
             Some(hits.into_iter().map(|hit| hit.key).collect::<HashSet<_>>())
         } else {
             None
@@ -30,7 +32,13 @@ impl Db {
                     .map(|options| options.algorithm),
                 Some(FullTextVectorAlgorithm::Flat)
             ) {
-            self.fulltext_vector_exact_results(&vector_index, vector_field, &query_vector)?
+            self.fulltext_vector_exact_results(
+                &vector_index,
+                vector_field,
+                &query_vector,
+                deadline,
+                fail_on_timeout,
+            )?
         } else {
             let vector_limit = match plan.kind {
                 FullTextVectorPlanKind::Knn { k } => {
@@ -55,6 +63,9 @@ impl Db {
         };
         let mut live = Vec::new();
         for result in vector_results {
+            if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
+                break;
+            }
             if allow
                 .as_ref()
                 .is_some_and(|allow| !allow.contains(&result.id))
@@ -90,6 +101,8 @@ impl Db {
         vector_index: &str,
         vector_field: &FullTextFieldSchema,
         query: &[f32],
+        deadline: Instant,
+        fail_on_timeout: bool,
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let distance = fulltext_vector_attr(
             vector_field
@@ -101,6 +114,9 @@ impl Db {
         )?;
         let mut results = Vec::new();
         for id in self.vector_ids(vector_index)? {
+            if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
+                break;
+            }
             let Some(element) = self.vector_element(vector_index, &id)? else {
                 continue;
             };

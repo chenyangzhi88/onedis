@@ -18,9 +18,14 @@ struct FullTextRuntime {
     key_field: Field,
     text_fields: Vec<Field>,
     text_field_settings: HashMap<Field, FullTextTextFieldSettings>,
+    tag_field_settings: HashMap<Field, FullTextTagFieldSettings>,
     synonyms: HashMap<String, HashSet<String>>,
     source_fields: HashMap<String, (Field, FullTextFieldKind)>,
     query_fields: HashMap<String, (Field, FullTextFieldKind)>,
+    default_language: String,
+    language_field: Option<String>,
+    no_fields: bool,
+    has_positions: bool,
     last_refresh_at: Instant,
 }
 
@@ -30,4 +35,12 @@ struct FullTextTextFieldSettings {
     phonetic: bool,
     with_suffix_trie: bool,
     stopwords: HashSet<String>,
+    language: String,
+    weight: f32,
+}
+
+#[derive(Clone, Debug)]
+struct FullTextTagFieldSettings {
+    separator: char,
+    case_sensitive: bool,
 }

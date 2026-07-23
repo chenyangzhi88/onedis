@@ -1,21 +1,26 @@
 fn fulltext_materialize_text(value: &str, settings: &FullTextTextFieldSettings) -> String {
-    let mut tokens = Vec::new();
-    for token in fulltext_tokenize(value) {
-        if settings.stopwords.contains(&token) {
-            continue;
-        }
-        fulltext_push_unique(&mut tokens, token.clone());
+    let source_tokens = fulltext_tokenize_with_language(value, &settings.language)
+        .into_iter()
+        .filter(|token| !settings.stopwords.contains(token))
+        .collect::<Vec<_>>();
+    // Keep source terms contiguous so phrase positions are not broken by derived terms.
+    // Stems, phonetic codes and suffixes remain searchable as additional trailing terms.
+    let mut tokens = source_tokens.clone();
+    for token in source_tokens {
         if !settings.nostem {
-            fulltext_push_unique(&mut tokens, fulltext_english_stem(&token));
+            let stem = fulltext_stem(&token, &settings.language);
+            if stem != token {
+                tokens.push(stem);
+            }
         }
         if settings.phonetic
             && let Some(code) = fulltext_soundex(&token)
         {
-            fulltext_push_unique(&mut tokens, format!("phon{}", code.to_lowercase()));
+            tokens.push(format!("phon{}", code.to_lowercase()));
         }
         if settings.with_suffix_trie {
             for suffix in fulltext_suffix_tokens(&token) {
-                fulltext_push_unique(&mut tokens, suffix);
+                tokens.push(suffix);
             }
         }
     }
@@ -35,12 +40,14 @@ fn fulltext_query_term_variants(
             phonetic: false,
             with_suffix_trie: false,
             stopwords: HashSet::new(),
+            language: "english".to_string(),
+            weight: 1.0,
         });
-    let mut input_tokens = fulltext_tokenize(term);
+    let mut input_tokens = fulltext_tokenize_with_language(term, &settings.language);
     for token in input_tokens.clone() {
         if let Some(terms) = synonyms.get(&token) {
             for synonym in terms {
-                input_tokens.extend(fulltext_tokenize(synonym));
+                input_tokens.extend(fulltext_tokenize_with_language(synonym, &settings.language));
             }
         }
     }
@@ -50,7 +57,7 @@ fn fulltext_query_term_variants(
         }
         fulltext_push_unique(&mut variants, token.clone());
         if !settings.nostem {
-            fulltext_push_unique(&mut variants, fulltext_english_stem(&token));
+            fulltext_push_unique(&mut variants, fulltext_stem(&token, &settings.language));
         }
         if settings.phonetic
             && let Some(code) = fulltext_soundex(&token)
@@ -78,32 +85,68 @@ fn fulltext_simple_query_term(query_text: &str) -> Option<&str> {
 }
 
 fn fulltext_tokenize(value: &str) -> Vec<String> {
+    fulltext_tokenize_with_language(value, "english")
+}
+
+fn fulltext_tokenize_with_language(value: &str, _language: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    let mut current = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch.to_ascii_lowercase());
-            continue;
+    for word in value.unicode_words() {
+        if word.chars().any(fulltext_is_cjk) {
+            for segment in fulltext_jieba().cut(word, false) {
+                let segment = segment.word.trim();
+                if segment.is_empty() {
+                    continue;
+                }
+                let mut variants = Vec::new();
+                fulltext_push_unique(&mut variants, segment.to_lowercase());
+                let cjk = segment
+                    .chars()
+                    .filter(|ch| fulltext_is_cjk(*ch))
+                    .collect::<Vec<_>>();
+                for ch in &cjk {
+                    fulltext_push_unique(&mut variants, ch.to_string());
+                }
+                for pair in cjk.windows(2) {
+                    fulltext_push_unique(&mut variants, pair.iter().collect());
+                }
+                tokens.extend(variants);
+            }
+        } else {
+            let normalized = word
+                .chars()
+                .filter(|ch| ch.is_alphanumeric() || *ch == '_')
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            if !normalized.is_empty() {
+                tokens.push(normalized);
+            }
         }
-        if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-        if fulltext_is_cjk(ch) {
-            tokens.push(ch.to_string());
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    for window in value
-        .chars()
-        .filter(|ch| fulltext_is_cjk(*ch))
-        .collect::<Vec<_>>()
-        .windows(2)
-    {
-        tokens.push(window.iter().collect());
     }
     tokens
+}
+
+fn fulltext_split_indexed_tags(
+    value: &str,
+    separator: char,
+    case_sensitive: bool,
+) -> Vec<String> {
+    value
+        .split(separator)
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(|tag| {
+            if case_sensitive {
+                tag.to_string()
+            } else {
+                tag.to_lowercase()
+            }
+        })
+        .collect()
+}
+
+fn fulltext_jieba() -> &'static Jieba {
+    static JIEBA: OnceLock<Jieba> = OnceLock::new();
+    JIEBA.get_or_init(Jieba::new)
 }
 
 fn fulltext_is_cjk(ch: char) -> bool {
@@ -113,29 +156,59 @@ fn fulltext_is_cjk(ch: char) -> bool {
     )
 }
 
-fn fulltext_english_stem(token: &str) -> String {
-    if token.len() <= 3 {
-        return token.to_string();
-    }
-    let mut stem = if token.ends_with("ies") && token.len() > 4 {
-        format!("{}y", &token[..token.len() - 3])
-    } else if token.ends_with("ing") && token.len() > 5 {
-        token[..token.len() - 3].to_string()
-    } else if token.ends_with("ed") && token.len() > 4 {
-        token[..token.len() - 2].to_string()
-    } else if token.ends_with('s') && token.len() > 4 {
-        token[..token.len() - 1].to_string()
-    } else {
-        token.to_string()
+fn normalize_fulltext_language(language: &str) -> Result<String, Error> {
+    let normalized = language.trim().to_ascii_lowercase();
+    let canonical = match normalized.as_str() {
+        "arabic" => "arabic",
+        "chinese" | "zh" | "zh-cn" | "zh-tw" => "chinese",
+        "danish" => "danish",
+        "dutch" => "dutch",
+        "english" | "en" => "english",
+        "finnish" => "finnish",
+        "french" => "french",
+        "german" => "german",
+        "greek" => "greek",
+        "hungarian" => "hungarian",
+        "italian" => "italian",
+        "norwegian" => "norwegian",
+        "portuguese" => "portuguese",
+        "romanian" => "romanian",
+        "russian" => "russian",
+        "spanish" => "spanish",
+        "swedish" => "swedish",
+        "tamil" => "tamil",
+        "turkish" => "turkish",
+        _ => return Err(Error::msg("ERR unsupported fulltext language")),
     };
-    if stem.len() >= 3 {
-        let chars = stem.chars().collect::<Vec<_>>();
-        let len = chars.len();
-        if len >= 2 && chars[len - 1] == chars[len - 2] && !matches!(chars[len - 1], 's' | 'z') {
-            stem.pop();
-        }
-    }
-    stem
+    Ok(canonical.to_string())
+}
+
+fn fulltext_stem(token: &str, language: &str) -> String {
+    let algorithm = match language {
+        "arabic" => Some(StemmerAlgorithm::Arabic),
+        "danish" => Some(StemmerAlgorithm::Danish),
+        "dutch" => Some(StemmerAlgorithm::Dutch),
+        "english" => Some(StemmerAlgorithm::English),
+        "finnish" => Some(StemmerAlgorithm::Finnish),
+        "french" => Some(StemmerAlgorithm::French),
+        "german" => Some(StemmerAlgorithm::German),
+        "greek" => Some(StemmerAlgorithm::Greek),
+        "hungarian" => Some(StemmerAlgorithm::Hungarian),
+        "italian" => Some(StemmerAlgorithm::Italian),
+        "norwegian" => Some(StemmerAlgorithm::Norwegian),
+        "portuguese" => Some(StemmerAlgorithm::Portuguese),
+        "romanian" => Some(StemmerAlgorithm::Romanian),
+        "russian" => Some(StemmerAlgorithm::Russian),
+        "spanish" => Some(StemmerAlgorithm::Spanish),
+        "swedish" => Some(StemmerAlgorithm::Swedish),
+        "tamil" => Some(StemmerAlgorithm::Tamil),
+        "turkish" => Some(StemmerAlgorithm::Turkish),
+        "chinese" => None,
+        _ => Some(StemmerAlgorithm::English),
+    };
+    algorithm
+        .map(|algorithm| Stemmer::create(algorithm).stem(token).into_owned())
+        .unwrap_or_else(|| token.to_string())
 }
 
 fn fulltext_soundex(token: &str) -> Option<String> {
@@ -323,4 +396,3 @@ fn fulltext_highlight_one(value: &str, term: &str) -> String {
     out.push_str(&value[cursor..]);
     out
 }
-

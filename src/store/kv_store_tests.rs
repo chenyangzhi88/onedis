@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv_engine::api::SchemalessCompareCondition as CompareCondition;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -74,11 +73,21 @@ mod tests {
         assert!(store.contains_key_async(b"blob:async").await);
 
         let observed = store.get_raw_observed_async(b"a").await;
-        assert_eq!(observed.value.as_deref(), Some(&b"1"[..]));
-        assert!(observed.read_seq > 0);
+        assert_eq!(observed.value().map(Bytes::as_ref), Some(&b"1"[..]));
         let state = store.observe_raw_key_state_async(b"missing").await;
-        assert!(!state.exists);
-        assert!(state.read_seq > 0);
+        assert!(!state.exists());
+
+        store.put_raw(b"a", b"changed");
+        let mut stale_batch = WriteBatch::new();
+        stale_batch.put(b"stale-cas", b"must-not-write");
+        assert!(matches!(
+            store
+                .compare_and_write_batch_async(&[observed.condition()], &stale_batch)
+                .await,
+            Err(Status::ConditionFailed(_))
+        ));
+        assert_eq!(store.get_raw(b"stale-cas"), None);
+        store.put_raw(b"a", b"1");
 
         let keys = vec![b"a".to_vec(), b"missing".to_vec(), b"b".to_vec()];
         assert_eq!(
@@ -246,9 +255,11 @@ mod tests {
             vec![Some(b"value".to_vec()), None]
         );
         let observed = txn.get_raw_observed_async(b"async:txn").await;
-        assert_eq!(observed.value.as_deref(), Some(&b"value"[..]));
-        assert_eq!(observed.read_seq, u64::MAX);
-        assert!(txn.observe_raw_key_state_async(b"async:txn").await.exists);
+        assert_eq!(observed.value().map(Bytes::as_ref), Some(&b"value"[..]));
+        assert!(txn
+            .observe_raw_key_state_async(b"async:txn")
+            .await
+            .exists());
         txn.commit_transaction_async().await.unwrap();
         assert_eq!(store.get_raw(b"async:txn"), Some(b"value".to_vec()));
     }
@@ -311,6 +322,18 @@ mod tests {
         .unwrap();
         assert_eq!(txn.get_raw(b"txnscan:compare"), Some(b"ok".to_vec()));
         assert_eq!(store.get_raw(b"txnscan:compare"), None);
+
+        let observed = txn.get_raw_observed_async(b"txnscan:0").await;
+        txn.put_raw(b"txnscan:0", b"changed-after-observe");
+        let mut stale_batch = WriteBatch::new();
+        stale_batch.put(b"txnscan:stale-cas", b"must-not-write");
+        assert!(matches!(
+            txn.compare_and_write_batch_async(&[observed.condition()], &stale_batch)
+                .await,
+            Err(Status::ConditionFailed(_))
+        ));
+        assert_eq!(txn.get_raw(b"txnscan:stale-cas"), None);
+        txn.put_raw(b"txnscan:0", b"v0");
 
         txn.delete_range(b"txnscan:1", b"txnscan:3");
         assert_eq!(txn.get_raw(b"txnscan:1"), None);

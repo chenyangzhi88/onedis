@@ -3,7 +3,7 @@ use std::{
     fmt::Write,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -286,6 +286,7 @@ pub fn global_metrics() -> Arc<OnedisMetrics> {
 }
 
 pub struct OnedisMetrics {
+    enabled: AtomicBool,
     started: Instant,
     config_databases: AtomicU64,
     config_maxclients: AtomicU64,
@@ -378,6 +379,7 @@ struct CommandMetrics {
 impl OnedisMetrics {
     fn new() -> Self {
         Self {
+            enabled: AtomicBool::new(true),
             started: Instant::now(),
             config_databases: AtomicU64::new(0),
             config_maxclients: AtomicU64::new(0),
@@ -460,15 +462,33 @@ impl OnedisMetrics {
             .store(maxclients as u64, Ordering::Relaxed);
     }
 
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    #[inline]
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
     pub fn connection_accepted(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.connections_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn connection_opened(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.connections_current.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn connection_closed(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.connections_closed.fetch_add(1, Ordering::Relaxed);
         self.connections_current
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -478,26 +498,41 @@ impl OnedisMetrics {
     }
 
     pub fn connection_rejected(&self, reason: &'static str) {
+        if !self.is_enabled() {
+            return;
+        }
         self.connections_rejected.fetch_add(1, Ordering::Relaxed);
         self.record_rejection(reason);
     }
 
     pub fn add_input_bytes(&self, len: usize) {
+        if !self.is_enabled() {
+            return;
+        }
         self.net_input_bytes
             .fetch_add(len as u64, Ordering::Relaxed);
     }
 
     pub fn add_output_bytes(&self, len: usize) {
+        if !self.is_enabled() {
+            return;
+        }
         self.net_output_bytes
             .fetch_add(len as u64, Ordering::Relaxed);
     }
 
     pub fn record_parse_error(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.resp_parse_errors.fetch_add(1, Ordering::Relaxed);
         self.record_rejection("parse_error");
     }
 
     pub fn record_protocol_frames(&self, count: usize) {
+        if !self.is_enabled() {
+            return;
+        }
         self.protocol_frames
             .fetch_add(count as u64, Ordering::Relaxed);
         self.pipeline_commands
@@ -510,6 +545,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_rejection(&self, reason: &'static str) {
+        if !self.is_enabled() {
+            return;
+        }
         if let Some(index) = REJECTION_REASONS.iter().position(|name| *name == reason) {
             self.command_rejections[index].fetch_add(1, Ordering::Relaxed);
         }
@@ -533,6 +571,9 @@ impl OnedisMetrics {
         error_class: Option<&'static str>,
         slow_threshold_us: u64,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         let Some(index) = command_index().get(command).copied() else {
             return;
         };
@@ -556,6 +597,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_storage_read(&self, elapsed_us: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         self.storage_reads.fetch_add(1, Ordering::Relaxed);
         self.storage_read_duration_sum_us
             .fetch_add(elapsed_us, Ordering::Relaxed);
@@ -565,6 +609,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_storage_write(&self, elapsed_us: u64, failed: bool) {
+        if !self.is_enabled() {
+            return;
+        }
         self.storage_writes.fetch_add(1, Ordering::Relaxed);
         if failed {
             self.storage_write_errors.fetch_add(1, Ordering::Relaxed);
@@ -577,6 +624,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_ttl_sweep_duration(&self, elapsed_us: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         self.ttl_sweep_duration_sum_us
             .fetch_add(elapsed_us, Ordering::Relaxed);
         self.ttl_sweep_duration_count
@@ -585,6 +635,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_fulltext_refresh(&self, elapsed_us: u64, failed: bool) {
+        if !self.is_enabled() {
+            return;
+        }
         self.fulltext_refresh_requests
             .fetch_add(1, Ordering::Relaxed);
         if failed {
@@ -598,6 +651,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_fulltext_search(&self, elapsed_us: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         self.fulltext_search_total.fetch_add(1, Ordering::Relaxed);
         self.fulltext_search_duration_sum_us
             .fetch_add(elapsed_us, Ordering::Relaxed);
@@ -607,28 +663,46 @@ impl OnedisMetrics {
     }
 
     pub fn set_stream_snapshot(&self, groups: u64, pending_entries: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         self.stream_groups.store(groups, Ordering::Relaxed);
         self.stream_pending_entries
             .store(pending_entries, Ordering::Relaxed);
     }
 
     pub fn record_stream_read(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.stream_reads.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_stream_claim(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.stream_claims.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_stream_autoclaim(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.stream_autoclaims.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn stream_blocked_started(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.stream_blocked_clients.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn stream_blocked_finished(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.stream_blocked_clients
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_sub(1)
@@ -637,14 +711,23 @@ impl OnedisMetrics {
     }
 
     pub fn set_vector_indexes(&self, indexes: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         self.vector_indexes.store(indexes, Ordering::Relaxed);
     }
 
     pub fn record_vector_write(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.vector_writes.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_vector_search(&self, elapsed_us: u64, failed: bool) {
+        if !self.is_enabled() {
+            return;
+        }
         self.vector_search_total.fetch_add(1, Ordering::Relaxed);
         if failed {
             self.vector_search_errors.fetch_add(1, Ordering::Relaxed);
@@ -657,6 +740,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_lua_eval(&self, elapsed_us: u64, failed: bool) {
+        if !self.is_enabled() {
+            return;
+        }
         self.lua_eval_total.fetch_add(1, Ordering::Relaxed);
         if failed {
             self.lua_eval_errors.fetch_add(1, Ordering::Relaxed);
@@ -668,6 +754,9 @@ impl OnedisMetrics {
     }
 
     pub fn record_wasm_call(&self, elapsed_us: u64, failed: bool) {
+        if !self.is_enabled() {
+            return;
+        }
         self.wasm_calls_total.fetch_add(1, Ordering::Relaxed);
         if failed {
             self.wasm_errors.fetch_add(1, Ordering::Relaxed);

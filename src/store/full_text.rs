@@ -13,23 +13,27 @@ use anyhow::Error;
 use bincode::{Decode, Encode};
 use common::types::write_batch::WriteBatch;
 use dashmap::DashMap;
+use jieba_rs::Jieba;
+use rust_stemmers::{Algorithm as StemmerAlgorithm, Stemmer};
 use tantivy::{
     Index, IndexReader, IndexWriter, Term,
     collector::{Count, TopDocs},
     query::{
-        AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhrasePrefixQuery, Query,
-        QueryParser, RangeQuery, RegexQuery, TermQuery,
+        AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, FuzzyTermQuery, Occur,
+        PhrasePrefixQuery, PhraseQuery, Query, QueryParser, RangeQuery, RegexQuery, TermQuery,
     },
     schema::{
-        Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TEXT, TantivyDocument, Value,
+        Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TantivyDocument,
+        TextFieldIndexing, TextOptions, Value,
     },
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::full_text_directory::KvTantivyDirectory;
 use super::{
     Db, FULLTEXT_FILE_NAMESPACE, FULLTEXT_META_NAMESPACE, FULLTEXT_OUTBOX_NAMESPACE,
-    VectorCreateOptions, VectorSearchOptions, VectorSearchResult, decode_hash_meta_checked,
-    internal_prefix, main_key, prefix_exclusive_upper_bound,
+    VectorCreateOptions, VectorSearchOptions, VectorSearchResult, internal_prefix,
+    logical_main_key_from_raw_key, prefix_exclusive_upper_bound,
 };
 use crate::frame::Frame;
 use crate::observability::metrics::{elapsed_us, global_metrics};

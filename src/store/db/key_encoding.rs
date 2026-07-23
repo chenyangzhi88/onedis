@@ -22,6 +22,7 @@ pub(in crate::store::db) const VECTOR_TAG_NAMESPACE: [u8; 3] = [0xFF, b'v', 0x02
 pub(in crate::store::db) const VECTOR_NUMERIC_NAMESPACE: [u8; 3] = [0xFF, b'v', 0x03];
 pub(in crate::store::db) const VECTOR_SEGMENT_NAMESPACE: [u8; 3] = [0xFF, b'v', 0x04];
 pub(in crate::store::db) const VECTOR_GRAPH_NAMESPACE: [u8; 3] = [0xFF, b'v', 0x05];
+pub(in crate::store::db) const VERSION_OWNER_NAMESPACE: [u8; 3] = [0xFF, b'o', 0x00];
 pub(in crate::store::db) const INDEX_MARKER_VALUE: &[u8] = b"\x01";
 pub(in crate::store::db) const LIST_META_MAGIC: [u8; 4] = *b"ULST";
 pub(in crate::store::db) const STREAM_META_MAGIC: [u8; 4] = *b"USTR";
@@ -456,12 +457,16 @@ pub(in crate::store::db) fn is_known_subkey_namespace(rest: &[u8]) -> bool {
         || rest.starts_with(&STREAM_PEL_NAMESPACE)
         || rest.starts_with(&STREAM_CONSUMER_NAMESPACE)
         || rest.starts_with(&JSON_NODE_NAMESPACE)
+        || rest.starts_with(&FULLTEXT_META_NAMESPACE)
+        || rest.starts_with(&FULLTEXT_FILE_NAMESPACE)
+        || rest.starts_with(&FULLTEXT_OUTBOX_NAMESPACE)
         || rest.starts_with(&VECTOR_META_NAMESPACE)
         || rest.starts_with(&VECTOR_DOC_NAMESPACE)
         || rest.starts_with(&VECTOR_TAG_NAMESPACE)
         || rest.starts_with(&VECTOR_NUMERIC_NAMESPACE)
         || rest.starts_with(&VECTOR_SEGMENT_NAMESPACE)
         || rest.starts_with(&VECTOR_GRAPH_NAMESPACE)
+        || rest.starts_with(&VERSION_OWNER_NAMESPACE)
 }
 
 pub(in crate::store::db) fn logical_main_key_from_raw_key(

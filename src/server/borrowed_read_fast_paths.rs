@@ -1,5 +1,5 @@
 impl Handler {
-    fn handle_borrowed_read_commands(&self, commands: Vec<Vec<&[u8]>>) -> Vec<u8> {
+    async fn handle_borrowed_read_commands(&self, commands: Vec<Vec<&[u8]>>) -> Vec<u8> {
         let db = self.session.get_db().clone();
         let mut out = Vec::with_capacity(commands.len() * 16);
         for args in commands {
@@ -9,7 +9,7 @@ impl Handler {
                     append_error(&mut out, "ERR wrong number of arguments for 'get' command");
                     continue;
                 }
-                match db.get_string_entry_raw_bytes(args[1]) {
+                match db.get_string_entry_raw_bytes_async(args[1]).await {
                     Ok(Some(raw)) => {
                         let value = decode_string_bytes_slice(&raw).unwrap_or_default();
                         append_bulk_string(&mut out, value);
@@ -20,7 +20,7 @@ impl Handler {
             } else if command.eq_ignore_ascii_case(b"MGET") {
                 append_array_len(&mut out, args.len().saturating_sub(1));
                 for key_bytes in &args[1..] {
-                    match db.get_string_entry_raw_bytes(key_bytes) {
+                    match db.get_string_entry_raw_bytes_async(key_bytes).await {
                         Ok(Some(raw)) => {
                             let value = decode_string_bytes_slice(&raw).unwrap_or_default();
                             append_bulk_string(&mut out, value);

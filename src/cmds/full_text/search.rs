@@ -153,9 +153,13 @@ impl FtSearch {
                 }
                 "SCORER" => {
                     let scorer = upper_arg(&frame, idx + 1)?;
-                    if !matches!(scorer.as_str(), "BM25" | "BM25STD" | "DISMAX" | "DOCSCORE") {
-                        return Err(Error::msg("ERR unsupported fulltext scorer"));
-                    }
+                    options.scorer = match scorer.as_str() {
+                        "BM25" => FullTextScorer::Bm25,
+                        "BM25STD" => FullTextScorer::Bm25Std,
+                        "DISMAX" => FullTextScorer::DisMax,
+                        "DOCSCORE" => FullTextScorer::DocScore,
+                        _ => return Err(Error::msg("ERR unsupported fulltext scorer")),
+                    };
                     idx += 2;
                 }
                 "EXPLAINSCORE" => {
@@ -231,4 +235,3 @@ impl FtHybrid {
         self.search.apply_async(db).await
     }
 }
-

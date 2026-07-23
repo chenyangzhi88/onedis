@@ -22,16 +22,16 @@ impl KvStore {
         let trace_id = trace_lrange_scan_sample();
         let total_started_at = trace_id.map(|_| Instant::now());
         let upper_len = upper_bound.as_ref().map(Vec::len).unwrap_or_default();
-        let query = range_query(Some(lower_bound.to_vec()), upper_bound, limit);
+        let query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
         let entries = if self.txn.is_some() {
             let new_cursor_started_at = trace_id.map(|_| Instant::now());
             let cursor = self.with_transaction_mut(|txn| {
-                txn.range_query(query)
-                    .expect("failed to create kv_engine transaction range cursor")
+                txn.scan(query)
+                    .expect("failed to create kv_engine transaction scan cursor")
             }).expect("missing kv_engine transaction");
             let new_cursor_us = new_cursor_started_at.map(|started| started.elapsed().as_micros());
             let collect_started_at = trace_id.map(|_| Instant::now());
-            let entries = collect_txn_range_cursor(cursor, limit);
+            let entries = collect_scan_cursor(cursor, limit);
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_scan sample={} txn=true limit={} entries={} lower_len={} upper_len={} new_cursor_us={} collect_us={} total_us={}",
@@ -52,11 +52,11 @@ impl KvStore {
             let new_cursor_started_at = trace_id.map(|_| Instant::now());
             let cursor = self
                 .table
-                .range_query(query)
-                .expect("failed to create kv_engine range cursor");
+                .scan(query)
+                .expect("failed to create kv_engine scan cursor");
             let new_cursor_us = new_cursor_started_at.map(|started| started.elapsed().as_micros());
             let collect_started_at = trace_id.map(|_| Instant::now());
-            let entries = collect_range_cursor(cursor, limit);
+            let entries = collect_scan_cursor(cursor, limit);
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_scan sample={} txn=false limit={} entries={} lower_len={} upper_len={} new_cursor_us={} collect_us={} total_us={}",
@@ -104,16 +104,16 @@ impl KvStore {
         let trace_id = trace_lrange_scan_sample();
         let total_started_at = trace_id.map(|_| Instant::now());
         let upper_len = upper_bound.as_ref().map(Vec::len).unwrap_or_default();
-        let query = range_query(Some(lower_bound.to_vec()), upper_bound, limit);
+        let query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
         let mut visitor = visitor;
         let seen = if self.txn.is_some() {
             let cursor = self.with_transaction_mut(|txn| {
-                txn.range_query(query)
-                    .expect("failed to create kv_engine transaction range cursor")
+                txn.scan(query)
+                    .expect("failed to create kv_engine transaction scan cursor")
             }).expect("missing kv_engine transaction");
             let scan_started_at = trace_id.map(|_| Instant::now());
             let mut cursor = cursor;
-            let seen = collect_txn_range_cursor_into(&mut cursor, limit, &mut visitor);
+            let seen = collect_scan_cursor_into(&mut cursor, limit, &mut visitor);
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_visit sample={} txn=true limit={} entries={} lower_len={} upper_len={} scan_us={} total_us={}",
@@ -132,11 +132,11 @@ impl KvStore {
         } else {
             let cursor = self
                 .table
-                .range_query(query)
-                .expect("failed to create kv_engine range cursor");
+                .scan(query)
+                .expect("failed to create kv_engine scan cursor");
             let scan_started_at = trace_id.map(|_| Instant::now());
             let mut cursor = cursor;
-            let seen = collect_range_cursor_into(&mut cursor, limit, &mut visitor);
+            let seen = collect_scan_cursor_into(&mut cursor, limit, &mut visitor);
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_visit sample={} txn=false limit={} entries={} lower_len={} upper_len={} scan_us={} total_us={}",

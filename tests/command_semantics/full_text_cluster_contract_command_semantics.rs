@@ -155,7 +155,7 @@ fn ft_cluster_default_and_single_shard_keep_local_search_behavior() {
 }
 
 #[test]
-fn ft_cluster_multi_shard_returns_explicit_routing_errors() {
+fn ft_cluster_multi_shard_uses_local_coordinator_results() {
     let (_dir, db) = make_db();
     seed_docs(&db);
     assert!(matches!(
@@ -167,21 +167,9 @@ fn ft_cluster_multi_shard_returns_explicit_routing_errors() {
         Frame::Ok
     ));
 
-    for args in [
-        &["FT.SEARCH", "idx", "fox"][..],
-        &["FT.AGGREGATE", "idx", "*"][..],
-        &["FT.HYBRID", "idx", "fox"][..],
-    ] {
-        let err = match try_apply(&db, args) {
-            Ok(frame) => panic!("expected cluster routing error, got {}", frame.to_string()),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("requires fulltext cluster routing"),
-            "unexpected error: {err}"
-        );
-    }
+    assert_eq!(total(&apply(&db, &["FT.SEARCH", "idx", "fox"])), Some(2));
+    assert_eq!(total(&apply(&db, &["FT.AGGREGATE", "idx", "*"])), Some(2));
+    assert_eq!(total(&apply(&db, &["FT.HYBRID", "idx", "fox"])), Some(2));
 }
 
 #[test]
@@ -224,7 +212,7 @@ fn ft_cluster_info_and_config_expose_contract() {
     ));
     assert!(matches!(
         nested_value(cluster, "router_state"),
-        Some(Frame::BulkString(value)) if value == b"unsupported"
+        Some(Frame::BulkString(value)) if value == b"local_coordinator"
     ));
     assert!(matches!(
         nested_value(cluster, "merge_policy"),

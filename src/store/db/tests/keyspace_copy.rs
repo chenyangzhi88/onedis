@@ -57,7 +57,7 @@ fn transaction_ttl_index_is_published_after_commit() {
 }
 
 #[test]
-fn set_string_over_hash_removes_old_subkeys() {
+fn set_string_over_hash_hides_old_subkeys_until_retired_version_gc() {
     let db = test_db();
 
     db.hash_set("mixed", "field", "value").unwrap();
@@ -68,11 +68,17 @@ fn set_string_over_hash_removes_old_subkeys() {
 
     db.insert_string_ref("mixed", "plain");
 
-    assert!(!db.store.contains_key(&field_key));
     assert!(matches!(
         db.get("mixed"),
         Some(Structure::String(value)) if value == "plain"
     ));
+    assert_eq!(
+        db.hash_get("mixed", "field").unwrap_err().to_string(),
+        WRONG_TYPE_ERROR
+    );
+    assert!(db.store.contains_key(&field_key));
+    assert_eq!(db.retired_version_gc_once(usize::MAX), 1);
+    assert!(!db.store.contains_key(&field_key));
 }
 
 #[test]

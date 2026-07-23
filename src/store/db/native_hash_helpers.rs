@@ -162,7 +162,7 @@ impl Db {
         key: &str,
         version: u64,
         field: &str,
-    ) -> kv_engine::api::ObservedKvValue {
+    ) -> super::ObservedRawValue {
         let _ = self.hash_field_is_live_async(key, version, field).await;
         self.store
             .get_raw_observed_async(&hash_field_key(self.db_index, key, version, field))

@@ -1,84 +1,57 @@
-fn range_query(lower_bound: Option<Vec<u8>>, upper_bound: Option<Vec<u8>>, limit: usize) -> SchemalessRangeQuery {
-    let batch_limit = limit.clamp(1, 8192);
-    SchemalessRangeQuery {
+fn scan_request(
+    lower_bound: Option<Vec<u8>>,
+    upper_bound: Option<Vec<u8>>,
+    limit: usize,
+) -> KvScanRequest {
+    KvScanRequest {
         bounds: KeyRange::new(lower_bound, upper_bound),
-        projection: RangeProjection::KeyValue,
-        budget: ScanBudget {
-            max_records_per_batch: batch_limit,
-            ..ScanBudget::default()
-        },
-        ..SchemalessRangeQuery::default()
+        projection: KvProjection::KeyValue,
+        limit: Some(limit as u64),
+        ..KvScanRequest::default()
     }
 }
 
-fn collect_range_cursor(mut cursor: kv_engine::api::RangeCursor, limit: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn collect_scan_cursor(mut cursor: KvScanCursor, limit: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut entries = Vec::new();
-    collect_range_cursor_into(&mut cursor, limit, |key, value| {
+    collect_scan_cursor_into(&mut cursor, limit, |key, value| {
         entries.push((key.to_vec(), value.to_vec()));
         true
     });
     entries
 }
 
-fn collect_txn_range_cursor(mut cursor: kv_engine::api::SchemalessTransactionCursor, limit: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut entries = Vec::new();
-    collect_txn_range_cursor_into(&mut cursor, limit, |key, value| {
-        entries.push((key.to_vec(), value.to_vec()));
-        true
-    });
-    entries
-}
-
-fn collect_range_cursor_into<F>(cursor: &mut kv_engine::api::RangeCursor, limit: usize, mut visitor: F) -> usize
+fn collect_scan_cursor_into<F>(cursor: &mut KvScanCursor, limit: usize, mut visitor: F) -> usize
 where
     F: FnMut(&[u8], &[u8]) -> bool,
 {
     let mut seen = 0usize;
-    loop {
-        let batch = cursor
+    while let Some(batch) = cursor
             .next_batch()
-            .expect("failed to advance kv_engine range cursor");
-        let exhausted = batch.exhausted;
-        if !visit_range_batch(&batch, limit, &mut seen, &mut visitor) || exhausted {
+            .expect("failed to advance kv_engine scan cursor")
+    {
+        if !visit_scan_batch(&batch, limit, &mut seen, &mut visitor) {
             break;
         }
     }
     seen
 }
 
-fn collect_txn_range_cursor_into<F>(cursor: &mut kv_engine::api::SchemalessTransactionCursor, limit: usize, mut visitor: F) -> usize
+fn visit_scan_batch<F>(batch: &KvBatch, limit: usize, seen: &mut usize, visitor: &mut F) -> bool
 where
     F: FnMut(&[u8], &[u8]) -> bool,
 {
-    let mut seen = 0usize;
-    loop {
-        let batch = cursor
-            .next_batch()
-            .expect("failed to advance kv_engine transaction range cursor");
-        let exhausted = batch.exhausted;
-        if !visit_range_batch(&batch, limit, &mut seen, &mut visitor) || exhausted {
-            break;
-        }
-    }
-    seen
-}
-
-fn visit_range_batch<F>(batch: &RangeBatch, limit: usize, seen: &mut usize, visitor: &mut F) -> bool
-where
-    F: FnMut(&[u8], &[u8]) -> bool,
-{
-    for record in &batch.records {
+    for index in 0..batch.len() {
         if *seen >= limit {
             return false;
         }
-        let Some(key) = record.key.as_ref() else {
+        let Some(key) = batch.key(index) else {
             continue;
         };
-        let Some(value) = record.value.as_ref() else {
+        let Some(value) = batch.value(index) else {
             continue;
         };
         *seen += 1;
-        if !visitor(key.as_ref(), value.as_ref()) {
+        if !visitor(key, value) {
             return false;
         }
     }

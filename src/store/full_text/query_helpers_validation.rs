@@ -104,6 +104,30 @@ fn numeric_bound_to_tantivy(field: Field, bound: FullTextNumericBound, lower: bo
     }
 }
 
+fn search_bound_to_tantivy(
+    field: Field,
+    bound: FullTextSearchBound,
+    lower: bool,
+) -> Bound<Term> {
+    match (bound, lower) {
+        (FullTextSearchBound::NegInf, true) | (FullTextSearchBound::PosInf, false) => {
+            Bound::Unbounded
+        }
+        (FullTextSearchBound::NegInf, false) => {
+            Bound::Included(Term::from_field_f64(field, f64::MIN))
+        }
+        (FullTextSearchBound::PosInf, true) => {
+            Bound::Included(Term::from_field_f64(field, f64::MAX))
+        }
+        (FullTextSearchBound::Inclusive(value), _) => {
+            Bound::Included(Term::from_field_f64(field, value))
+        }
+        (FullTextSearchBound::Exclusive(value), _) => {
+            Bound::Excluded(Term::from_field_f64(field, value))
+        }
+    }
+}
+
 fn fulltext_wildcard_to_regex(pattern: &str) -> String {
     let mut regex = String::new();
     for ch in pattern.chars() {
@@ -133,6 +157,24 @@ fn validate_fulltext_create(options: &FullTextCreateOptions) -> Result<(), Error
         && (!score.is_finite() || score < 0.0)
     {
         return Err(Error::msg("ERR invalid fulltext score"));
+    }
+    if let Some(language) = options.index_options.language.as_deref() {
+        normalize_fulltext_language(language)?;
+    }
+    for value in [
+        options.index_options.language_field.as_deref(),
+        options.index_options.score_field.as_deref(),
+        options.index_options.payload_field.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.trim().is_empty() {
+            return Err(Error::msg("ERR invalid fulltext index definition"));
+        }
+    }
+    if options.index_options.temporary_seconds == Some(0) {
+        return Err(Error::msg("ERR invalid fulltext temporary duration"));
     }
     if options
         .index_options

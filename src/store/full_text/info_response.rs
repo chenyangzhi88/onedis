@@ -256,7 +256,7 @@ impl Db {
                 Frame::bulk_string(self.fulltext_config_string("CLUSTER_VECTOR_MERGE", "local")?),
                 Frame::bulk_string("router_state"),
                 Frame::bulk_string(if cluster_enabled && cluster_shards > 1 {
-                    "unsupported"
+                    "local_coordinator"
                 } else {
                     "local"
                 }),

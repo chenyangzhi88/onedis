@@ -19,7 +19,8 @@ impl Db {
     ) -> Result<Frame, Error> {
         self.fulltext_reject_cluster_multi_shard("FT.SEARCH")?;
         let options = self.fulltext_effective_search_options(options)?;
-        let live = self.fulltext_collect_live_hits(index, query, &options)?;
+        let live =
+            self.fulltext_collect_live_hits(index, query, &options, FullTextCollectMode::Page)?;
         self.fulltext_search_frame(live, &options, &fulltext_display_terms(query))
     }
 

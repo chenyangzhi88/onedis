@@ -69,6 +69,7 @@
             inorder: false,
             language: None,
             payload: None,
+            scorer: FullTextScorer::Bm25Std,
             summarize: false,
             highlight: false,
             explain_score: false,
@@ -102,6 +103,7 @@
                 .map(|(field, value)| ((*field).to_string(), (*value).to_string()))
                 .collect(),
             sort_key: None,
+            payload: None,
         };
         fulltext_aggregate_row_from_hit(hit, None).unwrap()
     }
@@ -408,6 +410,8 @@
             phonetic: true,
             with_suffix_trie: true,
             stopwords: HashSet::from(["the".to_string()]),
+            language: "english".to_string(),
+            weight: 1.0,
         };
         let materialized = fulltext_materialize_text("The running boxes Robert", &settings);
         assert!(!materialized.contains("the"));
@@ -433,8 +437,8 @@
 
         assert_eq!(fulltext_simple_query_term("plain"), Some("plain"));
         assert_eq!(fulltext_simple_query_term("two words"), None);
-        assert_eq!(fulltext_english_stem("stories"), "story");
-        assert_eq!(fulltext_english_stem("running"), "run");
+        assert_eq!(fulltext_stem("stories", "english"), "stori");
+        assert_eq!(fulltext_stem("running", "english"), "run");
         assert_eq!(fulltext_soundex("Robert").unwrap(), "R163");
         assert!(fulltext_soundex("123").is_none());
         assert_eq!(
@@ -724,7 +728,7 @@
         ]);
         let fields = vec![
             ("title".to_string(), "running rust search".to_string()),
-            ("tag".to_string(), "book|tech".to_string()),
+            ("tag".to_string(), "book,tech".to_string()),
             ("price".to_string(), "10".to_string()),
             ("loc".to_string(), "-122.0,37.0".to_string()),
             ("shape".to_string(), "POINT(1 1)".to_string()),
@@ -1159,8 +1163,11 @@
         runtime.publish().unwrap();
 
         let options = search_options();
-        assert_eq!(runtime.search("*", &options).unwrap().len(), 2);
-        assert_eq!(runtime.search("car", &options).unwrap()[0].key, "doc:1");
+        assert_eq!(runtime.search("*", &options, None).unwrap().hits.len(), 2);
+        assert_eq!(
+            runtime.search("car", &options, None).unwrap().hits[0].key,
+            "doc:1"
+        );
         assert_eq!(
             runtime
                 .search_ast(
@@ -1188,14 +1195,36 @@
                 .key,
             "doc:1"
         );
-        assert_eq!(runtime.search("@t:fast", &options).unwrap()[0].key, "doc:1");
-        assert_eq!(runtime.search("auto*", &options).unwrap()[0].key, "doc:1");
         assert_eq!(
-            runtime.search("a?tomobile", &options).unwrap()[0].key,
+            runtime
+                .search("@t:fast", &options, None)
+                .unwrap()
+                .hits[0]
+                .key,
             "doc:1"
         );
         assert_eq!(
-            runtime.search("%automobiel%", &options).unwrap()[0].key,
+            runtime
+                .search("auto*", &options, None)
+                .unwrap()
+                .hits[0]
+                .key,
+            "doc:1"
+        );
+        assert_eq!(
+            runtime
+                .search("a?tomobile", &options, None)
+                .unwrap()
+                .hits[0]
+                .key,
+            "doc:1"
+        );
+        assert_eq!(
+            runtime
+                .search("%automobiel%", &options, None)
+                .unwrap()
+                .hits[0]
+                .key,
             "doc:1"
         );
         assert!(runtime.build_query("\"fast automobile\"", &options).is_ok());
@@ -1210,7 +1239,7 @@
         );
         assert!(
             runtime
-                .plan_text_query("x", Some(&["price".to_string()]))
+                .plan_text_query("x", Some(&["price".to_string()]), &options)
                 .is_err()
         );
         assert!(
@@ -1227,7 +1256,11 @@
                 )
                 .is_err()
         );
-        assert!(runtime.plan_boolean(&[], Occur::Must, None).is_ok());
+        assert!(
+            runtime
+                .plan_boolean(&[], Occur::Must, None, &options)
+                .is_ok()
+        );
         assert!(
             runtime
                 .plan_query(
@@ -1239,6 +1272,7 @@
                         unit: "m".to_string(),
                     },
                     None,
+                    &options,
                 )
                 .is_err()
         );
@@ -1251,13 +1285,20 @@
                         blob_param: "q".to_string(),
                     },
                     None,
+                    &options,
                 )
                 .is_err()
         );
 
         runtime.delete_hash("doc:1");
         runtime.publish().unwrap();
-        assert!(runtime.search("car", &options).unwrap().is_empty());
+        assert!(
+            runtime
+                .search("car", &options, None)
+                .unwrap()
+                .hits
+                .is_empty()
+        );
 
         let registry = FullTextRuntimeRegistry::default();
         registry.insert(0, "idx", runtime);

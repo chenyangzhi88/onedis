@@ -12,7 +12,7 @@ use crate::{
         FullTextAggregateReducerKind, FullTextAggregateSortBy, FullTextAggregateStep,
         FullTextCreateOptions, FullTextFieldKind, FullTextFieldOptions, FullTextFieldSchema,
         FullTextGeoShapeCoordinateSystem, FullTextIndexOptions, FullTextReturnField,
-        FullTextSearchBound, FullTextSearchGeoFilter, FullTextSearchNumericFilter,
+        FullTextScorer, FullTextSearchBound, FullTextSearchGeoFilter, FullTextSearchNumericFilter,
         FullTextSearchOptions, FullTextSortBy, FullTextSourceType, FullTextVectorAlgorithm,
         FullTextVectorOptions,
     },

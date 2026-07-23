@@ -135,6 +135,14 @@ fn fulltext_file_prefix(db_index: u16, index: &str) -> Vec<u8> {
     key
 }
 
+fn fulltext_legacy_file_prefix(db_index: u16, index: &str) -> Vec<u8> {
+    let mut key = db_index.to_be_bytes().to_vec();
+    key.extend_from_slice(&FULLTEXT_FILE_NAMESPACE);
+    key.extend_from_slice(index.as_bytes());
+    key.push(0x00);
+    key
+}
+
 fn fulltext_meta_key(db_index: u16, index: &str) -> Vec<u8> {
     let mut key = fulltext_meta_prefix(db_index);
     key.extend_from_slice(index.as_bytes());
@@ -156,6 +164,15 @@ fn fulltext_index_from_meta_key(db_index: u16, key: &[u8]) -> Option<String> {
         return None;
     }
     String::from_utf8(rest[..split].to_vec()).ok()
+}
+
+fn fulltext_temporary_activity_key(db_index: u16, index: &str) -> Vec<u8> {
+    let mut key = fulltext_meta_prefix(db_index);
+    key.extend_from_slice(index.as_bytes());
+    key.push(0x00);
+    key.extend_from_slice(&0u64.to_be_bytes());
+    key.extend_from_slice(b"temp");
+    key
 }
 
 fn fulltext_outbox_prefix(db_index: u16, index: &str) -> Vec<u8> {
@@ -362,4 +379,3 @@ fn validate_fulltext_config_value(name: &str, value: &str) -> Result<(), Error> 
         _ => Err(Error::msg("ERR unsupported fulltext config option")),
     }
 }
-

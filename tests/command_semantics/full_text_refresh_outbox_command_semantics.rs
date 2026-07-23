@@ -184,6 +184,36 @@ fn ft_outbox_compaction_keeps_latest_mutation_per_key() {
 }
 
 #[test]
+fn ft_search_drains_multiple_backfill_batches_before_answering() {
+    let (_dir, db) = make_db();
+    for id in 0..1_100 {
+        let key = format!("doc:{id}");
+        assert_eq!(
+            apply(&db, &["HSET", &key, "title", "bulk", "category", "book"]).to_string(),
+            "2"
+        );
+    }
+    create_index(&db);
+
+    assert_eq!(
+        total(&apply(
+            &db,
+            &[
+                "FT.SEARCH",
+                "idx",
+                "bulk",
+                "TIMEOUT",
+                "5000",
+                "LIMIT",
+                "0",
+                "0",
+            ],
+        )),
+        Some(1_100)
+    );
+}
+
+#[test]
 fn ft_config_exposes_storage_and_memory_budgets() {
     let (_dir, db) = make_db();
     for (name, value) in [

@@ -38,18 +38,13 @@ impl KvStore {
         value
     }
 
-    pub async fn get_raw_observed_async(&self, key: &[u8]) -> ObservedKvValue {
+    pub async fn get_raw_observed_async(&self, key: &[u8]) -> ObservedRawValue {
         let started = Instant::now();
         if let Some(value) = self.with_transaction_mut(|txn| {
             txn.get(key)
                 .expect("failed to read key from kv_engine transaction")
-                .map(Bytes::from)
         }) {
-            let observed = ObservedKvValue {
-                value,
-                value_seq: None,
-                read_seq: u64::MAX,
-            };
+            let observed = ObservedRawValue::from_transaction(key, value);
             global_metrics().record_storage_read(elapsed_us(started));
             return observed;
         }
@@ -59,21 +54,17 @@ impl KvStore {
             .await
             .expect("failed to read observed key from kv_engine");
         global_metrics().record_storage_read(elapsed_us(started));
-        observed
+        ObservedRawValue::from_engine(key, observed)
     }
 
-    pub async fn observe_raw_key_state_async(&self, key: &[u8]) -> ObservedKeyState {
+    pub async fn observe_raw_key_state_async(&self, key: &[u8]) -> ObservedRawKeyState {
         let started = Instant::now();
         if let Some(exists) = self.with_transaction_mut(|txn| {
             txn.get(key)
                 .expect("failed to read key from kv_engine transaction")
                 .is_some()
         }) {
-            let observed = ObservedKeyState {
-                exists,
-                value_seq: None,
-                read_seq: u64::MAX,
-            };
+            let observed = ObservedRawKeyState::from_transaction(key, exists);
             global_metrics().record_storage_read(elapsed_us(started));
             return observed;
         }
@@ -83,7 +74,7 @@ impl KvStore {
             .await
             .expect("failed to observe key state from kv_engine");
         global_metrics().record_storage_read(elapsed_us(started));
-        observed
+        ObservedRawKeyState::from_engine(key, observed)
     }
 
     /// 直接从 kv_engine 读取原始 value，尽量保留底层返回的 Bytes，减少只读热路径拷贝。
@@ -191,7 +182,7 @@ impl KvStore {
         let exists = self
             .table
             .observe_key_state(key)
-            .map(|state| state.exists)
+            .map(|state| state.exists())
             .expect("failed to check key existence in kv_engine");
         global_metrics().record_storage_read(elapsed_us(started));
         exists
@@ -211,7 +202,7 @@ impl KvStore {
             .table
             .observe_key_state_async(key)
             .await
-            .map(|state| state.exists)
+            .map(|state| state.exists())
             .expect("failed to check key existence in kv_engine");
         global_metrics().record_storage_read(elapsed_us(started));
         exists

@@ -51,7 +51,17 @@ impl Db {
                 FullTextSourceType::Json => self.fulltext_json_fields(&key, &meta)?.unwrap_or_default(),
             };
             for (_, value) in fields.iter().filter(|(name, _)| name == &attribute) {
-                for tag in split_tag_values(value) {
+                let separator = schema
+                    .options
+                    .separator
+                    .as_deref()
+                    .and_then(|separator| separator.chars().next())
+                    .unwrap_or(',');
+                for tag in fulltext_split_indexed_tags(
+                    value,
+                    separator,
+                    schema.options.case_sensitive,
+                ) {
                     values.insert(tag);
                 }
             }

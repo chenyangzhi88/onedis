@@ -258,8 +258,8 @@ impl Db {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
             let observed = self.store.get_raw_observed_async(&key_bytes).await;
-            let cas_condition = CompareCondition::from_observed(key_bytes, &observed);
-            let Some(raw) = observed.value.as_ref().map(|value| value.to_vec()) else {
+            let cas_condition = CompareCondition::from_observed(&observed);
+            let Some(raw) = observed.value().map(|value| value.to_vec()) else {
                 if !tokens.is_empty() || condition == SetCondition::Xx {
                     return Ok(false);
                 }

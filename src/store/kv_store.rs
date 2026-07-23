@@ -10,9 +10,10 @@ use common::types::status::{Result as KvResult, Status};
 use common::types::write_batch::{WriteBatch, WriteType};
 use kv_engine::{
     api::{
-        DbImpl, KeyRange, ObservedKeyState, ObservedKvValue, RangeBatch, RangeProjection,
-        ScanBudget, SchemalessCompareCondition as CompareCondition, SchemalessRangeQuery,
-        SchemalessTable, SchemalessTableOptions, SchemalessTransaction, SchemalessWriteBatch,
+        DbImpl, KeyRange, KvBatch, KvProjection, KvScanCursor, KvScanRequest,
+        ObservedKeyState as EngineObservedKeyState, ObservedKvValue as EngineObservedKvValue,
+        SchemalessCompareCondition as EngineCompareCondition, SchemalessTable,
+        SchemalessTableOptions, SchemalessTransaction, SchemalessWriteBatch,
     },
     function::MergeOperate,
 };
@@ -42,6 +43,140 @@ pub struct KvStore {
 
 struct KvStoreTransactionContext {
     txns: Mutex<Option<BTreeMap<String, SchemalessTransaction>>>,
+}
+
+#[derive(Clone, Debug)]
+enum ExpectedRawState {
+    Value(Option<Vec<u8>>),
+    Exists(bool),
+}
+
+/// A compare condition that can be evaluated by either a standalone table or an onedis
+/// transaction. The engine condition carries its opaque observation token when one exists.
+#[derive(Clone, Debug)]
+pub struct CompareCondition {
+    key: Vec<u8>,
+    expected: ExpectedRawState,
+    engine: Option<EngineCompareCondition>,
+}
+
+impl CompareCondition {
+    pub fn with_expected<K: AsRef<[u8]>>(key: K, expected: Option<Vec<u8>>) -> Self {
+        Self {
+            key: key.as_ref().to_vec(),
+            expected: ExpectedRawState::Value(expected.clone()),
+            engine: Some(EngineCompareCondition::with_expected(key, expected)),
+        }
+    }
+
+    pub fn exists_with<K: AsRef<[u8]>, V: AsRef<[u8]>>(key: K, value: V) -> Self {
+        Self::with_expected(key, Some(value.as_ref().to_vec()))
+    }
+
+    pub fn absent<K: AsRef<[u8]>>(key: K) -> Self {
+        Self::with_expected(key, None)
+    }
+
+    pub fn from_observed(observed: &ObservedRawValue) -> Self {
+        observed.condition.clone()
+    }
+
+    pub fn from_observed_state(observed: &ObservedRawKeyState) -> Self {
+        observed.condition.clone()
+    }
+
+    fn matches_transaction_value(&self, value: Option<&[u8]>) -> bool {
+        match &self.expected {
+            ExpectedRawState::Value(expected) => expected.as_deref() == value,
+            ExpectedRawState::Exists(expected) => *expected == value.is_some(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ObservedRawValue {
+    value: Option<Bytes>,
+    condition: CompareCondition,
+}
+
+impl ObservedRawValue {
+    fn from_engine(key: &[u8], observed: EngineObservedKvValue) -> Self {
+        let value = observed.value().cloned();
+        Self {
+            condition: CompareCondition {
+                key: key.to_vec(),
+                expected: ExpectedRawState::Value(value.as_ref().map(|value| value.to_vec())),
+                engine: Some(observed.condition()),
+            },
+            value,
+        }
+    }
+
+    fn from_transaction(key: &[u8], value: Option<Bytes>) -> Self {
+        Self {
+            condition: CompareCondition {
+                key: key.to_vec(),
+                expected: ExpectedRawState::Value(value.as_ref().map(|value| value.to_vec())),
+                engine: None,
+            },
+            value,
+        }
+    }
+
+    pub fn value(&self) -> Option<&Bytes> {
+        self.value.as_ref()
+    }
+
+    pub fn into_value(self) -> Option<Bytes> {
+        self.value
+    }
+
+    pub fn exists(&self) -> bool {
+        self.value.is_some()
+    }
+
+    pub fn condition(&self) -> CompareCondition {
+        self.condition.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ObservedRawKeyState {
+    exists: bool,
+    condition: CompareCondition,
+}
+
+impl ObservedRawKeyState {
+    fn from_engine(key: &[u8], observed: EngineObservedKeyState) -> Self {
+        let exists = observed.exists();
+        Self {
+            condition: CompareCondition {
+                key: key.to_vec(),
+                expected: ExpectedRawState::Exists(exists),
+                engine: Some(observed.condition()),
+            },
+            exists,
+        }
+    }
+
+    fn from_transaction(key: &[u8], exists: bool) -> Self {
+        Self {
+            condition: CompareCondition {
+                key: key.to_vec(),
+                expected: ExpectedRawState::Exists(exists),
+                engine: None,
+            },
+            exists,
+        }
+    }
+
+    pub fn exists(&self) -> bool {
+        self.exists
+    }
+
+    pub fn condition(&self) -> CompareCondition {
+        self.condition.clone()
+    }
 }
 
 include!("kv_store_lifecycle.rs");

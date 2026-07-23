@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -10,11 +10,10 @@ use bytes::Bytes;
 use common::types::status::Status;
 use common::types::write_batch::{WriteBatch, WriteType};
 use dashmap::{DashMap, mapref::entry::Entry};
-use kv_engine::api::SchemalessCompareCondition as CompareCondition;
 use serde_json::Value as JsonValue;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use super::kv_store::KvStore;
+use super::kv_store::{CompareCondition, KvStore, ObservedRawValue};
 use super::ttl::{
     TYPE_HASH, TYPE_JSON, TYPE_LIST, TYPE_SET, TYPE_SORTED_SET, TYPE_STREAM, TYPE_STRING,
     TYPE_VECTOR, TtlManager, VersionCounter, decode_meta_header, patch_meta_expire_ms,
@@ -33,7 +32,7 @@ pub use full_text::{
     FullTextAggregateReducerKind, FullTextAggregateSortBy, FullTextAggregateStep,
     FullTextCreateOptions, FullTextFieldKind, FullTextFieldOptions, FullTextFieldSchema,
     FullTextGeoShapeCoordinateSystem, FullTextIndexOptions, FullTextReturnField,
-    FullTextRuntimeRegistry, FullTextSearchBound, FullTextSearchGeoFilter,
+    FullTextRuntimeRegistry, FullTextScorer, FullTextSearchBound, FullTextSearchGeoFilter,
     FullTextSearchNumericFilter, FullTextSearchOptions, FullTextSortBy, FullTextSourceType,
     FullTextVectorAlgorithm, FullTextVectorOptions,
 };
@@ -121,6 +120,7 @@ mod types;
 mod value_entry_codec;
 mod value_meta_codec;
 mod value_runtime_helpers;
+mod version_owner_gc;
 
 use collection_key_codec::*;
 use hash_key_codec::*;
@@ -144,8 +144,10 @@ pub struct Db {
     version_counter: Arc<VersionCounter>,
     ttl_manager: Arc<TtlManager>,
     counter_cache: Arc<DashMap<Vec<u8>, CounterCacheEntry>>,
+    counter_cache_maybe_non_empty: Arc<AtomicBool>,
     counter_cache_epoch: Arc<AtomicU64>,
     list_meta_cache: Arc<DashMap<Vec<u8>, ListMeta>>,
+    list_meta_cache_maybe_non_empty: Arc<AtomicBool>,
     vector_runtimes: Arc<VectorRuntimeRegistry>,
     fulltext_runtimes: Arc<FullTextRuntimeRegistry>,
     set_write_locks: Arc<[tokio::sync::Mutex<()>; SET_WRITE_LOCK_SHARDS]>,

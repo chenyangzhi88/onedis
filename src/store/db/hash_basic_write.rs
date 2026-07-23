@@ -56,7 +56,7 @@ impl Db {
         for _ in 0..64 {
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value.as_ref().map(|value| value.to_vec());
+            let raw_meta = observed_meta.value().map(|value| value.to_vec());
             let mut expired_meta = None;
             let (meta, version) = match raw_meta.as_deref() {
                 Some(raw) => {
@@ -72,10 +72,7 @@ impl Db {
             };
             let field_key = hash_field_key(self.db_index, key, version, field);
             let mut conditions = Vec::with_capacity(2);
-            conditions.push(CompareCondition::from_observed(
-                key_bytes.clone(),
-                &observed_meta,
-            ));
+            conditions.push(CompareCondition::from_observed(&observed_meta));
 
             let mut batch = WriteBatch::new();
             if let Some((expire_ms, old_version, old_type_tag)) = expired_meta {
@@ -105,17 +102,16 @@ impl Db {
                 Some(self.store.observe_raw_key_state_async(&field_key).await)
             };
             let is_new_field = observed_field.as_ref().map_or_else(
-                || !observed_field_state.as_ref().unwrap().exists,
-                |observed| observed.value.is_none(),
+                || !observed_field_state.as_ref().unwrap().exists(),
+                |observed| observed.value().is_none(),
             );
             if may_have_field_ttl {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
             if let Some(observed) = observed_field.as_ref() {
-                conditions.push(CompareCondition::from_observed(field_key, observed));
+                conditions.push(CompareCondition::from_observed(observed));
             } else {
                 conditions.push(CompareCondition::from_observed_state(
-                    field_key,
                     observed_field_state.as_ref().unwrap(),
                 ));
             }
@@ -181,7 +177,7 @@ impl Db {
         for _ in 0..64 {
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value.as_ref().map(|value| value.to_vec());
+            let raw_meta = observed_meta.value().map(|value| value.to_vec());
             let mut expired_meta = None;
             let (meta, version) = match raw_meta.as_deref() {
                 Some(raw) => {
@@ -209,10 +205,7 @@ impl Db {
             let mut added = 0usize;
             let mut seen_in_batch = HashSet::new();
             let mut conditions = Vec::with_capacity(fields.len() + 1);
-            conditions.push(CompareCondition::from_observed(
-                key_bytes.clone(),
-                &observed_meta,
-            ));
+            conditions.push(CompareCondition::from_observed(&observed_meta));
             let may_have_field_ttl = meta.is_some_and(|meta| meta.may_have_field_ttl);
             let use_value_observed = meta.is_none() || may_have_field_ttl;
             for (field, value) in fields {
@@ -231,24 +224,21 @@ impl Db {
                     } else {
                         self.store.get_raw_observed_async(&field_key).await
                     };
-                    if observed_field.value.is_none() {
+                    if observed_field.value().is_none() {
                         added += 1;
                     }
                     batch.put(&field_key, value.as_bytes());
                     if may_have_field_ttl {
                         batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
                     }
-                    conditions.push(CompareCondition::from_observed(field_key, &observed_field));
+                    conditions.push(CompareCondition::from_observed(&observed_field));
                 } else {
                     let observed_field = self.store.observe_raw_key_state_async(&field_key).await;
-                    if !observed_field.exists {
+                    if !observed_field.exists() {
                         added += 1;
                     }
                     batch.put(&field_key, value.as_bytes());
-                    conditions.push(CompareCondition::from_observed_state(
-                        field_key,
-                        &observed_field,
-                    ));
+                    conditions.push(CompareCondition::from_observed_state(&observed_field));
                 }
             }
 

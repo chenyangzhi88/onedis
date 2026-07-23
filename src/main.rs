@@ -3,7 +3,7 @@ use onedis_server::server::Server;
 use std::process::id;
 use std::sync::Arc;
 
-#[tokio::main(worker_threads = 2)]
+#[tokio::main(worker_threads = 4)]
 async fn main() {
     let args = Arc::new(Args::load());
     common::logging::init_logging().unwrap();
@@ -18,17 +18,17 @@ fn server_info(args: Arc<ResolvedArgs>) {
     let version = env!("CARGO_PKG_VERSION");
     let pattern = format!(
         r#"
-         /\_____/\
-        /  o   o  \          Rudis {}
-       ( ==  ^  == )
-        )         (          Bind: {} PID: {}
-       (           )          Role: master
-      ( (  )   (  ) )
-     (__(__)___(__)__)
+      ___  _   _ _____ ____ ___ ____
+     / _ \| \ | | ____|  _ \_ _/ ___|
+    | | | |  \| |  _| | | | | |\___ \
+    | |_| | |\  | |___| |_| | | ___) |
+     \___/|_| \_|_____|____/___|____/
 
-    Rudis is a high-performance in memory database.
+    Onedis {}
+    Bind: {}:{} PID: {}
+    Role: master
     "#,
-        version, args.port, pid
+        version, args.bind, args.port, pid
     );
     log::info!("\n{}", pattern);
 }

@@ -256,3 +256,91 @@ fn ft_search_text_analysis_rejects_custom_scorer() {
     };
     assert!(message.contains("unsupported fulltext scorer"));
 }
+
+#[test]
+fn ft_search_uses_language_field_and_real_language_stemmers() {
+    let (_dir, db) = make_db();
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "FT.CREATE",
+                "idx",
+                "ON",
+                "HASH",
+                "PREFIX",
+                "1",
+                "doc:",
+                "LANGUAGE",
+                "english",
+                "LANGUAGE_FIELD",
+                "lang",
+                "SCHEMA",
+                "body",
+                "TEXT",
+            ],
+        ),
+        Frame::Ok
+    ));
+    apply(
+        &db,
+        &["HSET", "doc:1", "body", "running", "lang", "english"],
+    );
+    apply(&db, &["HSET", "doc:2", "body", "chevaux", "lang", "french"]);
+
+    assert_eq!(total(&apply(&db, &["FT.SEARCH", "idx", "run"])), Some(1));
+    assert_eq!(
+        total(&apply(
+            &db,
+            &["FT.SEARCH", "idx", "cheval", "LANGUAGE", "french"],
+        )),
+        Some(1)
+    );
+}
+
+#[test]
+fn ft_search_honors_tag_separator_case_and_nohl_contract() {
+    let (_dir, db) = make_db();
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "FT.CREATE",
+                "idx",
+                "ON",
+                "HASH",
+                "PREFIX",
+                "1",
+                "doc:",
+                "NOHL",
+                "SCHEMA",
+                "body",
+                "TEXT",
+                "tags",
+                "TAG",
+                "SEPARATOR",
+                ";",
+                "CASESENSITIVE",
+            ],
+        ),
+        Frame::Ok
+    ));
+    apply(&db, &["HSET", "doc:1", "body", "hello", "tags", "Foo;Bar"]);
+
+    assert_eq!(
+        total(&apply(&db, &["FT.SEARCH", "idx", "@tags:{Foo}"])),
+        Some(1)
+    );
+    assert_eq!(
+        total(&apply(&db, &["FT.SEARCH", "idx", "@tags:{foo}"])),
+        Some(0)
+    );
+    let err = match onedis_server::command_dispatch::handle_command(
+        &db,
+        command(&["FT.SEARCH", "idx", "hello", "HIGHLIGHT"]),
+    ) {
+        Ok(_) => panic!("NOHL must reject highlighting"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("highlighting is disabled"));
+}

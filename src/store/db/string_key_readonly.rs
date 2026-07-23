@@ -12,6 +12,20 @@ impl Db {
         }
     }
 
+    pub async fn get_string_entry_raw_bytes_async(
+        &self,
+        key: &[u8],
+    ) -> Result<Option<Bytes>, Error> {
+        let Some(raw) = self.read_live_raw_key_bytes_async(key).await else {
+            return Ok(None);
+        };
+        if decode_string_bytes_slice(&raw).is_some() {
+            Ok(Some(raw))
+        } else {
+            Err(Error::msg("Type parsing error"))
+        }
+    }
+
     pub fn getex_string_bytes(
         &self,
         key: &str,
@@ -193,6 +207,21 @@ impl Db {
         let raw = self
             .store
             .get_raw_bytes(&main_key_bytes(self.db_index, key))?;
+        let expire_ms = decode_expire_ms(&raw);
+        if expire_ms > 0 && now_ms() >= expire_ms {
+            return None;
+        }
+        Some(raw)
+    }
+
+    pub(in crate::store::db) async fn read_live_raw_key_bytes_async(
+        &self,
+        key: &[u8],
+    ) -> Option<Bytes> {
+        let raw = self
+            .store
+            .get_raw_bytes_async(&main_key_bytes(self.db_index, key))
+            .await?;
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms > 0 && now_ms() >= expire_ms {
             return None;

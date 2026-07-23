@@ -18,7 +18,7 @@ impl Db {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value.as_ref().map(|value| value.to_vec());
+            let raw_meta = observed_meta.value().map(|value| value.to_vec());
             let (meta, version) = match raw_meta.as_deref() {
                 Some(raw) => {
                     let Some(header) = decode_meta_header(raw) else {
@@ -35,7 +35,7 @@ impl Db {
             let observed_field = self
                 .hash_live_field_observed_async(key, version, field)
                 .await;
-            if observed_field.value.is_some() {
+            if observed_field.value().is_some() {
                 return Ok(false);
             }
 
@@ -48,8 +48,8 @@ impl Db {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
             let conditions = [
-                CompareCondition::from_observed(key_bytes, &observed_meta),
-                CompareCondition::from_observed(field_key, &observed_field),
+                CompareCondition::from_observed(&observed_meta),
+                CompareCondition::from_observed(&observed_field),
             ];
             if self
                 .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
@@ -87,7 +87,7 @@ impl Db {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value.as_ref().map(|value| value.to_vec());
+            let raw_meta = observed_meta.value().map(|value| value.to_vec());
             let (meta, version) = match raw_meta.as_deref() {
                 Some(raw) => {
                     let Some(header) = decode_meta_header(raw) else {
@@ -104,7 +104,7 @@ impl Db {
             let observed_field = self
                 .hash_live_field_observed_async(key, version, field)
                 .await;
-            let raw_field = observed_field.value.as_ref().map(|value| value.to_vec());
+            let raw_field = observed_field.value().map(|value| value.to_vec());
             let current = match raw_field.as_deref() {
                 Some(value) => std::str::from_utf8(value)
                     .map_err(|_| Error::msg("ERR hash value is not an integer"))?
@@ -124,8 +124,8 @@ impl Db {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
             let conditions = [
-                CompareCondition::from_observed(key_bytes, &observed_meta),
-                CompareCondition::from_observed(field_key, &observed_field),
+                CompareCondition::from_observed(&observed_meta),
+                CompareCondition::from_observed(&observed_field),
             ];
             if self
                 .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
@@ -175,7 +175,7 @@ impl Db {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value.as_ref().map(|value| value.to_vec());
+            let raw_meta = observed_meta.value().map(|value| value.to_vec());
             let (meta, version) = match raw_meta.as_deref() {
                 Some(raw) => {
                     let Some(header) = decode_meta_header(raw) else {
@@ -192,7 +192,7 @@ impl Db {
             let observed_field = self
                 .hash_live_field_observed_async(key, version, field)
                 .await;
-            let raw_field = observed_field.value.as_ref().map(|value| value.to_vec());
+            let raw_field = observed_field.value().map(|value| value.to_vec());
             let current = match raw_field.as_deref() {
                 Some(value) => {
                     let text = std::str::from_utf8(value)
@@ -221,8 +221,8 @@ impl Db {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
             let conditions = [
-                CompareCondition::from_observed(key_bytes, &observed_meta),
-                CompareCondition::from_observed(field_key, &observed_field),
+                CompareCondition::from_observed(&observed_meta),
+                CompareCondition::from_observed(&observed_field),
             ];
             if self
                 .compare_and_write_batch_if_not_empty_async(&conditions, &batch)

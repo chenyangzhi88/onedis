@@ -130,6 +130,8 @@ impl Db {
                             value: next,
                             expire_ms,
                         });
+                        self.counter_cache_maybe_non_empty
+                            .store(true, Ordering::Release);
                     }
                     break next;
                 }
@@ -209,6 +211,8 @@ impl Db {
                             value: next,
                             expire_ms,
                         });
+                        self.counter_cache_maybe_non_empty
+                            .store(true, Ordering::Release);
                     }
                     break next;
                 }

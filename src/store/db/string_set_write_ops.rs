@@ -13,7 +13,7 @@ impl Db {
     pub fn insert_string_bytes(&self, key: String, value: Vec<u8>, ttl_ms: Option<u64>) {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let expire_ms = ttl_ms.map_or(0, |ttl| now_ms().saturating_add(ttl));
-        self.write_string(&key, &value, expire_ms);
+        self.write_plain_string(&key, &value, expire_ms);
     }
 
     pub async fn insert_string_bytes_async(
@@ -24,13 +24,7 @@ impl Db {
     ) {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let expire_ms = ttl_ms.map_or(0, |ttl| now_ms().saturating_add(ttl));
-        let old_raw = if self.version_counter.current() == 0 {
-            None
-        } else {
-            self.store.get_raw_async(&self.mk(&key)).await
-        };
-        self.write_string_async(&key, &value, expire_ms, old_raw.as_deref())
-            .await;
+        self.write_plain_string_async(&key, &value, expire_ms).await;
     }
 
     pub fn set_string_bytes(
@@ -41,6 +35,19 @@ impl Db {
         condition: SetCondition,
         return_old: bool,
     ) -> Result<SetOutcome, Error> {
+        if condition == SetCondition::Always
+            && !return_old
+            && let Some(expire_ms) = plain_set_expire_ms(expiration)
+        {
+            self.changes.fetch_add(1, Ordering::Relaxed);
+            if expire_ms > 0 && now_ms() >= expire_ms {
+                self.remove_internal(&key, false);
+            } else {
+                self.write_plain_string(&key, &value, expire_ms);
+            }
+            return Ok(SetOutcome::Set { old_value: None });
+        }
+
         self.expire_if_needed(&key);
         let old_raw = self.store.get_raw(&self.mk(&key));
         let old_header = old_raw.as_deref().and_then(decode_meta_header);
@@ -96,6 +103,19 @@ impl Db {
         condition: SetCondition,
         return_old: bool,
     ) -> Result<SetOutcome, Error> {
+        if condition == SetCondition::Always
+            && !return_old
+            && let Some(expire_ms) = plain_set_expire_ms(expiration)
+        {
+            self.changes.fetch_add(1, Ordering::Relaxed);
+            if expire_ms > 0 && now_ms() >= expire_ms {
+                self.remove_internal_async(&key, false).await;
+            } else {
+                self.write_plain_string_async(&key, &value, expire_ms).await;
+            }
+            return Ok(SetOutcome::Set { old_value: None });
+        }
+
         self.expire_if_needed_async(&key).await;
         let old_raw = self.store.get_raw_async(&self.mk(&key)).await;
         let old_header = old_raw.as_deref().and_then(decode_meta_header);
@@ -150,6 +170,14 @@ impl Db {
 
     pub fn insert_string_bytes_ref(&self, key: &str, value: &[u8]) {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        self.write_string(key, value, 0);
+        self.write_plain_string(key, value, 0);
+    }
+}
+
+fn plain_set_expire_ms(expiration: SetExpiration) -> Option<u64> {
+    match expiration {
+        SetExpiration::Clear => Some(0),
+        SetExpiration::At(expire_ms) => Some(expire_ms),
+        SetExpiration::KeepTtl => None,
     }
 }

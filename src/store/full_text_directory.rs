@@ -13,7 +13,7 @@ use tantivy::directory::{
 };
 
 use super::FULLTEXT_FILE_NAMESPACE;
-use crate::store::kv_store::KvStore;
+use crate::store::{TABLE_LOCAL_INTERNAL_PREFIX, kv_store::KvStore};
 
 #[derive(Clone)]
 pub struct KvTantivyDirectory {
@@ -45,12 +45,32 @@ impl KvTantivyDirectory {
         key
     }
 
+    fn legacy_path_key(&self, path: &Path) -> Vec<u8> {
+        let mut key = self.legacy_file_prefix();
+        key.extend_from_slice(path_to_key(path).as_bytes());
+        key
+    }
+
     fn file_prefix(&self) -> Vec<u8> {
+        let mut key = TABLE_LOCAL_INTERNAL_PREFIX.to_vec();
+        key.extend_from_slice(&FULLTEXT_FILE_NAMESPACE);
+        key.extend_from_slice(self.index.as_bytes());
+        key.push(0x00);
+        key
+    }
+
+    fn legacy_file_prefix(&self) -> Vec<u8> {
         let mut key = self.db_index.to_be_bytes().to_vec();
         key.extend_from_slice(&FULLTEXT_FILE_NAMESPACE);
         key.extend_from_slice(self.index.as_bytes());
         key.push(0x00);
         key
+    }
+
+    fn read_file(&self, path: &Path) -> Option<Vec<u8>> {
+        self.store
+            .get_raw(&self.path_key(path))
+            .or_else(|| self.store.get_raw(&self.legacy_path_key(path)))
     }
 
     fn put_file(&self, path: &Path, data: &[u8]) -> io::Result<()> {
@@ -78,25 +98,27 @@ impl Directory for KvTantivyDirectory {
 
     fn open_read(&self, path: &Path) -> Result<FileSlice, OpenReadError> {
         let raw = self
-            .store
-            .get_raw(&self.path_key(path))
+            .read_file(path)
             .ok_or_else(|| OpenReadError::FileDoesNotExist(path.to_path_buf()))?;
         Ok(FileSlice::from(raw))
     }
 
     fn delete(&self, path: &Path) -> Result<(), DeleteError> {
         let key = self.path_key(path);
-        if !self.store.contains_key(&key) {
+        let legacy_key = self.legacy_path_key(path);
+        if !self.store.contains_key(&key) && !self.store.contains_key(&legacy_key) {
             return Err(DeleteError::FileDoesNotExist(path.to_path_buf()));
         }
         let mut batch = WriteBatch::new();
         batch.delete(&key);
+        batch.delete(&legacy_key);
         self.store.write_batch(&batch);
         Ok(())
     }
 
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
-        Ok(self.store.contains_key(&self.path_key(path)))
+        Ok(self.store.contains_key(&self.path_key(path))
+            || self.store.contains_key(&self.legacy_path_key(path)))
     }
 
     fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
@@ -122,8 +144,7 @@ impl Directory for KvTantivyDirectory {
     }
 
     fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
-        self.store
-            .get_raw(&self.path_key(path))
+        self.read_file(path)
             .ok_or_else(|| OpenReadError::FileDoesNotExist(path.to_path_buf()))
     }
 
@@ -210,6 +231,15 @@ mod tests {
             directory.delete(Path::new("missing")),
             Err(DeleteError::FileDoesNotExist(_))
         ));
+        directory
+            .store
+            .put_raw(&directory.legacy_path_key(Path::new("legacy.bin")), b"old");
+        assert_eq!(
+            directory.atomic_read(Path::new("legacy.bin")).unwrap(),
+            b"old".to_vec()
+        );
+        directory.delete(Path::new("legacy.bin")).unwrap();
+        assert!(!directory.exists(Path::new("legacy.bin")).unwrap());
 
         let watch_count = Arc::new(AtomicUsize::new(0));
         let watched = watch_count.clone();

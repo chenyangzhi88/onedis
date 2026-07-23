@@ -111,7 +111,7 @@ fn long_transaction_commit_conflicts_with_direct_write() {
 }
 
 #[test]
-fn set_over_complex_type_removes_old_subkeys_and_does_not_resurrect_after_rebuild() {
+fn set_over_complex_type_hides_old_subkeys_and_gc_cleans_after_rebuild() {
     let db = test_db();
 
     assert!(db.hash_set("reuse-key", "old-field", "old-value").unwrap());
@@ -120,7 +120,11 @@ fn set_over_complex_type_removes_old_subkeys_and_does_not_resurrect_after_rebuil
     assert!(db.store.contains_key(&old_field_key));
 
     db.insert_string("reuse-key".to_string(), "plain-string".to_string(), None);
-    assert!(!db.store.contains_key(&old_field_key));
+    assert!(db.store.contains_key(&old_field_key));
+    assert!(matches!(
+        db.get("reuse-key"),
+        Some(Structure::String(value)) if value == "plain-string"
+    ));
 
     let rebuilt_ttl = TtlManager::new(db.store.clone(), TtlConfig::default());
     let rebuilt_counter = Arc::new(VersionCounter::new());
@@ -137,6 +141,9 @@ fn set_over_complex_type_removes_old_subkeys_and_does_not_resurrect_after_rebuil
             .hash_set("reuse-key", "new-field", "new-value")
             .unwrap()
     );
+    assert_eq!(rebuilt_db.hash_get("reuse-key", "old-field").unwrap(), None);
+    assert_eq!(rebuilt_db.retired_version_gc_once(usize::MAX), 1);
+    assert!(!rebuilt_db.store.contains_key(&old_field_key));
 
     let fields: HashMap<_, _> = rebuilt_db
         .hash_get_all("reuse-key")

@@ -62,6 +62,24 @@ impl Db {
         self.write_batch_if_not_empty_async(&batch).await;
     }
 
+    pub(in crate::store::db) fn write_plain_string(&self, key: &str, value: &[u8], expire_ms: u64) {
+        let mut batch = WriteBatch::new();
+        self.write_string_to_batch_with_old_raw(&mut batch, key, value, expire_ms, None);
+        self.write_plain_string_batch_if_not_empty(&batch);
+    }
+
+    pub(in crate::store::db) async fn write_plain_string_async(
+        &self,
+        key: &str,
+        value: &[u8],
+        expire_ms: u64,
+    ) {
+        let mut batch = WriteBatch::new();
+        self.write_string_to_batch_with_old_raw(&mut batch, key, value, expire_ms, None);
+        self.write_plain_string_batch_if_not_empty_async(&batch)
+            .await;
+    }
+
     pub(in crate::store::db) fn write_string_to_batch(
         &self,
         batch: &mut WriteBatch,
@@ -69,12 +87,7 @@ impl Db {
         value: &[u8],
         expire_ms: u64,
     ) {
-        let old_raw = if self.version_counter.current() == 0 {
-            None
-        } else {
-            self.store.get_raw(&self.mk(key))
-        };
-        self.write_string_to_batch_with_old_raw(batch, key, value, expire_ms, old_raw.as_deref());
+        self.write_string_to_batch_with_old_raw(batch, key, value, expire_ms, None);
     }
 
     pub(in crate::store::db) fn write_string_to_batch_with_old_raw(
@@ -86,6 +99,11 @@ impl Db {
         old_raw: Option<&[u8]>,
     ) {
         let key_bytes = self.mk(key);
+        let stored_raw = old_raw
+            .is_none()
+            .then(|| self.store.get_raw(&key_bytes))
+            .flatten();
+        let old_raw = old_raw.or(stored_raw.as_deref());
         self.cleanup_old_complex_subkeys_for_string_overwrite(batch, key, old_raw);
         batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
         if expire_ms > 0 {
@@ -105,6 +123,11 @@ impl Db {
         old_raw: Option<&[u8]>,
     ) {
         let key_bytes = main_key_bytes(self.db_index, key);
+        let stored_raw = old_raw
+            .is_none()
+            .then(|| self.store.get_raw(&key_bytes))
+            .flatten();
+        let old_raw = old_raw.or(stored_raw.as_deref());
         self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(batch, key, old_raw);
         batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
         if expire_ms > 0

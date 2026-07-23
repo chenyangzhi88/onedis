@@ -70,7 +70,7 @@ impl Db {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value.as_ref().map(|value| value.to_vec());
+            let raw_meta = observed_meta.value().map(|value| value.to_vec());
             let mut meta = match raw_meta.as_deref() {
                 Some(raw) => {
                     if let Some(meta) = decode_list_meta(raw) {
@@ -106,7 +106,7 @@ impl Db {
                 &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
             );
             let len = (meta.tail - meta.head) as usize;
-            let condition = CompareCondition::from_observed(key_bytes, &observed_meta);
+            let condition = CompareCondition::from_observed(&observed_meta);
             if self
                 .compare_and_write_batch_if_not_empty_async(&[condition], &batch)
                 .await?
@@ -189,7 +189,7 @@ impl Db {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value.as_ref().map(|value| value.to_vec());
+            let raw_meta = observed_meta.value().map(|value| value.to_vec());
             let mut meta = match raw_meta.as_deref() {
                 Some(raw) => {
                     if let Some(meta) = decode_list_meta(raw) {
@@ -225,7 +225,7 @@ impl Db {
                 &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
             );
             let len = (meta.tail - meta.head) as usize;
-            let condition = CompareCondition::from_observed(key_bytes, &observed_meta);
+            let condition = CompareCondition::from_observed(&observed_meta);
             if self
                 .compare_and_write_batch_if_not_empty_async(&[condition], &batch)
                 .await?

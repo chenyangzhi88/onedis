@@ -72,7 +72,7 @@ impl Handler {
         let commands = parse_borrowed_resp_commands(bytes)?;
         if commands.iter().all(|args| borrowed_read_supported(args)) {
             let names = borrowed_fast_names(&commands);
-            let response = self.handle_borrowed_read_commands(commands);
+            let response = self.handle_borrowed_read_commands(commands).await;
             self.record_fast_command_names(&names, started, &response);
             return Some(response);
         }

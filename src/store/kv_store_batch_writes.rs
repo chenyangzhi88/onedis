@@ -44,20 +44,55 @@ impl KvStore {
         global_metrics().record_storage_write(elapsed_us(started), false);
     }
 
+    pub async fn write_batch_owned_async(&self, batch: WriteBatch) {
+        if self.txn.is_some() {
+            self.write_batch(&batch);
+            return;
+        }
+        let started = Instant::now();
+        let table_batch = SchemalessWriteBatch::from_write_batch(batch);
+        self.table
+            .write_async(&table_batch)
+            .await
+            .expect("failed to write owned batch into kv_engine");
+        global_metrics().record_storage_write(elapsed_us(started), false);
+    }
+
     pub async fn compare_and_write_batch_async(
         &self,
         conditions: &[CompareCondition],
         batch: &WriteBatch,
     ) -> KvResult<()> {
-        if self.txn.is_some() {
-            self.write_batch(batch);
-            return Ok(());
-        }
         let started = Instant::now();
+        if let Some(result) = self.with_transaction_mut(|txn| {
+            for condition in conditions {
+                let value = txn.get(&condition.key)?;
+                if !condition.matches_transaction_value(value.as_deref()) {
+                    return Err(Status::ConditionFailed(
+                        "compare_and_write condition failed".to_string(),
+                    ));
+                }
+            }
+            stage_batch_in_transaction(txn, batch)
+        }) {
+            global_metrics().record_storage_write(elapsed_us(started), result.is_err());
+            return result;
+        }
         let table_batch = SchemalessWriteBatch::from_write_batch(batch.clone());
+        let engine_conditions = conditions
+            .iter()
+            .map(|condition| {
+                condition.engine.clone().ok_or_else(|| {
+                    Status::InvalidArgument(
+                        "transaction observation cannot be used outside its transaction"
+                            .to_string(),
+                    )
+                })
+            })
+            .collect::<KvResult<Vec<_>>>()?;
         let result = self
             .table
-            .compare_and_write_async(conditions, &table_batch)
+            .compare_and_write_async(&engine_conditions, &table_batch)
             .await;
         global_metrics().record_storage_write(elapsed_us(started), result.is_err());
         result
@@ -86,4 +121,25 @@ impl KvStore {
             .expect("failed to write direct batch into kv_engine");
         global_metrics().record_storage_write(elapsed_us(started), false);
     }
+}
+
+fn stage_batch_in_transaction(
+    txn: &mut SchemalessTransaction,
+    batch: &WriteBatch,
+) -> KvResult<()> {
+    for (write_type, key, value) in batch.iter() {
+        match write_type {
+            WriteType::Put | WriteType::PutBlobMedium | WriteType::PutBlobExternal => {
+                txn.put(key, value)?
+            }
+            WriteType::Delete => txn.delete(key)?,
+            WriteType::RangeDelete => txn.delete_range(key, value)?,
+            WriteType::Merge => {
+                return Err(Status::Unsupported(
+                    "merge is not supported by onedis transaction write batches".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }

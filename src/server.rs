@@ -42,6 +42,7 @@ impl Server {
         let wasm_registry = Arc::new(WasmRegistry::new());
         let metrics = global_metrics();
         metrics.configure(args.databases, args.maxclients);
+        metrics.set_enabled(args.observability_enabled);
         metrics.initialize_command_index();
         if args.observability_enabled && args.metrics_port != 0 {
             spawn_prometheus_endpoint(

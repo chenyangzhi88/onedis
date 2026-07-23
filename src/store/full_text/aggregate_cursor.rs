@@ -7,8 +7,14 @@ impl Db {
     ) -> Result<Frame, Error> {
         self.fulltext_reject_cluster_multi_shard("FT.AGGREGATE")?;
         options.search_options = self.fulltext_effective_search_options(options.search_options)?;
-        let hits = self.fulltext_collect_live_hits(index, query, &options.search_options)?;
+        let hits = self.fulltext_collect_live_hits(
+            index,
+            query,
+            &options.search_options,
+            FullTextCollectMode::All,
+        )?;
         let mut rows = hits
+            .hits
             .into_iter()
             .map(|hit| fulltext_aggregate_row_from_hit(hit, options.load.as_deref()))
             .collect::<Result<Vec<_>, _>>()?;

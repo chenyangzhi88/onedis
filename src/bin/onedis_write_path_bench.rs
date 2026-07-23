@@ -58,10 +58,10 @@ async fn main() {
         options.db_path = root.join("db");
         options.wal_dir = root.join("wal");
     }
-    if let Some(max_keys) = value_arg(&args, "--active-skiplist-max-keys") {
-        options.memtable_active_skiplist_max_keys = max_keys
+    if let Some(size_bytes) = value_arg(&args, "--memtable-size-bytes") {
+        options.memtable_size_bytes = size_bytes
             .parse::<usize>()
-            .expect("invalid --active-skiplist-max-keys")
+            .expect("invalid --memtable-size-bytes")
             .max(1);
     }
     std::fs::create_dir_all(&options.db_path).expect("failed to create db dir");

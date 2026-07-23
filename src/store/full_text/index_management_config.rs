@@ -35,6 +35,12 @@ impl Db {
             &fulltext_meta_key(self.db_index, index),
             &encode_record(&meta)?,
         );
+        if meta.index_options.temporary_seconds.is_some() {
+            batch.put(
+                &fulltext_temporary_activity_key(self.db_index, index),
+                &current_fulltext_millis().to_be_bytes(),
+            );
+        }
         self.write_batch_if_not_empty(&batch);
         self.fulltext_create_vector_indexes(index, &meta)?;
         self.fulltext_runtimes.remove(self.db_index, index);
@@ -51,11 +57,14 @@ impl Db {
     }
 
     pub fn fulltext_list(&self) -> Result<Frame, Error> {
-        let mut names = self
-            .read_all_fulltext_metas()?
-            .into_iter()
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
+        let mut names = Vec::new();
+        for (index, meta) in self.read_all_fulltext_metas()? {
+            if self.fulltext_index_expired(&index, &meta) {
+                self.fulltext_purge_index(&index, &meta)?;
+            } else {
+                names.push(index);
+            }
+        }
         names.sort();
         Ok(Frame::Array(
             names.into_iter().map(Frame::bulk_string).collect(),
@@ -75,16 +84,26 @@ impl Db {
             }
         }
 
+        self.fulltext_purge_index(&index, &meta)?;
+        Ok(Frame::Ok)
+    }
+
+    fn fulltext_purge_index(
+        &self,
+        index: &str,
+        meta: &FullTextIndexMeta,
+    ) -> Result<(), Error> {
         let mut batch = WriteBatch::new();
-        batch.delete(&fulltext_meta_key(self.db_index, &index));
-        for alias in self.fulltext_aliases_for_index(&index)? {
+        batch.delete(&fulltext_meta_key(self.db_index, index));
+        batch.delete(&fulltext_temporary_activity_key(self.db_index, index));
+        for alias in self.fulltext_aliases_for_index(index)? {
             batch.delete(&fulltext_alias_key(self.db_index, &alias));
         }
-        self.delete_fulltext_index_storage_to_batch(&mut batch, &index);
+        self.delete_fulltext_index_storage_to_batch(&mut batch, index);
         self.write_batch_if_not_empty(&batch);
-        self.fulltext_delete_vector_indexes(&index, &meta);
-        self.fulltext_runtimes.remove(self.db_index, &index);
-        Ok(Frame::Ok)
+        self.fulltext_delete_vector_indexes(index, meta);
+        self.fulltext_runtimes.remove(self.db_index, index);
+        Ok(())
     }
 
     pub async fn fulltext_drop_index_async(

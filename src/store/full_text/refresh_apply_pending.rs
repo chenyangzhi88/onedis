@@ -67,6 +67,9 @@ impl Db {
                                 if fields.is_empty() {
                                     runtime.delete_hash(&record.key);
                                     self.fulltext_delete_vectors(index, meta, &record.key)?;
+                                } else if !fulltext_index_filter_matches(meta, &fields)? {
+                                    runtime.delete_hash(&record.key);
+                                    self.fulltext_delete_vectors(index, meta, &record.key)?;
                                 } else {
                                     indexed_bytes += runtime.upsert_hash(&record.key, &fields)?;
                                     self.fulltext_upsert_vectors(
@@ -84,13 +87,19 @@ impl Db {
                                 }
                                 if let Some(fields) = self.fulltext_json_fields(&record.key, meta)?
                                 {
-                                    indexed_bytes += runtime.upsert_fields(&record.key, &fields)?;
-                                    self.fulltext_upsert_vectors(
-                                        index,
-                                        meta,
-                                        &record.key,
-                                        &fields,
-                                    )?;
+                                    if fulltext_index_filter_matches(meta, &fields)? {
+                                        indexed_bytes +=
+                                            runtime.upsert_fields(&record.key, &fields)?;
+                                        self.fulltext_upsert_vectors(
+                                            index,
+                                            meta,
+                                            &record.key,
+                                            &fields,
+                                        )?;
+                                    } else {
+                                        runtime.delete_hash(&record.key);
+                                        self.fulltext_delete_vectors(index, meta, &record.key)?;
+                                    }
                                 } else {
                                     runtime.delete_hash(&record.key);
                                     self.fulltext_delete_vectors(index, meta, &record.key)?;

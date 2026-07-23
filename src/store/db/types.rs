@@ -176,12 +176,21 @@ pub(in crate::store::db) struct ListMeta {
 
 #[derive(Default)]
 pub struct KeyMutationTracker {
+    enabled: AtomicBool,
     clock: AtomicU64,
     key_versions: DashMap<Vec<u8>, u64>,
     db_versions: DashMap<u16, u64>,
 }
 
 impl KeyMutationTracker {
+    pub(in crate::store::db) fn enable(&self) {
+        self.enabled.store(true, Ordering::Release);
+    }
+
+    pub(in crate::store::db) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
     pub(in crate::store::db) fn bump_key(&self, key: Vec<u8>) {
         let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
         self.key_versions.insert(key, version);

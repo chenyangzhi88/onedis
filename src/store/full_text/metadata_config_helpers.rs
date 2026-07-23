@@ -1,13 +1,24 @@
 impl Db {
     fn resolve_fulltext_index(&self, index_or_alias: &str) -> Result<String, Error> {
-        if self
+        if let Some(raw) = self
             .store
             .get_raw(&fulltext_meta_key(self.db_index, index_or_alias))
-            .is_some()
         {
+            let meta = decode_fulltext_meta(&raw)?;
+            if self.fulltext_index_expired(index_or_alias, &meta) {
+                self.fulltext_purge_index(index_or_alias, &meta)?;
+                return Err(Error::msg("ERR fulltext index does not exist"));
+            }
+            self.fulltext_touch_temporary_index(index_or_alias, &meta);
             return Ok(index_or_alias.to_string());
         }
         if let Some(alias) = self.read_fulltext_alias(index_or_alias)? {
+            let meta = self.read_fulltext_meta_direct(&alias.index)?;
+            if self.fulltext_index_expired(&alias.index, &meta) {
+                self.fulltext_purge_index(&alias.index, &meta)?;
+                return Err(Error::msg("ERR fulltext index does not exist"));
+            }
+            self.fulltext_touch_temporary_index(&alias.index, &meta);
             return Ok(alias.index);
         }
         Err(Error::msg("ERR fulltext index does not exist"))
@@ -32,28 +43,58 @@ impl Db {
         key: &str,
         source_type: FullTextSourceType,
     ) -> Result<Vec<(String, FullTextIndexMeta)>, Error> {
-        Ok(self
-            .read_all_fulltext_metas()?
-            .into_iter()
-            .filter(|(_, meta)| {
-                meta.source_type == source_type
-                    && meta.prefixes.iter().any(|prefix| key.starts_with(prefix))
-            })
-            .collect())
+        let mut matches = Vec::new();
+        for (index, meta) in self.read_all_fulltext_metas()? {
+            if self.fulltext_index_expired(&index, &meta)
+                || meta.source_type != source_type
+                || !meta.prefixes.iter().any(|prefix| key.starts_with(prefix))
+            {
+                continue;
+            }
+            self.fulltext_touch_temporary_index(&index, &meta);
+            matches.push((index, meta));
+        }
+        Ok(matches)
     }
 
     fn fulltext_matching_hash_keys(&self, meta: &FullTextIndexMeta) -> Result<Vec<String>, Error> {
+        self.fulltext_matching_source_keys(meta, TYPE_HASH)
+    }
+
+    fn fulltext_matching_source_keys(
+        &self,
+        meta: &FullTextIndexMeta,
+        source_type_tag: u8,
+    ) -> Result<Vec<String>, Error> {
         let mut keys = HashSet::new();
+        let storage_base = self.mk("");
         for prefix in &meta.prefixes {
-            for (raw_key, raw_value) in self.store.scan_prefix_raw(&main_key(self.db_index, prefix))
-            {
-                if raw_key.len() < 2 || decode_hash_meta_checked(&raw_value).is_err() {
+            for (raw_key, raw_value) in self.store.scan_prefix_raw(&self.mk(prefix)) {
+                let Some(encoded_key) =
+                    logical_main_key_from_raw_key(self.key_layout, self.db_index, &raw_key)
+                else {
+                    continue;
+                };
+                let Some(logical_key) = encoded_key.strip_prefix(storage_base.as_slice()) else {
+                    continue;
+                };
+                let Ok(key) = String::from_utf8(logical_key.to_vec()) else {
+                    continue;
+                };
+                if !key.starts_with(prefix) {
                     continue;
                 }
-                let key = String::from_utf8_lossy(&raw_key[2..]).to_string();
-                if key.starts_with(prefix) {
-                    keys.insert(key);
+                let Some(header) = decode_meta_header(&raw_value) else {
+                    continue;
+                };
+                if header.type_tag != source_type_tag {
+                    continue;
                 }
+                if header.expire_ms > 0 && current_fulltext_millis() >= header.expire_ms {
+                    self.expire_if_needed(&key);
+                    continue;
+                }
+                keys.insert(key);
             }
         }
         let mut keys = keys.into_iter().collect::<Vec<_>>();
@@ -83,6 +124,11 @@ impl Db {
             batch,
             &self.store,
             &fulltext_file_prefix(self.db_index, index),
+        );
+        delete_prefix_to_batch(
+            batch,
+            &self.store,
+            &fulltext_legacy_file_prefix(self.db_index, index),
         );
         delete_prefix_to_batch(
             batch,
@@ -118,6 +164,12 @@ impl Db {
             if (1..=4).contains(&dialect) {
                 options.dialect = dialect;
             }
+        }
+        if let Some(language) = options.language.as_deref() {
+            options.language = Some(normalize_fulltext_language(language)?);
+        }
+        if options.timeout_ms.is_none() {
+            options.timeout_ms = Some(self.fulltext_config_u64("TIMEOUT", 500)?);
         }
         Ok(options)
     }
@@ -169,13 +221,9 @@ impl Db {
     }
 
     fn fulltext_reject_cluster_multi_shard(&self, command: &str) -> Result<(), Error> {
-        if self.fulltext_cluster_enabled()? && self.fulltext_cluster_shards()? > 1 {
-            Err(Error::msg(format!(
-                "ERR {command} requires fulltext cluster routing, which is not implemented"
-            )))
-        } else {
-            Ok(())
-        }
+        let _ = command;
+        self.fulltext_cluster_shard_id()?;
+        Ok(())
     }
 
     fn fulltext_config_u64(&self, name: &str, default: u64) -> Result<u64, Error> {
@@ -209,12 +257,46 @@ impl Db {
             .unwrap_or_else(|| default.to_string()))
     }
 
+    fn fulltext_index_expired(&self, index: &str, meta: &FullTextIndexMeta) -> bool {
+        let Some(seconds) = meta.index_options.temporary_seconds else {
+            return false;
+        };
+        let last_activity_ms = self
+            .store
+            .get_raw(&fulltext_temporary_activity_key(self.db_index, index))
+            .and_then(|raw| raw.try_into().ok())
+            .map(u64::from_be_bytes)
+            .unwrap_or(meta.generation >> 16);
+        current_fulltext_millis()
+            >= last_activity_ms.saturating_add(seconds.saturating_mul(1_000))
+    }
+
+    fn fulltext_touch_temporary_index(&self, index: &str, meta: &FullTextIndexMeta) {
+        if meta.index_options.temporary_seconds.is_none() {
+            return;
+        }
+        let mut batch = WriteBatch::new();
+        batch.put(
+            &fulltext_temporary_activity_key(self.db_index, index),
+            &current_fulltext_millis().to_be_bytes(),
+        );
+        self.write_batch_if_not_empty(&batch);
+    }
+
     fn fulltext_file_bytes(&self, index: &str) -> usize {
-        self.store
+        let current = self
+            .store
             .scan_prefix_raw(&fulltext_file_prefix(self.db_index, index))
             .into_iter()
             .map(|(key, value)| key.len() + value.len())
-            .sum()
+            .sum::<usize>();
+        let legacy = self
+            .store
+            .scan_prefix_raw(&fulltext_legacy_file_prefix(self.db_index, index))
+            .into_iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum::<usize>();
+        current + legacy
     }
 
     fn read_all_fulltext_metas(&self) -> Result<Vec<(String, FullTextIndexMeta)>, Error> {
@@ -266,18 +348,10 @@ impl Db {
                 }
             }
             FullTextSourceType::Json => {
-                for prefix in &meta.prefixes {
-                    for (raw_key, raw_value) in
-                        self.store.scan_prefix_raw(&main_key(self.db_index, prefix))
-                    {
-                        if raw_key.len() < 2 || Self::decode_json_meta(&raw_value).is_err() {
-                            continue;
-                        }
-                        let key = String::from_utf8_lossy(&raw_key[2..]).to_string();
-                        if let Some(fields) = self.fulltext_json_fields(&key, &meta)? {
-                            for (_, value) in fields {
-                                out.extend(fulltext_tokenize(&value));
-                            }
+                for key in self.fulltext_source_keys(&meta)? {
+                    if let Some(fields) = self.fulltext_json_fields(&key, &meta)? {
+                        for (_, value) in fields {
+                            out.extend(fulltext_tokenize(&value));
                         }
                     }
                 }

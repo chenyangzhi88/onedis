@@ -17,12 +17,22 @@ pub struct FullTextSearchOptions {
     pub inorder: bool,
     pub language: Option<String>,
     pub payload: Option<String>,
+    pub scorer: FullTextScorer,
     pub summarize: bool,
     pub highlight: bool,
     pub explain_score: bool,
     pub params: HashMap<String, Vec<u8>>,
     pub dialect: u8,
     pub dialect_explicit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FullTextScorer {
+    Bm25,
+    #[default]
+    Bm25Std,
+    DisMax,
+    DocScore,
 }
 
 #[derive(Clone, Debug)]
@@ -67,10 +77,27 @@ struct FullTextSearchHit {
     score: f32,
 }
 
+struct FullTextSearchHits {
+    total: usize,
+    hits: Vec<FullTextSearchHit>,
+}
+
+struct FullTextCollectedHits {
+    total: usize,
+    hits: Vec<FullTextLiveHit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullTextCollectMode {
+    Page,
+    All,
+}
+
 #[derive(Clone, Debug)]
 struct FullTextLiveHit {
     key: String,
     score: f32,
     fields: Vec<(String, String)>,
     sort_key: Option<String>,
+    payload: Option<String>,
 }

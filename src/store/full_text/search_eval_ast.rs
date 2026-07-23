@@ -8,14 +8,21 @@ fn fulltext_eval_ast_against_fields(
         FullTextQueryAst::All => Ok(true),
         FullTextQueryAst::Text(term) => Ok(fulltext_any_text_field_matches(term, fields, meta)),
         FullTextQueryAst::Phrase(phrase) => {
-            let phrase = phrase.to_lowercase();
             Ok(fields
                 .iter()
                 .filter(|(field, _)| {
                     fulltext_schema_field(meta, field)
                         .is_some_and(|schema| matches!(schema.kind, FullTextFieldKind::Text))
                 })
-                .any(|(_, value)| value.to_lowercase().contains(&phrase)))
+                .any(|(_, value)| {
+                    fulltext_phrase_matches(
+                        value,
+                        phrase,
+                        &fulltext_effective_document_language(fields, meta, options),
+                        options.slop.unwrap_or(0),
+                        options.inorder,
+                    )
+                }))
         }
         FullTextQueryAst::Prefix(prefix) => {
             let prefix = prefix.to_lowercase();
@@ -50,11 +57,27 @@ fn fulltext_eval_ast_against_fields(
             let Some(value) = fulltext_field_value(fields, field) else {
                 return Ok(false);
             };
+            let Some(schema) = fulltext_schema_field(meta, field) else {
+                return Ok(false);
+            };
+            let separator = schema
+                .options
+                .separator
+                .as_deref()
+                .and_then(|separator| separator.chars().next())
+                .unwrap_or(',');
+            let actual = fulltext_split_indexed_tags(
+                &value,
+                separator,
+                schema.options.case_sensitive,
+            );
             Ok(values.iter().any(|expected| {
-                split_tag_values(&value)
-                    .iter()
-                    .any(|actual| actual.eq_ignore_ascii_case(expected))
-                    || value.eq_ignore_ascii_case(expected)
+                let expected = if schema.options.case_sensitive {
+                    expected.clone()
+                } else {
+                    expected.to_lowercase()
+                };
+                actual.iter().any(|actual| actual == &expected)
             }))
         }
         FullTextQueryAst::Numeric { field, min, max } => {
@@ -126,6 +149,131 @@ fn fulltext_eval_ast_against_fields(
     }
 }
 
+fn fulltext_effective_document_language(
+    fields: &[(String, String)],
+    meta: &FullTextIndexMeta,
+    options: &FullTextSearchOptions,
+) -> String {
+    options
+        .language
+        .clone()
+        .or_else(|| {
+            meta.index_options
+                .language_field
+                .as_deref()
+                .and_then(|field| fulltext_field_value(fields, field))
+        })
+        .or_else(|| meta.index_options.language.clone())
+        .unwrap_or_else(|| "english".to_string())
+}
+
+fn fulltext_phrase_matches(
+    value: &str,
+    phrase: &str,
+    language: &str,
+    slop: u32,
+    inorder: bool,
+) -> bool {
+    let source = fulltext_tokenize_with_language(value, language);
+    let query = fulltext_tokenize_with_language(phrase, language);
+    if query.is_empty() {
+        return true;
+    }
+    if query.len() == 1 {
+        return source.iter().any(|token| token == &query[0]);
+    }
+    if inorder {
+        return fulltext_ordered_phrase_matches(&source, &query, slop as usize);
+    }
+    fulltext_phrase_with_slop_matches(&source, &query, slop as usize)
+}
+
+fn fulltext_ordered_phrase_matches(source: &[String], query: &[String], slop: usize) -> bool {
+    for (start, token) in source.iter().enumerate() {
+        if token != &query[0] {
+            continue;
+        }
+        let mut previous = start;
+        let mut spent = 0usize;
+        let mut matched = true;
+        for expected in &query[1..] {
+            let Some(next) = source
+                .iter()
+                .enumerate()
+                .skip(previous + 1)
+                .find_map(|(position, actual)| (actual == expected).then_some(position))
+            else {
+                matched = false;
+                break;
+            };
+            spent = spent.saturating_add(next.saturating_sub(previous + 1));
+            if spent > slop {
+                matched = false;
+                break;
+            }
+            previous = next;
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
+fn fulltext_phrase_with_slop_matches(
+    source: &[String],
+    query: &[String],
+    slop: usize,
+) -> bool {
+    let mut positions = query
+        .iter()
+        .enumerate()
+        .flat_map(|(query_offset, expected)| {
+            source
+                .iter()
+                .enumerate()
+                .filter_map(move |(source_offset, actual)| {
+                    (actual == expected).then_some((query_offset, source_offset))
+                })
+        })
+        .collect::<Vec<_>>();
+    positions.sort_unstable();
+    fulltext_phrase_position_search(&positions, query.len(), 0, None, 0, slop)
+}
+
+fn fulltext_phrase_position_search(
+    positions: &[(usize, usize)],
+    query_len: usize,
+    query_offset: usize,
+    previous: Option<usize>,
+    spent: usize,
+    slop: usize,
+) -> bool {
+    if query_offset == query_len {
+        return true;
+    }
+    positions
+        .iter()
+        .filter(|(offset, _)| *offset == query_offset)
+        .any(|(_, position)| {
+            if previous == Some(*position) {
+                return false;
+            }
+            let next_spent = previous.map_or(spent, |previous| {
+                spent.saturating_add(previous.saturating_add(1).abs_diff(*position))
+            });
+            next_spent <= slop
+                && fulltext_phrase_position_search(
+                    positions,
+                    query_len,
+                    query_offset + 1,
+                    Some(*position),
+                    next_spent,
+                    slop,
+                )
+        })
+}
+
 fn fulltext_any_text_field_matches(
     term: &str,
     fields: &[(String, String)],
@@ -150,6 +298,12 @@ fn fulltext_any_text_field_matches(
                 .into_iter()
                 .map(|word| word.to_lowercase())
                 .collect(),
+            language: meta
+                .index_options
+                .language
+                .clone()
+                .unwrap_or_else(|| "english".to_string()),
+            weight: schema.options.weight.unwrap_or(1.0),
         };
         let materialized = fulltext_materialize_text(value, &settings);
         let variants = fulltext_query_term_variants(term, Some(&settings), &HashMap::new());

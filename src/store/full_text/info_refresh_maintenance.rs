@@ -10,6 +10,11 @@ impl Db {
             .map(|(index, meta)| (index, meta.state))
             .collect::<Vec<_>>();
         for (index, state) in indexes {
+            let meta = self.read_fulltext_meta_direct(&index)?;
+            if self.fulltext_index_expired(&index, &meta) {
+                self.fulltext_purge_index(&index, &meta)?;
+                continue;
+            }
             if matches!(state, FullTextIndexState::Dirty) {
                 self.fulltext_rebuild_index(&index)?;
             } else {
@@ -42,7 +47,7 @@ impl Db {
             let mut batch = WriteBatch::new();
             match self
                 .store
-                .get_raw(&main_key(self.db_index, &key))
+                .get_raw(&self.mk(&key))
                 .and_then(|raw| decode_meta_header(&raw))
                 .map(|header| header.type_tag)
             {

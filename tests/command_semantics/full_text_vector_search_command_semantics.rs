@@ -236,6 +236,45 @@ fn ft_search_vector_hybrid_filter_and_range_are_ranked_by_vector() {
 }
 
 #[test]
+fn ft_search_vector_clause_can_be_nested_in_conjunctions() {
+    let (_dir, db) = seed_vector_index();
+
+    let ids = search_ids(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "idx",
+            "(@category:{jacket|pants}=>[KNN 3 @embedding $vec]) @title:red",
+            "PARAMS",
+            "2",
+            "vec",
+            "[1,0]",
+            "NOCONTENT",
+            "DIALECT",
+            "2",
+        ],
+    ));
+    assert_eq!(ids, vec!["doc:3"]);
+
+    let ids = search_ids(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "idx",
+            "@embedding:[VECTOR_RANGE 0.03 $vec] @category:{jacket}",
+            "PARAMS",
+            "2",
+            "vec",
+            "[1,0]",
+            "NOCONTENT",
+            "DIALECT",
+            "2",
+        ],
+    ));
+    assert_eq!(ids, vec!["doc:3"]);
+}
+
+#[test]
 fn ft_hybrid_vector_reuses_search_vector_execution() {
     let (_dir, db) = seed_vector_index();
     let ids = search_ids(apply(

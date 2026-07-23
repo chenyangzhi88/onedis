@@ -5,6 +5,8 @@ impl Db {
         if batch.count() == 0 {
             return;
         }
+        let augmented = self.batch_with_version_owner_markers(batch);
+        let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch(batch);
@@ -15,13 +17,60 @@ impl Db {
         if batch.count() == 0 {
             return;
         }
+        let augmented = self.batch_with_version_owner_markers(batch);
+        let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch_async(batch).await;
         self.record_or_publish_mutations(batch);
     }
 
-    pub(in crate::store::db) async fn write_batch_if_not_empty_without_watch_publish_async(
+    pub(in crate::store::db) fn write_plain_string_batch_if_not_empty(&self, batch: &WriteBatch) {
+        if batch.count() == 0 {
+            return;
+        }
+        if self.store.is_transactional() || self.mutation_tracker.is_enabled() {
+            self.write_batch_if_not_empty(batch);
+            return;
+        }
+        self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_list_meta_cache_for_batch(batch);
+        self.store.write_batch(batch);
+    }
+
+    pub(in crate::store::db) async fn write_plain_string_batch_if_not_empty_async(
+        &self,
+        batch: &WriteBatch,
+    ) {
+        if batch.count() == 0 {
+            return;
+        }
+        if self.store.is_transactional() || self.mutation_tracker.is_enabled() {
+            self.write_batch_if_not_empty_async(batch).await;
+            return;
+        }
+        self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_list_meta_cache_for_batch(batch);
+        self.store.write_batch_async(batch).await;
+    }
+
+    pub(in crate::store::db) async fn write_plain_string_batch_owned_if_not_empty_async(
+        &self,
+        batch: WriteBatch,
+    ) {
+        if batch.count() == 0 {
+            return;
+        }
+        if self.store.is_transactional() || self.mutation_tracker.is_enabled() {
+            self.write_batch_if_not_empty_async(&batch).await;
+            return;
+        }
+        self.invalidate_counter_cache_for_batch(&batch);
+        self.invalidate_list_meta_cache_for_batch(&batch);
+        self.store.write_batch_owned_async(batch).await;
+    }
+
+    pub(in crate::store::db) async fn write_plain_string_batch_if_not_empty_without_watch_publish_async(
         &self,
         batch: &WriteBatch,
     ) {
@@ -41,6 +90,8 @@ impl Db {
         if batch.count() == 0 {
             return Ok(true);
         }
+        let augmented = self.batch_with_version_owner_markers(batch);
+        let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         match self
@@ -52,12 +103,15 @@ impl Db {
                 self.record_or_publish_mutations(batch);
                 Ok(true)
             }
-            Err(Status::Conflict(_)) => Ok(false),
+            Err(Status::ConditionFailed(_)) => Ok(false),
             Err(err) => Err(Error::msg(err.to_string())),
         }
     }
 
     pub(in crate::store::db) fn record_or_publish_mutations(&self, batch: &WriteBatch) {
+        if !self.store.is_transactional() && !self.mutation_tracker.is_enabled() {
+            return;
+        }
         let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, batch);
         if keys.is_empty() && dbs.is_empty() {
             return;
@@ -103,6 +157,9 @@ impl Db {
     }
 
     pub(in crate::store::db) fn invalidate_counter_cache_for_batch(&self, batch: &WriteBatch) {
+        if !self.counter_cache_maybe_non_empty.load(Ordering::Acquire) {
+            return;
+        }
         let mut clear_all = false;
         let mut keys = Vec::new();
         for (write_type, key, _) in batch.iter() {
@@ -127,6 +184,8 @@ impl Db {
 
         if clear_all {
             self.counter_cache.clear();
+            self.counter_cache_maybe_non_empty
+                .store(false, Ordering::Release);
             self.counter_cache_epoch.fetch_add(1, Ordering::Release);
             return;
         }
@@ -140,6 +199,9 @@ impl Db {
 
     pub(in crate::store::db) fn invalidate_list_meta_cache_for_batch(&self, batch: &WriteBatch) {
         if self.store.is_transactional() {
+            return;
+        }
+        if !self.list_meta_cache_maybe_non_empty.load(Ordering::Acquire) {
             return;
         }
         let mut clear_all = false;
@@ -165,6 +227,8 @@ impl Db {
         }
         if clear_all {
             self.list_meta_cache.clear();
+            self.list_meta_cache_maybe_non_empty
+                .store(false, Ordering::Release);
             return;
         }
         for key in keys {
@@ -179,6 +243,8 @@ impl Db {
     ) {
         if !self.store.is_transactional() {
             self.list_meta_cache.insert(self.mk(key), meta);
+            self.list_meta_cache_maybe_non_empty
+                .store(true, Ordering::Release);
         }
     }
 

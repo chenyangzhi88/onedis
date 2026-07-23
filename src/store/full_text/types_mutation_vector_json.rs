@@ -5,9 +5,9 @@ enum FullTextMutationKind {
     UpsertJson,
 }
 
-struct FullTextVectorPlan<'a> {
+struct FullTextVectorPlan {
     kind: FullTextVectorPlanKind,
-    filter: Option<&'a FullTextQueryAst>,
+    filter: Option<FullTextQueryAst>,
     field: String,
     blob_param: String,
 }

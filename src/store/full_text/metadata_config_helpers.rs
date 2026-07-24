@@ -215,6 +215,15 @@ impl Db {
         self.fulltext_config_u64("REFRESH_TIMEOUT_MS", DEFAULT_REFRESH_TIMEOUT_MS)
     }
 
+    fn fulltext_search_refresh_timeout_ms(&self, search_timeout_ms: u64) -> Result<u64, Error> {
+        match self.fulltext_config_value("REFRESH_TIMEOUT_MS")? {
+            Some(value) => value
+                .parse::<u64>()
+                .map_err(|_| Error::msg("ERR invalid fulltext config value")),
+            None => Ok(DEFAULT_REFRESH_TIMEOUT_MS.max(search_timeout_ms)),
+        }
+    }
+
     fn fulltext_outbox_compact_threshold(&self) -> Result<usize, Error> {
         self.fulltext_config_usize("OUTBOX_COMPACT_THRESHOLD", DEFAULT_OUTBOX_COMPACT_THRESHOLD)
     }
@@ -242,8 +251,12 @@ impl Db {
     }
 
     fn fulltext_reject_cluster_multi_shard(&self, command: &str) -> Result<(), Error> {
-        let _ = command;
         self.fulltext_cluster_shard_id()?;
+        if self.fulltext_cluster_enabled()? && self.fulltext_cluster_shards()? > 1 {
+            return Err(Error::msg(format!(
+                "ERR {command} is not supported with multiple fulltext shards"
+            )));
+        }
         Ok(())
     }
 

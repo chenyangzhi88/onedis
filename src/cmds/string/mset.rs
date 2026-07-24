@@ -8,7 +8,7 @@ pub struct Mset {
 impl Mset {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let arg_count = frame.arg_len().saturating_sub(1);
-        if arg_count == 0 || arg_count % 2 != 0 {
+        if arg_count == 0 || !arg_count.is_multiple_of(2) {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'mset' command",
             ));

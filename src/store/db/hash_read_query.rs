@@ -1,5 +1,8 @@
 use super::*;
 
+pub type HashRandomField = (String, Option<String>);
+pub type HashRandomFields = Vec<HashRandomField>;
+
 impl Db {
     pub fn hash_exists(&self, key: &str, field: &str) -> Result<bool, Error> {
         let meta = self.hash_expire_ms(key)?;
@@ -161,7 +164,7 @@ impl Db {
         key: &str,
         count: Option<i64>,
         with_values: bool,
-    ) -> Result<Option<Vec<(String, Option<String>)>>, Error> {
+    ) -> Result<Option<HashRandomFields>, Error> {
         let mut entries = self.hash_get_all(key)?;
         if entries.is_empty() {
             return Ok(None);
@@ -198,7 +201,7 @@ impl Db {
         key: &str,
         count: Option<i64>,
         with_values: bool,
-    ) -> Result<Option<Vec<(String, Option<String>)>>, Error> {
+    ) -> Result<Option<HashRandomFields>, Error> {
         let mut entries = self.hash_get_all_async(key).await?;
         if entries.is_empty() {
             return Ok(None);

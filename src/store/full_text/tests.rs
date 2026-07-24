@@ -632,10 +632,8 @@ fn aggregate_expressions_reducers_sort_and_frames_cover_success_and_errors() {
     };
     assert!(fulltext_aggregate_reduce(&missing_arg, &[first.clone()]).is_err());
 
-    let mut sorted = vec![
-        row("doc:2", 1.0, &[("price", "2")]),
-        row("doc:1", 1.0, &[("price", "10")]),
-    ];
+    let mut sorted = [row("doc:2", 1.0, &[("price", "2")]),
+        row("doc:1", 1.0, &[("price", "10")])];
     sorted.sort_by(|left, right| {
         compare_fulltext_aggregate_rows(
             left,
@@ -658,6 +656,31 @@ fn aggregate_expressions_reducers_sort_and_frames_cover_success_and_errors() {
         Frame::Null
     ));
     assert_eq!(normalize_fulltext_aggregate_field("@price"), "price");
+}
+
+#[test]
+fn aggregate_cursors_enforce_idle_and_memory_limits() {
+    let cursor_id = register_fulltext_aggregate_cursor(
+        0,
+        "idx",
+        vec![row("doc:1", 1.0, &[("title", "rust")])],
+        1,
+        usize::MAX,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(read_fulltext_aggregate_cursor(0, "idx", cursor_id, 1).is_err());
+
+    assert!(
+        register_fulltext_aggregate_cursor(
+            0,
+            "idx",
+            vec![row("doc:2", 1.0, &[("title", "rust")])],
+            300_000,
+            1,
+        )
+        .is_err()
+    );
 }
 
 #[test]

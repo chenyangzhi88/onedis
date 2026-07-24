@@ -3,6 +3,8 @@ use anyhow::Error;
 pub(crate) const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_BULK_STRING_BYTES: usize = MAX_FRAME_BYTES;
 pub(crate) const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
+pub(crate) const MAX_ARRAY_NESTING_DEPTH: usize = 128;
+pub(crate) const MAX_FRAME_NODES: usize = MAX_ARRAY_ELEMENTS + 1;
 
 /*
  * 命令帧枚举
@@ -11,7 +13,6 @@ pub(crate) const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
 pub enum Frame {
     Ok,
     Integer(i64),
-    RDBFile(Vec<u8>),
     SimpleString(String),
     Array(Vec<Frame>),
     BulkString(Vec<u8>),
@@ -25,7 +26,9 @@ mod serialization;
 pub(crate) use parsing::FrameScanResult;
 #[cfg(test)]
 mod tests {
-    use super::{Frame, FrameScanResult, MAX_ARRAY_ELEMENTS, MAX_BULK_STRING_BYTES};
+    use super::{
+        Frame, FrameScanResult, MAX_ARRAY_ELEMENTS, MAX_ARRAY_NESTING_DEPTH, MAX_BULK_STRING_BYTES,
+    };
 
     #[test]
     fn parse_multiple_frames_handles_client_setinfo_with_values() {
@@ -59,6 +62,21 @@ mod tests {
         let frame = Frame::parse_from_bytes(b"PING\r\n").unwrap();
 
         assert_eq!(frame.get_args(), vec!["PING"]);
+    }
+
+    #[test]
+    fn inline_commands_support_quotes_empty_values_and_binary_escapes() {
+        let frame =
+            Frame::parse_from_bytes(b"SET key \"hello world\" '' \"\\x00\\xff\\n\"\r\n").unwrap();
+
+        assert_eq!(frame.arg_len(), 5);
+        assert_eq!(frame.get_arg(0), Some("SET".to_string()));
+        assert_eq!(frame.get_arg(1), Some("key".to_string()));
+        assert_eq!(frame.get_arg(2), Some("hello world".to_string()));
+        assert_eq!(frame.get_arg_bytes(3), Some(Vec::new()));
+        assert_eq!(frame.get_arg_bytes(4), Some(vec![0, 0xff, b'\n']));
+        assert!(Frame::parse_from_bytes(b"SET key \"unterminated\r\n").is_err());
+        assert!(Frame::parse_from_bytes(b"SET key \"value\"tail\r\n").is_err());
     }
 
     #[test]
@@ -129,13 +147,27 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_arrays_are_rejected_without_recursive_overflow() {
+        let mut valid = Vec::new();
+        for _ in 0..MAX_ARRAY_NESTING_DEPTH {
+            valid.extend_from_slice(b"*1\r\n");
+        }
+        valid.extend_from_slice(b"$4\r\nPING\r\n");
+        assert!(Frame::parse_from_bytes(&valid).is_ok());
+
+        let mut excessive = b"*1\r\n".to_vec();
+        excessive.extend_from_slice(&valid);
+        assert!(matches!(
+            Frame::scan_complete_frames(&excessive),
+            FrameScanResult::Invalid(message) if message.contains("nesting")
+        ));
+        assert!(Frame::parse_from_bytes(&excessive).is_err());
+    }
+
+    #[test]
     fn frame_to_string_and_bytes_cover_all_variants() {
         assert_eq!(Frame::Ok.to_string(), "OK");
         assert_eq!(Frame::Integer(-7).to_string(), "-7");
-        assert_eq!(
-            Frame::RDBFile(vec![1, 2, 3]).to_string(),
-            "[RDBFile 3 bytes]"
-        );
         assert_eq!(Frame::SimpleString("PONG".to_string()).to_string(), "PONG");
         assert_eq!(Frame::BulkString(b"hello".to_vec()).to_string(), "hello");
         assert_eq!(Frame::Error("ERR bad".to_string()).to_string(), "ERR bad");
@@ -166,17 +198,21 @@ mod tests {
             b"$2\r\nhi\r\n"
         );
         assert_eq!(
-            Frame::RDBFile(vec![1, 2, 3]).as_bytes(),
-            b"~3\r\n\x01\x02\x03\r\n"
-        );
-        assert_eq!(
             Frame::Array(vec![Frame::Integer(1), Frame::BulkString(b"x".to_vec())]).as_bytes(),
             b"*2\r\n:1\r\n$1\r\nx\r\n"
+        );
+        assert_eq!(
+            Frame::SimpleString("hello\r\nworld".to_string()).as_bytes(),
+            b"+hello  world\r\n"
+        );
+        assert_eq!(
+            Frame::Error("ERR first\nsecond".to_string()).as_bytes(),
+            b"-ERR first second\r\n"
         );
     }
 
     #[test]
-    fn parse_simple_error_integer_rdb_null_and_nested_arrays() {
+    fn parse_simple_error_integer_null_and_nested_arrays() {
         assert!(matches!(
             Frame::parse_from_bytes(b"+OK\r\n").unwrap(),
             Frame::SimpleString(value) if value == "OK"
@@ -197,9 +233,10 @@ mod tests {
             Frame::Null
         ));
         assert!(matches!(
-            Frame::parse_from_bytes(b"~3\r\nabc\r\n").unwrap(),
-            Frame::RDBFile(value) if value == b"abc"
+            Frame::parse_from_bytes(b"*-1\r\n").unwrap(),
+            Frame::Null
         ));
+        assert!(Frame::parse_from_bytes(b"~3\r\nabc\r\n").is_err());
         assert!(matches!(
             Frame::parse_from_bytes(b"*3\r\n+OK\r\n:5\r\n-ERR no\r\n").unwrap(),
             Frame::Array(values)
@@ -224,6 +261,7 @@ mod tests {
         assert!(Frame::parse_from_bytes(b"-ERR").is_err());
         assert!(Frame::parse_from_bytes(b":1").is_err());
         assert!(Frame::parse_from_bytes(b"$3\nabc\r\n").is_err());
+        assert!(Frame::parse_from_bytes(b"$+3\r\nabc\r\n").is_err());
         assert!(Frame::parse_from_bytes(b"$-2\r\n").is_err());
         assert!(Frame::parse_from_bytes(b"$3\r\nab").is_err());
         assert!(Frame::parse_from_bytes(b"$3\r\nabcXX").is_err());
@@ -232,13 +270,25 @@ mod tests {
         assert!(Frame::parse_from_bytes(b"~3\r\nabcXX").is_err());
         assert!(Frame::parse_from_bytes(b"~\xff\r\nabc\r\n").is_err());
         assert!(Frame::parse_from_bytes(b"*x\r\n").is_err());
+        assert!(Frame::parse_from_bytes(b"*-2\r\n").is_err());
+        assert!(Frame::parse_from_bytes(b"*+1\r\n+OK\r\n").is_err());
         assert!(Frame::parse_from_bytes(b"*2\r\n$4\r\nPING\r\n").is_err());
+        assert!(matches!(
+            Frame::parse_from_bytes(b":+1\r\n").unwrap(),
+            Frame::Integer(1)
+        ));
+        assert!(Frame::parse_from_bytes(b"+OK\r\ntrailing").is_err());
+        assert!(Frame::parse_from_bytes(b"$3\r\nabc\r\ntrailing").is_err());
+        assert!(Frame::parse_from_bytes(b"*1\r\n+OK\r\ntrailing").is_err());
+        assert!(Frame::parse_from_bytes(b"+bad\nline\r\n").is_err());
+        assert!(Frame::parse_from_bytes(b"PING\nPONG\r\n").is_err());
 
         assert_eq!(Frame::find_frame_end(b""), None);
         assert_eq!(Frame::find_frame_end(b"+OK\r\ntrailing"), Some(5));
         assert_eq!(Frame::find_frame_end(b"-ERR\r\n"), Some(6));
         assert_eq!(Frame::find_frame_end(b":1\r\n"), Some(4));
         assert_eq!(Frame::find_frame_end(b"$-1\r\n"), Some(5));
+        assert_eq!(Frame::find_frame_end(b"*-1\r\n"), Some(5));
         assert_eq!(Frame::find_frame_end(b"$3\r\nabc\r\n"), Some(9));
         assert_eq!(Frame::find_frame_end(b"$3\r\nab"), None);
         assert_eq!(
@@ -247,7 +297,7 @@ mod tests {
             ),
             None
         );
-        assert_eq!(Frame::find_frame_end(b"~3\r\nabc\r\n"), Some(9));
+        assert_eq!(Frame::find_frame_end(b"~3\r\nabc\r\n"), None);
         assert_eq!(Frame::find_frame_end(b"~3\r\nab"), None);
         assert_eq!(Frame::find_frame_end(b"PING\r\n"), Some(6));
         assert_eq!(Frame::find_frame_end(b"PING"), None);
@@ -264,10 +314,9 @@ mod tests {
             Frame::Ok,
             Frame::Null,
             Frame::Array(vec![]),
-            Frame::RDBFile(vec![1]),
         ]);
 
-        assert_eq!(frame.arg_len(), 8);
+        assert_eq!(frame.arg_len(), 7);
         assert_eq!(frame.get_arg(0), Some("cmd".to_string()));
         assert_eq!(frame.get_arg(1), Some("simple".to_string()));
         assert_eq!(frame.get_arg(2), Some("err".to_string()));
@@ -275,11 +324,8 @@ mod tests {
         assert_eq!(frame.get_arg(4), Some("OK".to_string()));
         assert_eq!(frame.get_arg(5), None);
         assert_eq!(frame.get_arg(99), None);
-        assert_eq!(frame.get_args(), vec!["cmd", "simple", "err", "42", "OK"]);
-        assert_eq!(
-            frame.get_args_from_index(2),
-            vec!["err".to_string(), "42".to_string(), "OK".to_string()]
-        );
+        assert!(frame.get_args().is_empty());
+        assert!(frame.get_args_from_index(2).is_empty());
         assert!(frame.get_args_from_index(99).is_empty());
         assert_eq!(frame.get_arg_bytes(0), Some(b"cmd".to_vec()));
         assert_eq!(frame.get_arg_bytes(1), Some(b"simple".to_vec()));
@@ -294,7 +340,15 @@ mod tests {
         assert!(non_array.get_args().is_empty());
         assert!(non_array.get_args_from_index(0).is_empty());
         assert_eq!(non_array.get_arg_bytes(0), None);
-        assert_eq!(Frame::RDBFile(vec![1]).as_text(), None);
-        assert_eq!(Frame::RDBFile(vec![1]).as_bytes_arg(), None);
+
+        let invalid_middle = Frame::Array(vec![
+            Frame::bulk_string("SET"),
+            Frame::BulkString(vec![0xff]),
+            Frame::bulk_string("NX"),
+        ]);
+        assert!(
+            invalid_middle.get_args().is_empty(),
+            "an invalid argument must not shift NX into the key position"
+        );
     }
 }

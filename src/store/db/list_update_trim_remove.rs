@@ -23,8 +23,10 @@ impl Db {
     }
 
     pub async fn list_set_async(&self, key: &str, index: i64, value: &str) -> Result<(), Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let meta = self
-            .list_meta(key)?
+            .list_meta_async(key)
+            .await?
             .ok_or_else(|| Error::msg("ERR no such key"))?;
         let storage_index = self
             .resolve_list_index(meta, index)
@@ -59,7 +61,7 @@ impl Db {
                     storage_index,
                 ));
             }
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty(&batch);
             if batch.count() > 0 {
                 self.changes.fetch_add(1, Ordering::Relaxed);
@@ -95,7 +97,8 @@ impl Db {
     }
 
     pub async fn list_trim_async(&self, key: &str, start: i64, stop: i64) -> Result<(), Error> {
-        let meta = match self.list_meta(key)? {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        let meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(()),
         };
@@ -110,7 +113,7 @@ impl Db {
                     storage_index,
                 ));
             }
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty_async(&batch).await;
             if batch.count() > 0 {
                 self.changes.fetch_add(1, Ordering::Relaxed);
@@ -192,7 +195,7 @@ impl Db {
             ));
         }
         if keep.is_empty() {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
             for (index, value) in keep.iter().enumerate() {
                 batch.put(
@@ -216,7 +219,8 @@ impl Db {
         count: i64,
         element: &str,
     ) -> Result<usize, Error> {
-        let meta = match self.list_meta(key)? {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        let meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(0),
         };
@@ -262,7 +266,7 @@ impl Db {
             ));
         }
         if keep.is_empty() {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
             for (index, value) in keep.iter().enumerate() {
                 batch.put(

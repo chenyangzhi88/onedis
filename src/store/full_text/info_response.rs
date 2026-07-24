@@ -257,12 +257,16 @@ impl Db {
                 Frame::bulk_string(self.fulltext_config_string("CLUSTER_VECTOR_MERGE", "local")?),
                 Frame::bulk_string("router_state"),
                 Frame::bulk_string(if cluster_enabled && cluster_shards > 1 {
-                    "local_coordinator"
+                    "unsupported_multi_shard"
                 } else {
                     "local"
                 }),
                 Frame::bulk_string("merge_policy"),
-                Frame::bulk_string("score_desc_key_asc"),
+                Frame::bulk_string(if cluster_enabled && cluster_shards > 1 {
+                    "none"
+                } else {
+                    "local"
+                }),
             ]),
             Frame::bulk_string("gc_stats"),
             Frame::Array(vec![
@@ -293,6 +297,8 @@ impl Db {
     }
 
     pub async fn fulltext_info_async(&self, index: &str) -> Result<Frame, Error> {
-        self.fulltext_info(index)
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_info(&index))
+            .await
     }
 }

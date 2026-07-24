@@ -3,48 +3,45 @@ use super::*;
 impl Db {
     pub(in crate::store::db) fn list_meta(&self, key: &str) -> Result<Option<ListMeta>, Error> {
         let key_bytes = self.mk(key);
-        if !self.store.is_transactional() {
-            if let Some(meta) = self.list_meta_cache.get(&key_bytes).map(|entry| *entry) {
-                if meta.expire_ms == 0 || now_ms() < meta.expire_ms {
-                    return Ok(Some(meta));
-                }
-                let mut batch = WriteBatch::new();
-                batch.delete(&key_bytes);
-                delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_LIST);
-                self.ttl_manager.remove_known_to_batch(
-                    &mut batch,
-                    meta.expire_ms,
-                    self.db_index,
-                    key,
-                );
-                self.write_batch_if_not_empty(&batch);
-                self.list_meta_cache.remove(&key_bytes);
-                return Ok(None);
+        if !self.store.is_transactional()
+            && let Some(meta) = self.list_meta_cache.get(&key_bytes).map(|entry| *entry)
+        {
+            if meta.expire_ms == 0 || now_ms() < meta.expire_ms {
+                return Ok(Some(meta));
             }
+            let mut batch = WriteBatch::new();
+            batch.delete(&key_bytes);
+            delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_LIST);
+            self.ttl_manager
+                .remove_known_to_batch(&mut batch, meta.expire_ms, self.db_index, key);
+            self.write_batch_if_not_empty(&batch);
+            self.list_meta_cache.remove(&key_bytes);
+            return Ok(None);
         }
         let Some(raw) = self.store.get_raw(&key_bytes) else {
             return Ok(None);
         };
-        if let Some(header) = decode_meta_header(&raw) {
-            if header.expire_ms > 0 && now_ms() >= header.expire_ms {
-                let mut batch = WriteBatch::new();
-                batch.delete(&key_bytes);
-                delete_sub_keys_to_batch(
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    header.version,
-                    header.type_tag,
-                );
-                self.ttl_manager.remove_known_to_batch(
-                    &mut batch,
-                    header.expire_ms,
-                    self.db_index,
-                    key,
-                );
-                self.write_batch_if_not_empty(&batch);
-                return Ok(None);
-            }
+        if let Some(header) = decode_meta_header(&raw)
+            && header.expire_ms > 0
+            && now_ms() >= header.expire_ms
+        {
+            let mut batch = WriteBatch::new();
+            batch.delete(&key_bytes);
+            delete_sub_keys_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                header.version,
+                header.type_tag,
+            );
+            self.ttl_manager.remove_known_to_batch(
+                &mut batch,
+                header.expire_ms,
+                self.db_index,
+                key,
+            );
+            self.write_batch_if_not_empty(&batch);
+            return Ok(None);
         }
 
         if let Some(meta) = decode_list_meta(&raw) {
@@ -75,48 +72,45 @@ impl Db {
         key: &str,
     ) -> Result<Option<ListMeta>, Error> {
         let key_bytes = self.mk(key);
-        if !self.store.is_transactional() {
-            if let Some(meta) = self.list_meta_cache.get(&key_bytes).map(|entry| *entry) {
-                if meta.expire_ms == 0 || now_ms() < meta.expire_ms {
-                    return Ok(Some(meta));
-                }
-                let mut batch = WriteBatch::new();
-                batch.delete(&key_bytes);
-                delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_LIST);
-                self.ttl_manager.remove_known_to_batch(
-                    &mut batch,
-                    meta.expire_ms,
-                    self.db_index,
-                    key,
-                );
-                self.write_batch_if_not_empty_async(&batch).await;
-                self.list_meta_cache.remove(&key_bytes);
-                return Ok(None);
+        if !self.store.is_transactional()
+            && let Some(meta) = self.list_meta_cache.get(&key_bytes).map(|entry| *entry)
+        {
+            if meta.expire_ms == 0 || now_ms() < meta.expire_ms {
+                return Ok(Some(meta));
             }
+            let mut batch = WriteBatch::new();
+            batch.delete(&key_bytes);
+            delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_LIST);
+            self.ttl_manager
+                .remove_known_to_batch(&mut batch, meta.expire_ms, self.db_index, key);
+            self.write_batch_if_not_empty_async(&batch).await;
+            self.list_meta_cache.remove(&key_bytes);
+            return Ok(None);
         }
         let Some(raw) = self.store.get_raw_async(&key_bytes).await else {
             return Ok(None);
         };
-        if let Some(header) = decode_meta_header(&raw) {
-            if header.expire_ms > 0 && now_ms() >= header.expire_ms {
-                let mut batch = WriteBatch::new();
-                batch.delete(&key_bytes);
-                delete_sub_keys_to_batch(
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    header.version,
-                    header.type_tag,
-                );
-                self.ttl_manager.remove_known_to_batch(
-                    &mut batch,
-                    header.expire_ms,
-                    self.db_index,
-                    key,
-                );
-                self.write_batch_if_not_empty_async(&batch).await;
-                return Ok(None);
-            }
+        if let Some(header) = decode_meta_header(&raw)
+            && header.expire_ms > 0
+            && now_ms() >= header.expire_ms
+        {
+            let mut batch = WriteBatch::new();
+            batch.delete(&key_bytes);
+            delete_sub_keys_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                header.version,
+                header.type_tag,
+            );
+            self.ttl_manager.remove_known_to_batch(
+                &mut batch,
+                header.expire_ms,
+                self.db_index,
+                key,
+            );
+            self.write_batch_if_not_empty_async(&batch).await;
+            return Ok(None);
         }
 
         if let Some(meta) = decode_list_meta(&raw) {

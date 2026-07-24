@@ -15,7 +15,10 @@ impl Db {
     }
 
     pub async fn vector_drop_async(&self, index: &str) -> Result<usize, Error> {
-        self.vector_drop(index)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.vector_drop(&index))
+            .await
     }
 
     pub fn vector_rebuild(&self, index: &str) -> Result<(), Error> {
@@ -46,11 +49,7 @@ impl Db {
             self.db_index,
             index,
             version,
-            meta.dim as usize,
-            meta.distance,
-            meta.m as usize,
-            meta.ef_construction as usize,
-            meta.initial_cap as usize,
+            VectorRuntimeConfig::from(&meta),
         );
         let prefix = vector_doc_prefix(self.db_index, index, version);
         for (_, raw) in self.store.scan_prefix_raw(&prefix) {
@@ -60,14 +59,8 @@ impl Db {
                     self.db_index,
                     index,
                     version,
-                    meta.dim as usize,
-                    meta.distance,
-                    meta.m as usize,
-                    meta.ef_construction as usize,
-                    meta.initial_cap as usize,
-                    doc.id,
-                    doc.doc_version,
-                    doc.vector,
+                    VectorRuntimeConfig::from(&meta),
+                    VectorRuntimeEntry::from(&doc),
                 )?;
             }
         }
@@ -75,7 +68,10 @@ impl Db {
     }
 
     pub async fn vector_rebuild_async(&self, index: &str) -> Result<(), Error> {
-        self.vector_rebuild(index)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.vector_rebuild(&index))
+            .await
     }
 
     pub fn vector_compact(&self, index: &str) -> Result<(), Error> {
@@ -90,7 +86,10 @@ impl Db {
     }
 
     pub async fn vector_compact_async(&self, index: &str) -> Result<(), Error> {
-        self.vector_compact(index)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.vector_compact(&index))
+            .await
     }
 
     fn maybe_freeze_vector_segment(

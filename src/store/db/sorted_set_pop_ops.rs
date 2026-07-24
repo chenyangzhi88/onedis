@@ -1,12 +1,10 @@
 use super::*;
 
+pub type ZsetEntry = (String, f64);
+pub type ZsetMultiPopResult = Option<(String, Vec<ZsetEntry>)>;
+
 impl Db {
-    pub fn zset_pop(
-        &self,
-        key: &str,
-        min: bool,
-        count: usize,
-    ) -> Result<Vec<(String, f64)>, Error> {
+    pub fn zset_pop(&self, key: &str, min: bool, count: usize) -> Result<Vec<ZsetEntry>, Error> {
         let mut entries = self.zset_all_entries(key)?;
         if !min {
             entries.reverse();
@@ -25,7 +23,8 @@ impl Db {
         key: &str,
         min: bool,
         count: usize,
-    ) -> Result<Vec<(String, f64)>, Error> {
+    ) -> Result<Vec<ZsetEntry>, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let mut entries = self.zset_all_entries_async(key).await?;
         if !min {
             entries.reverse();
@@ -35,7 +34,7 @@ impl Db {
             .iter()
             .map(|(member, _)| member.clone())
             .collect::<Vec<_>>();
-        self.zset_remove_async(key, &members).await?;
+        self.zset_remove_async_unlocked(key, &members).await?;
         Ok(entries)
     }
 
@@ -44,7 +43,7 @@ impl Db {
         keys: &[String],
         min: bool,
         count: usize,
-    ) -> Result<Option<(String, Vec<(String, f64)>)>, Error> {
+    ) -> Result<ZsetMultiPopResult, Error> {
         for key in keys {
             if self.zset_card(key)? == 0 {
                 continue;
@@ -62,7 +61,7 @@ impl Db {
         keys: &[String],
         min: bool,
         count: usize,
-    ) -> Result<Option<(String, Vec<(String, f64)>)>, Error> {
+    ) -> Result<ZsetMultiPopResult, Error> {
         for key in keys {
             if self.zset_card_async(key).await? == 0 {
                 continue;

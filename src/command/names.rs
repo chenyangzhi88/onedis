@@ -4,6 +4,7 @@ impl Command {
     pub fn effective_name(&self) -> &str {
         match self {
             Command::Unknown(command) => command.command_name(),
+            Command::FtUnsupported(command) => command.command_name(),
             _ => self.name(),
         }
     }
@@ -13,7 +14,7 @@ impl Command {
             Command::Auth(_) => "AUTH",
             Command::Append(_) => "APPEND",
             Command::Bitcount(_) => "BITCOUNT",
-            Command::Bitfield(_) => "BITFIELD",
+            Command::Bitfield(bitfield) => bitfield.command_name(),
             Command::Bitop(_) => "BITOP",
             Command::Bitpos(_) => "BITPOS",
             Command::Client(_) => "CLIENT",
@@ -30,14 +31,26 @@ impl Command {
             Command::Geodist(_) => "GEODIST",
             Command::Geohash(_) => "GEOHASH",
             Command::Geopos(_) => "GEOPOS",
-            Command::Georadius(_) => "GEORADIUS",
-            Command::Georadiusbymember(_) => "GEORADIUSBYMEMBER",
+            Command::Georadius(georadius) => {
+                if georadius.is_read_only_alias() {
+                    "GEORADIUS_RO"
+                } else {
+                    "GEORADIUS"
+                }
+            }
+            Command::Georadiusbymember(georadius) => {
+                if georadius.is_read_only_alias() {
+                    "GEORADIUSBYMEMBER_RO"
+                } else {
+                    "GEORADIUSBYMEMBER"
+                }
+            }
             Command::Geosearch(_) => "GEOSEARCH",
             Command::Geosearchstore(_) => "GEOSEARCHSTORE",
             Command::Getbit(_) => "GETBIT",
             Command::GetDel(_) => "GETDEL",
             Command::GetEx(_) => "GETEX",
-            Command::GetRange(_) => "GETRANGE",
+            Command::GetRange(getrange) => getrange.command_name(),
             Command::Lcs(_) => "LCS",
             Command::Ping(_) => "PING",
             Command::Pfadd(_) => "PFADD",
@@ -136,12 +149,18 @@ impl Command {
             Command::FtAggregate(_) => "FT.AGGREGATE",
             Command::FtCursor(_) => "FT.CURSOR",
             Command::FtProfile(_) => "FT.PROFILE",
-            Command::FtExplain(_) => "FT.EXPLAIN",
+            Command::FtExplain(explain) => {
+                if explain.cli {
+                    "FT.EXPLAINCLI"
+                } else {
+                    "FT.EXPLAIN"
+                }
+            }
             Command::FtTagVals(_) => "FT.TAGVALS",
-            Command::FtDict(_) => "FT.DICT",
+            Command::FtDict(dict) => dict.command_name(),
             Command::FtSpellCheck(_) => "FT.SPELLCHECK",
-            Command::FtSug(_) => "FT.SUG",
-            Command::FtSyn(_) => "FT.SYN",
+            Command::FtSug(suggestion) => suggestion.command_name(),
+            Command::FtSyn(synonym) => synonym.command_name(),
             Command::FtUnsupported(_) => "FT.UNSUPPORTED",
             Command::Lpushx(_) => "LPUSHX",
             Command::Rpushx(_) => "RPUSHX",
@@ -229,8 +248,8 @@ impl Command {
             Command::Exec(_) => "EXEC",
             Command::Watch(_) => "WATCH",
             Command::Unwatch(_) => "UNWATCH",
-            Command::Wasm(_) => "WASM",
-            Command::Lua(_) => "LUA",
+            Command::Wasm(wasm) => wasm.command_name(),
+            Command::Lua(lua) => lua.command_name(),
             Command::VAdd(_) => "VADD",
             Command::VSim(_) => "VSIM",
             Command::VRem(_) => "VREM",

@@ -30,6 +30,9 @@ impl Db {
         query: &str,
         options: FullTextSearchOptions,
     ) -> Result<Frame, Error> {
-        self.fulltext_search(index, query, options)
+        let index = index.to_string();
+        let query = query.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_search(&index, &query, options))
+            .await
     }
 }

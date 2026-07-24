@@ -61,7 +61,7 @@ fn parse_err(args: &[&str]) -> String {
 fn array(frame: Frame) -> Vec<Frame> {
     match frame {
         Frame::Array(values) => values,
-        other => panic!("expected array, got {}", other.to_string()),
+        other => panic!("expected array, got {}", other),
     }
 }
 

@@ -19,7 +19,7 @@ mod tests {
 
         // 确认键在数据库0中存在
         let exists_in_db0: bool = con.exists("move-test-key").unwrap();
-        assert_eq!(exists_in_db0, true);
+        assert!(exists_in_db0);
 
         // 将键移动到数据库1
         let moved: i32 = crate::support::move_key(&mut con, "move-test-key", 1).unwrap();
@@ -27,12 +27,12 @@ mod tests {
 
         // 确认键在数据库0中已不存在
         let exists_in_db0_after: bool = con.exists("move-test-key").unwrap();
-        assert_eq!(exists_in_db0_after, false);
+        assert!(!exists_in_db0_after);
 
         // 切换到数据库1并确认键存在
         let _: () = crate::support::select_db(&mut con, 1).unwrap();
         let exists_in_db1: bool = con.exists("move-test-key").unwrap();
-        assert_eq!(exists_in_db1, true);
+        assert!(exists_in_db1);
 
         let value: String = con.get("move-test-key").unwrap();
         assert_eq!(value, "test-value");
@@ -70,7 +70,7 @@ mod tests {
 
         // 确认键仍在原数据库中
         let exists: bool = con.exists("same-db-move-key").unwrap();
-        assert_eq!(exists, true);
+        assert!(exists);
 
         let value: String = con.get("same-db-move-key").unwrap();
         assert_eq!(value, "test-value");
@@ -102,7 +102,7 @@ mod tests {
 
         // 确认源键仍在数据库0中
         let exists_in_db0: bool = con.exists("source-key").unwrap();
-        assert_eq!(exists_in_db0, true);
+        assert!(exists_in_db0);
 
         let value: String = con.get("source-key").unwrap();
         assert_eq!(value, "source-value");
@@ -137,7 +137,7 @@ mod tests {
 
         // 确认键仍在原数据库中
         let exists: bool = con.exists("invalid-db-key").unwrap();
-        assert_eq!(exists, true);
+        assert!(exists);
 
         // 清理
         let _: () = con.del("invalid-db-key").unwrap();

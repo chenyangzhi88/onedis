@@ -19,7 +19,7 @@ impl Del {
                 "ERR wrong number of arguments for 'del' command",
             ));
         }
-        Ok(Del { keys: keys })
+        Ok(Del { keys })
     }
 
     pub fn new(keys: Vec<String>) -> Self {

@@ -4,6 +4,12 @@ use crate::{frame::Frame, store::db::Db};
 
 pub struct Flushdb {}
 
+impl Default for Flushdb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Flushdb {
     pub fn new() -> Flushdb {
         Flushdb {}

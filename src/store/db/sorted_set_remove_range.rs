@@ -21,13 +21,14 @@ impl Db {
         start: i64,
         stop: i64,
     ) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let members: Vec<String> = self
             .zset_range_async(key, start, stop, false)
             .await?
             .into_iter()
             .map(|(member, _)| member)
             .collect();
-        self.zset_remove_async(key, &members).await
+        self.zset_remove_async_unlocked(key, &members).await
     }
 
     pub fn zset_remove_range_by_score(
@@ -50,12 +51,13 @@ impl Db {
         min: f64,
         max: f64,
     ) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let members: Vec<String> = self
             .zset_range_by_score_async(key, min, max)
             .await?
             .into_iter()
             .map(|(member, _)| member)
             .collect();
-        self.zset_remove_async(key, &members).await
+        self.zset_remove_async_unlocked(key, &members).await
     }
 }

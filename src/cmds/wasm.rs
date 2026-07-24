@@ -83,6 +83,7 @@ mod tests {
                 function,
                 args,
                 read_only,
+                ..
             } => {
                 assert_eq!(name, "math");
                 assert_eq!(function, "add");
@@ -98,6 +99,7 @@ mod tests {
                 function,
                 args,
                 read_only,
+                ..
             } => {
                 assert_eq!(name, "math");
                 assert_eq!(function, "get");
@@ -177,6 +179,7 @@ mod tests {
                 function,
                 args,
                 read_only,
+                ..
             } => {
                 assert_eq!(name, "mod");
                 assert_eq!(function, "sum");

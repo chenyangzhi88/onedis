@@ -11,55 +11,56 @@ impl Db {
         let key_bytes = self.mk(key);
         if let Some(raw) = self.store.get_raw(&key_bytes) {
             let raw = raw.clone();
-            if let Some(header) = decode_meta_header(&raw) {
-                if header.expire_ms > 0 && now_ms() >= header.expire_ms {
-                    let mut batch = WriteBatch::new();
-                    batch.delete(&key_bytes);
-                    delete_sub_keys_to_batch(
-                        &mut batch,
-                        self.db_index,
-                        key,
-                        header.version,
-                        header.type_tag,
-                    );
-                    self.ttl_manager.remove_known_to_batch(
-                        &mut batch,
-                        header.expire_ms,
-                        self.db_index,
-                        key,
-                    );
-                    match header.type_tag {
-                        TYPE_HASH => {
-                            if let Err(err) =
-                                self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)
-                            {
-                                log::error!(
-                                    "failed to enqueue fulltext delete for expired {key}: {err}"
-                                );
-                                return;
-                            }
+            if let Some(header) = decode_meta_header(&raw)
+                && header.expire_ms > 0
+                && now_ms() >= header.expire_ms
+            {
+                let mut batch = WriteBatch::new();
+                batch.delete(&key_bytes);
+                delete_sub_keys_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    key,
+                    header.version,
+                    header.type_tag,
+                );
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    header.expire_ms,
+                    self.db_index,
+                    key,
+                );
+                match header.type_tag {
+                    TYPE_HASH => {
+                        if let Err(err) =
+                            self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)
+                        {
+                            log::error!(
+                                "failed to enqueue fulltext delete for expired {key}: {err}"
+                            );
+                            return;
                         }
-                        TYPE_JSON => {
-                            if let Err(err) =
-                                self.fulltext_enqueue_json_delete_to_batch(&mut batch, key)
-                            {
-                                log::error!(
-                                    "failed to enqueue fulltext JSON delete for expired {key}: {err}"
-                                );
-                                return;
-                            }
+                    }
+                    TYPE_JSON => {
+                        if let Err(err) =
+                            self.fulltext_enqueue_json_delete_to_batch(&mut batch, key)
+                        {
+                            log::error!(
+                                "failed to enqueue fulltext JSON delete for expired {key}: {err}"
+                            );
+                            return;
                         }
-                        _ => {}
                     }
-                    self.write_batch_if_not_empty(&batch);
-                    let refresh = match header.type_tag {
-                        TYPE_HASH => self.fulltext_request_refresh(key),
-                        TYPE_JSON => self.fulltext_request_json_refresh(key),
-                        _ => Ok(()),
-                    };
-                    if let Err(err) = refresh {
-                        log::error!("failed to refresh fulltext expire for {key}: {err}");
-                    }
+                    _ => {}
+                }
+                self.write_batch_if_not_empty(&batch);
+                let refresh = match header.type_tag {
+                    TYPE_HASH => self.fulltext_request_refresh(key),
+                    TYPE_JSON => self.fulltext_request_json_refresh(key),
+                    _ => Ok(()),
+                };
+                if let Err(err) = refresh {
+                    log::error!("failed to refresh fulltext expire for {key}: {err}");
                 }
             }
         }
@@ -67,48 +68,58 @@ impl Db {
 
     pub async fn expire_if_needed_async(&self, key: &str) {
         let key_bytes = self.mk(key);
-        if let Some(raw) = self.store.get_raw_async(&key_bytes).await {
-            if let Some(header) = decode_meta_header(&raw) {
-                if header.expire_ms > 0 && now_ms() >= header.expire_ms {
-                    let mut batch = WriteBatch::new();
-                    batch.delete(&key_bytes);
-                    delete_sub_keys_to_batch(
-                        &mut batch,
-                        self.db_index,
-                        key,
-                        header.version,
-                        header.type_tag,
-                    );
-                    self.ttl_manager.remove_known_to_batch(
-                        &mut batch,
-                        header.expire_ms,
-                        self.db_index,
-                        key,
-                    );
-                    match header.type_tag {
-                        TYPE_HASH => {
-                            if let Err(err) =
-                                self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)
-                            {
-                                log::error!(
-                                    "failed to enqueue fulltext delete for expired {key}: {err}"
-                                );
-                                return;
-                            }
-                        }
-                        TYPE_JSON => {
-                            if let Err(err) =
-                                self.fulltext_enqueue_json_delete_to_batch(&mut batch, key)
-                            {
-                                log::error!(
-                                    "failed to enqueue fulltext JSON delete for expired {key}: {err}"
-                                );
-                                return;
-                            }
-                        }
-                        _ => {}
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return;
+            };
+            let Some(header) = decode_meta_header(raw) else {
+                return;
+            };
+            if header.expire_ms == 0 || now_ms() < header.expire_ms {
+                return;
+            }
+
+            let mut batch = WriteBatch::new();
+            batch.delete(&key_bytes);
+            delete_sub_keys_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                header.version,
+                header.type_tag,
+            );
+            self.ttl_manager.remove_known_to_batch(
+                &mut batch,
+                header.expire_ms,
+                self.db_index,
+                key,
+            );
+            match header.type_tag {
+                TYPE_HASH => {
+                    if let Err(err) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key) {
+                        log::error!("failed to enqueue fulltext delete for expired {key}: {err}");
+                        return;
                     }
-                    self.write_batch_if_not_empty_async(&batch).await;
+                }
+                TYPE_JSON => {
+                    if let Err(err) = self.fulltext_enqueue_json_delete_to_batch(&mut batch, key) {
+                        log::error!(
+                            "failed to enqueue fulltext JSON delete for expired {key}: {err}"
+                        );
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            match self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await
+            {
+                Ok(true) => {
                     let refresh = match header.type_tag {
                         TYPE_HASH => self.fulltext_request_refresh(key),
                         TYPE_JSON => self.fulltext_request_json_refresh(key),
@@ -117,9 +128,16 @@ impl Db {
                     if let Err(err) = refresh {
                         log::error!("failed to refresh fulltext expire for {key}: {err}");
                     }
+                    return;
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    log::error!("failed to delete expired key {key}: {error}");
+                    return;
                 }
             }
         }
+        log::warn!("gave up deleting repeatedly modified expired key {key}");
     }
 
     /**

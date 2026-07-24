@@ -8,12 +8,18 @@ impl Db {
         if threshold == 0 {
             return Ok(());
         }
-        let entries = self
-            .store
-            .scan_prefix_raw(&fulltext_outbox_prefix(self.db_index, index));
-        if entries.len() <= threshold {
+        let prefix = fulltext_outbox_prefix(self.db_index, index);
+        let probe = self.store.scan_range_raw_limited(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            threshold.saturating_add(1),
+        );
+        if probe.len() <= threshold {
             return Ok(());
         }
+        let entries = self
+            .store
+            .scan_prefix_raw(&prefix);
         let mut latest_by_key: HashMap<String, (u64, Vec<u8>)> = HashMap::new();
         let mut stale = Vec::new();
         for (outbox_key, raw) in entries {

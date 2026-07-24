@@ -49,8 +49,7 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
         }
         _ => return Err(Error::msg("ERR syntax error")),
     };
-    let (mut options, store_options) =
-        parse_search_options(&frame, idx, false, shape_unit(&shape))?;
+    let (mut options, store_options) = parse_search_options(&frame, idx, false, store)?;
     if store {
         options.withcoord = false;
         options.withdist = false;
@@ -71,6 +70,7 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
             } else {
                 store_options
             },
+            read_only_alias: false,
         },
     ))
 }
@@ -78,8 +78,8 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
 fn parse_search_options(
     frame: &Frame,
     mut idx: usize,
-    allow_store: bool,
-    unit: String,
+    allow_store_destination: bool,
+    allow_storedist_flag: bool,
 ) -> Result<(SearchOptions, Option<GeoStore>), Error> {
     let mut options = SearchOptions::default();
     let mut store = None;
@@ -106,21 +106,21 @@ fn parse_search_options(
                     idx += 1;
                 }
             }
-            "STORE" if allow_store && idx + 1 < frame.arg_len() => {
+            "STORE" if allow_store_destination && idx + 1 < frame.arg_len() => {
                 store = Some(GeoStore {
                     dest: frame.get_arg(idx + 1).unwrap(),
                     dist: false,
                 });
                 idx += 1;
             }
-            "STOREDIST" if allow_store && idx + 1 < frame.arg_len() => {
+            "STOREDIST" if allow_store_destination && idx + 1 < frame.arg_len() => {
                 store = Some(GeoStore {
                     dest: frame.get_arg(idx + 1).unwrap(),
                     dist: true,
                 });
                 idx += 1;
             }
-            "STOREDIST" if !allow_store => {
+            "STOREDIST" if allow_storedist_flag => {
                 store = Some(GeoStore {
                     dest: String::new(),
                     dist: true,
@@ -130,7 +130,6 @@ fn parse_search_options(
         }
         idx += 1;
     }
-    let _ = unit;
     Ok((options, store))
 }
 

@@ -1,5 +1,15 @@
 use super::*;
 
+pub(in crate::store::db) struct JsonIndexedSetRequest<'a> {
+    key: &'a str,
+    expire_ms: u64,
+    version: u64,
+    tokens: &'a [JsonPathToken],
+    new_value: JsonValue,
+    condition: SetCondition,
+    cas_condition: CompareCondition,
+}
+
 impl Db {
     pub fn json_set(
         &self,
@@ -148,14 +158,17 @@ impl Db {
 
     pub(in crate::store::db) async fn json_set_indexed_async(
         &self,
-        key: &str,
-        expire_ms: u64,
-        version: u64,
-        tokens: &[JsonPathToken],
-        new_value: JsonValue,
-        condition: SetCondition,
-        cas_condition: CompareCondition,
+        request: JsonIndexedSetRequest<'_>,
     ) -> Result<Option<bool>, Error> {
+        let JsonIndexedSetRequest {
+            key,
+            expire_ms,
+            version,
+            tokens,
+            new_value,
+            condition,
+            cas_condition,
+        } = request;
         let target_exists = self.json_node_exists_async(key, version, tokens).await;
         let condition_matches = match condition {
             SetCondition::Always => true,
@@ -334,15 +347,15 @@ impl Db {
             }
 
             match self
-                .json_set_indexed_async(
+                .json_set_indexed_async(JsonIndexedSetRequest {
                     key,
                     expire_ms,
                     version,
-                    &tokens,
-                    new_value.clone(),
+                    tokens: &tokens,
+                    new_value: new_value.clone(),
                     condition,
                     cas_condition,
-                )
+                })
                 .await?
             {
                 Some(result) => return Ok(result),

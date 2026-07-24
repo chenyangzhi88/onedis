@@ -69,11 +69,7 @@ impl Db {
             self.db_index,
             index,
             version,
-            options.dim,
-            distance,
-            m,
-            ef_construction,
-            initial_cap,
+            VectorRuntimeConfig::from(&meta),
         );
         Ok(())
     }
@@ -83,7 +79,10 @@ impl Db {
         index: &str,
         options: VectorCreateOptions,
     ) -> Result<(), Error> {
-        self.vector_create(index, options)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.vector_create(&index, options))
+            .await
     }
 
     pub fn vector_add(
@@ -143,26 +142,29 @@ impl Db {
             &vector_doc_key(self.db_index, index, version, id),
             &encode_record(&doc)?,
         );
-        if let Some(old_doc) = old_doc {
-            if let Ok(old_attrs) = parse_attrs(&old_doc.attrs_json) {
+        if let Some(old_doc) = old_doc
+            && let Ok(old_attrs) = parse_attrs(&old_doc.attrs_json) {
                 delete_attr_index_entries_to_batch(
                     &mut batch,
-                    self.db_index,
-                    index,
-                    version,
-                    &meta.schema,
-                    &old_doc.id,
+                    &VectorAttrIndexContext {
+                        db_index: self.db_index,
+                        index,
+                        version,
+                        schema: &meta.schema,
+                        doc_id: &old_doc.id,
+                    },
                     &old_attrs,
                 );
             }
-        }
         put_attr_index_entries_to_batch(
             &mut batch,
-            self.db_index,
-            index,
-            version,
-            &meta.schema,
-            id,
+            &VectorAttrIndexContext {
+                db_index: self.db_index,
+                index,
+                version,
+                schema: &meta.schema,
+                doc_id: id,
+            },
             doc_version,
             &attrs,
         )?;
@@ -171,14 +173,8 @@ impl Db {
             self.db_index,
             index,
             version,
-            meta.dim as usize,
-            meta.distance,
-            meta.m as usize,
-            meta.ef_construction as usize,
-            meta.initial_cap as usize,
-            id.to_string(),
-            doc_version,
-            doc.vector.clone(),
+            VectorRuntimeConfig::from(&meta),
+            VectorRuntimeEntry::from(&doc),
         )?;
         self.maybe_freeze_vector_segment(index, version, &mut meta)?;
         Ok(())
@@ -191,7 +187,13 @@ impl Db {
         vector: Vec<f32>,
         attrs_json: Option<String>,
     ) -> Result<(), Error> {
-        self.vector_add(index, id, vector, attrs_json)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        let id = id.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.vector_add(&index, &id, vector, attrs_json)
+        })
+        .await
     }
 
     pub fn vector_add_autocreate(
@@ -221,11 +223,10 @@ impl Db {
                 ef_runtime,
                 initial_cap: None,
             },
-        ) {
-            if err.to_string() != "ERR vector index already exists" {
+        )
+            && err.to_string() != "ERR vector index already exists" {
                 return Err(err);
             }
-        }
         self.vector_add(index, id, vector, attrs_json)?;
         Ok(true)
     }
@@ -239,7 +240,13 @@ impl Db {
         m: Option<usize>,
         ef_runtime: Option<usize>,
     ) -> Result<bool, Error> {
-        self.vector_add_autocreate(index, id, vector, attrs_json, m, ef_runtime)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        let id = id.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.vector_add_autocreate(&index, &id, vector, attrs_json, m, ef_runtime)
+        })
+        .await
     }
 
     pub fn vector_del(&self, index: &str, ids: &[String]) -> Result<usize, Error> {
@@ -251,7 +258,11 @@ impl Db {
         let (expire_ms, version, mut meta) = self.read_vector_meta(index)?;
         let mut batch = WriteBatch::new();
         let mut deleted = 0usize;
+        let mut seen_ids = HashSet::new();
         for id in ids {
+            if !seen_ids.insert(id) {
+                continue;
+            }
             let key = vector_doc_key(self.db_index, index, version, id);
             let Some(raw) = self.store.get_raw(&key) else {
                 continue;
@@ -263,11 +274,13 @@ impl Db {
             if let Ok(attrs) = parse_attrs(&doc.attrs_json) {
                 delete_attr_index_entries_to_batch(
                     &mut batch,
-                    self.db_index,
-                    index,
-                    version,
-                    &meta.schema,
-                    &doc.id,
+                    &VectorAttrIndexContext {
+                        db_index: self.db_index,
+                        index,
+                        version,
+                        schema: &meta.schema,
+                        doc_id: &doc.id,
+                    },
                     &attrs,
                 );
             }
@@ -300,6 +313,10 @@ impl Db {
     }
 
     pub async fn vector_del_async(&self, index: &str, ids: &[String]) -> Result<usize, Error> {
-        self.vector_del(index, ids)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        let ids = ids.to_vec();
+        self.run_blocking_store_task(move |db| db.vector_del(&index, &ids))
+            .await
     }
 }

@@ -4,15 +4,20 @@ impl Db {
         key: &str,
         source_type: FullTextSourceType,
     ) -> Result<(), Error> {
-        if self.store.is_transactional() {
-            return Ok(());
-        }
-        for (index_name, _) in self.fulltext_matching_metas_for_source(key, source_type)? {
-            if let Err(err) = self.fulltext_refresh_index(&index_name, true) {
-                log::error!(
-                    "fulltext refresh failed for index {index_name} after indexed mutation: {err}"
-                );
-                return Err(err);
+        // The mutation itself already appended a durable outbox record in the
+        // same write batch. Searches synchronously catch up that outbox before
+        // evaluating a query, and the maintenance worker drains it in the
+        // background for INFO/idle indexes. Keep Tantivy indexing off this
+        // path, but retain bounded outbox compaction without scanning the
+        // queue on every source write.
+        let threshold = self.fulltext_outbox_compact_threshold()?;
+        for (index, meta) in self.fulltext_matching_metas_for_source(key, source_type)? {
+            if self.fulltext_runtimes.note_outbox_mutation(
+                self.db_index,
+                &index,
+                threshold,
+            ) {
+                self.fulltext_compact_outbox_if_needed(&index, meta.generation, threshold)?;
             }
         }
         Ok(())

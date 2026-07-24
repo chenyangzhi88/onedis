@@ -1,11 +1,6 @@
 use super::*;
 
 impl Frame {
-    /**
-     * 获取指定索引的内容
-     *
-     * @param index 索引
-     */
     pub fn get_arg(&self, index: usize) -> Option<String> {
         match self {
             Frame::Array(array) => {
@@ -26,36 +21,29 @@ impl Frame {
         }
     }
 
-    /**
-     * 获取命令帧中的所有参数
-     *
-     * @param self 本身
-     *
-     * @return 一个包含所有参数的字符串向量，如果不是 Array 类型则返回空向量
-     */
     pub fn get_args(&self) -> Vec<String> {
         match self {
-            Frame::Array(array) => array.iter().filter_map(Frame::as_text).collect(),
+            // Never drop an unrepresentable item: doing so shifts every later
+            // argument to a different command position. Returning no textual
+            // arguments makes legacy text-only parsers reject the request.
+            Frame::Array(array) => array
+                .iter()
+                .map(Frame::as_text)
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
 
-    /**
-     * 获取从指定索引开始的内容集合
-     *
-     * @param self 本身
-     * @param start_index 开始索引
-     *
-     * @return 一个包含从指定索引开始的所有参数的字符串向量，如果不是 Array 类型或索引超出范围则返回空向量
-     */
     pub fn get_args_from_index(&self, start_index: usize) -> Vec<String> {
         match self {
             Frame::Array(array) => {
                 if start_index < array.len() {
                     array[start_index..]
                         .iter()
-                        .filter_map(Frame::as_text)
-                        .collect()
+                        .map(Frame::as_text)
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 }
@@ -77,7 +65,7 @@ impl Frame {
             Frame::SimpleString(text) | Frame::Error(text) => Some(text.clone()),
             Frame::Integer(value) => Some(value.to_string()),
             Frame::Ok => Some("OK".to_string()),
-            Frame::Null | Frame::Array(_) | Frame::RDBFile(_) => None,
+            Frame::Null | Frame::Array(_) => None,
         }
     }
 
@@ -87,7 +75,7 @@ impl Frame {
             Frame::SimpleString(text) | Frame::Error(text) => Some(text.as_bytes().to_vec()),
             Frame::Integer(value) => Some(value.to_string().into_bytes()),
             Frame::Ok => Some(b"OK".to_vec()),
-            Frame::Null | Frame::Array(_) | Frame::RDBFile(_) => None,
+            Frame::Null | Frame::Array(_) => None,
         }
     }
 

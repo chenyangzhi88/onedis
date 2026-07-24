@@ -610,10 +610,7 @@ fn transaction_commands_cover_state_and_watch_semantics() {
     let watch_inside_multi = Command::parse_from_frame(frame_args(&["watch", "late-key"])).unwrap();
     let err = match watch_inside_multi {
         Command::Watch(command) => match command.apply(&mut handler) {
-            Ok(frame) => panic!(
-                "expected WATCH inside MULTI error, got {}",
-                frame.to_string()
-            ),
+            Ok(frame) => panic!("expected WATCH inside MULTI error, got {}", frame),
             Err(err) => err,
         },
         other => panic!("expected WATCH command, got {}", other.name()),
@@ -659,7 +656,7 @@ fn append_uses_kv_engine_backed_storage() {
 
     let frame = Append {
         key: "greeting".to_string(),
-        val: " world".to_string(),
+        val: b" world".to_vec(),
     }
     .apply(&db)
     .unwrap();

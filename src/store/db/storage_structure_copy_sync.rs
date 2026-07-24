@@ -17,16 +17,25 @@ impl Db {
     }
 
     pub(in crate::store::db) fn copy_structure_between_dbs_to_batch(
-        source_store: &KvStore,
-        target_store: &KvStore,
         batch: &mut WriteBatch,
-        source_db_index: u16,
-        source_key: &str,
-        target_db_index: u16,
-        target_key: &str,
-        raw: &[u8],
-        version_counter: &VersionCounter,
+        context: StructureCopyContext<'_>,
     ) {
+        let StructureCopyContext {
+            source_store,
+            target_store,
+            source:
+                DbKeyRef {
+                    db_index: source_db_index,
+                    key: source_key,
+                },
+            target:
+                DbKeyRef {
+                    db_index: target_db_index,
+                    key: target_key,
+                },
+            raw,
+            version_counter,
+        } = context;
         let Some(header) = decode_meta_header(raw) else {
             return;
         };

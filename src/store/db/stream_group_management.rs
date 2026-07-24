@@ -61,6 +61,8 @@ impl Db {
         id: StreamId,
         mkstream: bool,
     ) -> Result<(), Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
+        let mut batch = WriteBatch::new();
         let meta = match self.stream_meta_async(key).await? {
             Some(meta) => meta,
             None if mkstream => {
@@ -71,9 +73,7 @@ impl Db {
                     length: 0,
                     entries_added: 0,
                 };
-                let mut batch = WriteBatch::new();
                 batch.put(&self.mk(key), &encode_stream_meta(meta));
-                self.write_batch_if_not_empty_async(&batch).await;
                 meta
             }
             None => {
@@ -95,7 +95,6 @@ impl Db {
             last_delivered_id: id,
             entries_read: 0,
         };
-        let mut batch = WriteBatch::new();
         batch.put(&group_key, &encode_stream_group_state(&state));
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
@@ -127,6 +126,7 @@ impl Db {
         group: &str,
         id: StreamId,
     ) -> Result<(), Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
         let meta = self
             .stream_meta_async(key)
             .await?
@@ -170,6 +170,7 @@ impl Db {
     }
 
     pub async fn stream_group_destroy_async(&self, key: &str, group: &str) -> Result<usize, Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(0);
         };
@@ -219,6 +220,35 @@ impl Db {
         Ok(1)
     }
 
+    pub async fn stream_group_create_consumer_async(
+        &self,
+        key: &str,
+        group: &str,
+        consumer: &str,
+    ) -> Result<usize, Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
+        let Some(meta) = self.stream_meta_async(key).await? else {
+            return Err(Error::msg("NOGROUP No such key or consumer group"));
+        };
+        self.stream_group_state_async(key, group)
+            .await?
+            .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
+        let consumer_key = stream_consumer_key(self.db_index, key, meta.version, group, consumer);
+        if self.store.get_raw_async(&consumer_key).await.is_some() {
+            return Ok(0);
+        }
+        let mut batch = WriteBatch::new();
+        batch.put(
+            &consumer_key,
+            &encode_stream_consumer_state(&StreamConsumerState {
+                last_seen_ms: now_ms(),
+            }),
+        );
+        self.write_batch_if_not_empty_async(&batch).await;
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        Ok(1)
+    }
+
     pub fn stream_group_delete_consumer(
         &self,
         key: &str,
@@ -255,6 +285,7 @@ impl Db {
         group: &str,
         consumer: &str,
     ) -> Result<usize, Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(0);
         };

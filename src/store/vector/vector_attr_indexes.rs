@@ -14,17 +14,21 @@ fn indexed_filter_field<'a>(
         .map(|field| field.name.as_str())
 }
 
+struct VectorAttrIndexContext<'a> {
+    db_index: u16,
+    index: &'a str,
+    version: u64,
+    schema: &'a [VectorFieldSchema],
+    doc_id: &'a str,
+}
+
 fn put_attr_index_entries_to_batch(
     batch: &mut WriteBatch,
-    db_index: u16,
-    index: &str,
-    version: u64,
-    schema: &[VectorFieldSchema],
-    doc_id: &str,
+    context: &VectorAttrIndexContext<'_>,
     doc_version: u64,
     attrs: &JsonValue,
 ) -> Result<(), Error> {
-    for field in schema.iter().filter(|field| field.indexed) {
+    for field in context.schema.iter().filter(|field| field.indexed) {
         let Some(value) = attrs.get(&field.name) else {
             continue;
         };
@@ -32,7 +36,14 @@ fn put_attr_index_entries_to_batch(
             VectorFieldKind::Tag => {
                 for tag in tag_values(value)? {
                     batch.put(
-                        &vector_tag_key(db_index, index, version, &field.name, &tag, doc_id),
+                        &vector_tag_key(
+                            context.db_index,
+                            context.index,
+                            context.version,
+                            &field.name,
+                            &tag,
+                            context.doc_id,
+                        ),
                         &doc_version.to_be_bytes(),
                     );
                 }
@@ -40,7 +51,14 @@ fn put_attr_index_entries_to_batch(
             VectorFieldKind::Numeric => {
                 if let Some(number) = value.as_f64() {
                     batch.put(
-                        &vector_numeric_key(db_index, index, version, &field.name, number, doc_id),
+                        &vector_numeric_key(
+                            context.db_index,
+                            context.index,
+                            context.version,
+                            &field.name,
+                            number,
+                            context.doc_id,
+                        ),
                         &doc_version.to_be_bytes(),
                     );
                 }
@@ -53,14 +71,10 @@ fn put_attr_index_entries_to_batch(
 
 fn delete_attr_index_entries_to_batch(
     batch: &mut WriteBatch,
-    db_index: u16,
-    index: &str,
-    version: u64,
-    schema: &[VectorFieldSchema],
-    doc_id: &str,
+    context: &VectorAttrIndexContext<'_>,
     attrs: &JsonValue,
 ) {
-    for field in schema.iter().filter(|field| field.indexed) {
+    for field in context.schema.iter().filter(|field| field.indexed) {
         let Some(value) = attrs.get(&field.name) else {
             continue;
         };
@@ -69,12 +83,12 @@ fn delete_attr_index_entries_to_batch(
                 if let Ok(tags) = tag_values(value) {
                     for tag in tags {
                         batch.delete(&vector_tag_key(
-                            db_index,
-                            index,
-                            version,
+                            context.db_index,
+                            context.index,
+                            context.version,
                             &field.name,
                             &tag,
-                            doc_id,
+                            context.doc_id,
                         ));
                     }
                 }
@@ -82,12 +96,12 @@ fn delete_attr_index_entries_to_batch(
             VectorFieldKind::Numeric => {
                 if let Some(number) = value.as_f64() {
                     batch.delete(&vector_numeric_key(
-                        db_index,
-                        index,
-                        version,
+                        context.db_index,
+                        context.index,
+                        context.version,
                         &field.name,
                         number,
-                        doc_id,
+                        context.doc_id,
                     ));
                 }
             }

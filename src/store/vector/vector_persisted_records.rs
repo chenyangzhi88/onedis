@@ -14,6 +14,27 @@ struct VectorIndexMeta {
     segment_max_docs: u64,
 }
 
+#[derive(Clone, Copy)]
+struct VectorRuntimeConfig {
+    dim: usize,
+    distance: VectorDistance,
+    m: usize,
+    ef_construction: usize,
+    initial_cap: usize,
+}
+
+impl From<&VectorIndexMeta> for VectorRuntimeConfig {
+    fn from(meta: &VectorIndexMeta) -> Self {
+        Self {
+            dim: meta.dim as usize,
+            distance: meta.distance,
+            m: meta.m as usize,
+            ef_construction: meta.ef_construction as usize,
+            initial_cap: meta.initial_cap as usize,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Encode, Decode)]
 struct VectorDocRecord {
     id: String,
@@ -21,6 +42,22 @@ struct VectorDocRecord {
     vector: Vec<f32>,
     attrs_json: String,
     deleted: bool,
+}
+
+struct VectorRuntimeEntry {
+    id: String,
+    doc_version: u64,
+    vector: Vec<f32>,
+}
+
+impl From<&VectorDocRecord> for VectorRuntimeEntry {
+    fn from(doc: &VectorDocRecord) -> Self {
+        Self {
+            id: doc.id.clone(),
+            doc_version: doc.doc_version,
+            vector: doc.vector.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Encode, Decode)]

@@ -166,7 +166,7 @@ async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
     assert_eq!(db.zset_card_async("leaders").await.unwrap(), 4);
     assert_eq!(
         db.zset_score_async("leaders", "dave").await.unwrap(),
-        Some(4.0)
+        Some(5.0)
     );
     assert_eq!(
         db.zset_increment_by_async("leaders", "bob", 0.5)
@@ -194,7 +194,7 @@ async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
     assert_eq!(db.zset_count_async("leaders", 1.0, 2.5).await.unwrap(), 3);
     assert_eq!(
         db.zset_range_async("leaders", -2, -1, false).await.unwrap(),
-        vec![("bob".to_string(), 2.5), ("dave".to_string(), 4.0)]
+        vec![("bob".to_string(), 2.5), ("dave".to_string(), 5.0)]
     );
     assert_eq!(
         db.zset_range_async("leaders", 10, 20, false).await.unwrap(),
@@ -292,4 +292,35 @@ async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
             .is_err()
     );
     assert!(db.zset_scan_async("plain", 0, "*", 10).await.is_err());
+}
+
+#[tokio::test]
+async fn concurrent_zset_writes_preserve_members_and_increments() {
+    let db = Arc::new(test_db());
+    let mut tasks = Vec::new();
+    for index in 0..16 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.zset_add_async(
+                "concurrent-members",
+                &[(index as f64, format!("member-{index}"))],
+            )
+            .await
+            .unwrap();
+            db.zset_increment_by_async("concurrent-score", "member", 1.0)
+                .await
+                .unwrap();
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(db.zset_card_async("concurrent-members").await.unwrap(), 16);
+    assert_eq!(
+        db.zset_score_async("concurrent-score", "member")
+            .await
+            .unwrap(),
+        Some(16.0)
+    );
 }

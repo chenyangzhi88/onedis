@@ -13,6 +13,13 @@ impl Db {
             return Ok(vec![-2; fields.len()]);
         };
         let now = now_ms();
+        let delete_immediately = expire_ms <= now;
+        let live_field_count = if delete_immediately {
+            self.hash_live_entries_raw(key, version).len()
+        } else {
+            0
+        };
+        let mut deleted_fields = HashSet::new();
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
@@ -30,6 +37,7 @@ impl Db {
             if expire_ms <= now {
                 batch.delete(&field_key);
                 batch.delete(&expire_key);
+                deleted_fields.insert(field);
                 result.push(2);
                 continue;
             }
@@ -52,7 +60,22 @@ impl Db {
             }
         }
         if batch.count() > 0 {
-            self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            let delete_hash = live_field_count > 0 && deleted_fields.len() == live_field_count;
+            if delete_hash {
+                batch.delete(&self.mk(key));
+                delete_sub_keys_to_batch(&mut batch, self.db_index, key, version, TYPE_HASH);
+                if hash_expire_ms > 0 {
+                    self.ttl_manager.remove_known_to_batch(
+                        &mut batch,
+                        hash_expire_ms,
+                        self.db_index,
+                        key,
+                    );
+                }
+                self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)?;
+            } else {
+                self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            }
             self.write_batch_if_not_empty(&batch);
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
@@ -67,28 +90,53 @@ impl Db {
         fields: &[String],
         condition: ExpireCondition,
     ) -> Result<Vec<i64>, Error> {
+        let _hash_write_guard = self.set_write_lock(key).lock().await;
+        self.hash_expire_fields_at_ms_async_unlocked(key, expire_ms, fields, condition)
+            .await
+    }
+
+    pub(in crate::store::db) async fn hash_expire_fields_at_ms_async_unlocked(
+        &self,
+        key: &str,
+        expire_ms: u64,
+        fields: &[String],
+        condition: ExpireCondition,
+    ) -> Result<Vec<i64>, Error> {
         let meta = self.hash_expire_ms_async(key).await?;
         let Some((hash_expire_ms, version)) = meta else {
             return Ok(vec![-2; fields.len()]);
         };
         let now = now_ms();
+        let delete_immediately = expire_ms <= now;
+        let live_field_count = if delete_immediately {
+            self.hash_live_entries_raw_async(key, version).await.len()
+        } else {
+            0
+        };
+        let mut deleted_fields = HashSet::new();
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
             let field_key = hash_field_key(self.db_index, key, version, field);
-            if self.hash_live_field_value(key, version, field).is_none() {
+            if self
+                .hash_live_field_value_async(key, version, field)
+                .await
+                .is_none()
+            {
                 result.push(-2);
                 continue;
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
             let current = self
                 .store
-                .get_raw(&expire_key)
+                .get_raw_async(&expire_key)
+                .await
                 .and_then(|raw| decode_u64_be(&raw))
                 .unwrap_or(0);
             if expire_ms <= now {
                 batch.delete(&field_key);
                 batch.delete(&expire_key);
+                deleted_fields.insert(field);
                 result.push(2);
                 continue;
             }
@@ -111,7 +159,22 @@ impl Db {
             }
         }
         if batch.count() > 0 {
-            self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            let delete_hash = live_field_count > 0 && deleted_fields.len() == live_field_count;
+            if delete_hash {
+                batch.delete(&self.mk(key));
+                delete_sub_keys_to_batch(&mut batch, self.db_index, key, version, TYPE_HASH);
+                if hash_expire_ms > 0 {
+                    self.ttl_manager.remove_known_to_batch(
+                        &mut batch,
+                        hash_expire_ms,
+                        self.db_index,
+                        key,
+                    );
+                }
+                self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)?;
+            } else {
+                self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            }
             self.write_batch_if_not_empty_async(&batch).await;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
@@ -153,6 +216,15 @@ impl Db {
         key: &str,
         fields: &[String],
     ) -> Result<Vec<i64>, Error> {
+        let _hash_write_guard = self.set_write_lock(key).lock().await;
+        self.hash_persist_fields_async_unlocked(key, fields).await
+    }
+
+    pub(in crate::store::db) async fn hash_persist_fields_async_unlocked(
+        &self,
+        key: &str,
+        fields: &[String],
+    ) -> Result<Vec<i64>, Error> {
         let meta = self.hash_expire_ms_async(key).await?;
         let Some((_, version)) = meta else {
             return Ok(vec![-2; fields.len()]);
@@ -160,12 +232,16 @@ impl Db {
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
-            if self.hash_live_field_value(key, version, field).is_none() {
+            if self
+                .hash_live_field_value_async(key, version, field)
+                .await
+                .is_none()
+            {
                 result.push(-2);
                 continue;
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-            if self.store.contains_key(&expire_key) {
+            if self.store.contains_key_async(&expire_key).await {
                 batch.delete(&expire_key);
                 result.push(1);
             } else {

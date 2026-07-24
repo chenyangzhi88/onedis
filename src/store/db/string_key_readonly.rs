@@ -8,7 +8,7 @@ impl Db {
         if decode_string_bytes_slice(&raw).is_some() {
             Ok(Some(raw))
         } else {
-            Err(Error::msg("Type parsing error"))
+            Err(Error::msg(WRONG_TYPE_ERROR))
         }
     }
 
@@ -22,7 +22,7 @@ impl Db {
         if decode_string_bytes_slice(&raw).is_some() {
             Ok(Some(raw))
         } else {
-            Err(Error::msg("Type parsing error"))
+            Err(Error::msg(WRONG_TYPE_ERROR))
         }
     }
 
@@ -62,31 +62,97 @@ impl Db {
         key: &str,
         expiration: Option<StringExpireUpdate>,
     ) -> Result<Option<Vec<u8>>, Error> {
-        let Some(raw) = self.read_live_raw_async(key).await else {
-            return Ok(None);
-        };
-        let value = decode_string_bytes(&raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
         let Some(expiration) = expiration else {
-            return Ok(Some(value));
+            let Some(raw) = self.read_live_raw_async(key).await else {
+                return Ok(None);
+            };
+            return decode_string_bytes(&raw)
+                .map(Some)
+                .ok_or_else(|| Error::msg(WRONG_TYPE_ERROR));
         };
 
-        match expiration {
-            StringExpireUpdate::Persist => {
-                self.persist_async(key).await;
-            }
-            StringExpireUpdate::RelativeMs(ttl_ms) => {
-                self.expire_async(key.to_string(), ttl_ms).await;
-            }
-            StringExpireUpdate::AbsoluteMs(expire_ms) => {
-                if expire_ms <= now_ms() {
-                    self.delete_key_internal_async(key, false).await;
-                } else {
-                    self.expire_async(key.to_string(), expire_ms - now_ms())
-                        .await;
+        let _write_guard = self.set_write_lock(key).lock().await;
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            self.expire_if_needed_async(key).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(None);
+            };
+            let value = decode_string_bytes(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+            let header =
+                decode_meta_header(raw).ok_or_else(|| Error::msg("ERR invalid string metadata"))?;
+            let mut batch = WriteBatch::new();
+
+            match expiration {
+                StringExpireUpdate::Persist => {
+                    if header.expire_ms == 0 {
+                        return Ok(Some(value));
+                    }
+                    let patched = patch_meta_expire_ms(raw, 0)
+                        .ok_or_else(|| Error::msg("ERR invalid string metadata"))?;
+                    batch.put(&key_bytes, &patched);
+                    self.ttl_manager.remove_known_to_batch(
+                        &mut batch,
+                        header.expire_ms,
+                        self.db_index,
+                        key,
+                    );
+                }
+                StringExpireUpdate::RelativeMs(ttl_ms) => {
+                    if ttl_ms == 0 {
+                        self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+                    } else {
+                        let expire_ms = now_ms().saturating_add(ttl_ms);
+                        let patched = patch_meta_expire_ms(raw, expire_ms)
+                            .ok_or_else(|| Error::msg("ERR invalid string metadata"))?;
+                        batch.put(&key_bytes, &patched);
+                        if header.expire_ms != expire_ms {
+                            self.ttl_manager.remove_known_to_batch(
+                                &mut batch,
+                                header.expire_ms,
+                                self.db_index,
+                                key,
+                            );
+                        }
+                        self.ttl_manager
+                            .add_to_batch(&mut batch, expire_ms, self.db_index, key);
+                    }
+                }
+                StringExpireUpdate::AbsoluteMs(expire_ms) => {
+                    if expire_ms <= now_ms() {
+                        self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+                    } else {
+                        let patched = patch_meta_expire_ms(raw, expire_ms)
+                            .ok_or_else(|| Error::msg("ERR invalid string metadata"))?;
+                        batch.put(&key_bytes, &patched);
+                        if header.expire_ms != expire_ms {
+                            self.ttl_manager.remove_known_to_batch(
+                                &mut batch,
+                                header.expire_ms,
+                                self.db_index,
+                                key,
+                            );
+                        }
+                        self.ttl_manager
+                            .add_to_batch(&mut batch, expire_ms, self.db_index, key);
+                    }
                 }
             }
+
+            match self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await
+            {
+                Ok(true) => return Ok(Some(value)),
+                Ok(false) => continue,
+                Err(error) => return Err(error),
+            }
         }
-        Ok(Some(value))
+        Err(Error::msg("ERR GETEX write conflict"))
     }
 
     pub fn type_name_readonly(&self, key: &str) -> &'static str {
@@ -154,7 +220,7 @@ impl Db {
     }
 
     pub async fn ttl_millis_readonly_async(&self, key: &str) -> i64 {
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
             return -2;
         };
         let expire_ms = decode_expire_ms(&raw);

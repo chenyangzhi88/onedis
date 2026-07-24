@@ -168,7 +168,7 @@ impl DatabaseManager {
         let fulltext_task = tokio::spawn(async move {
             while !fulltext_worker_shutdown.load(Ordering::Acquire) {
                 for db in &fulltext_worker_dbs {
-                    if let Err(err) = db.fulltext_maintenance_tick() {
+                    if let Err(err) = db.fulltext_maintenance_tick_async().await {
                         log::error!("fulltext maintenance failed: {err}");
                     }
                 }

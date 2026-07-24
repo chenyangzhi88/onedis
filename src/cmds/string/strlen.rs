@@ -9,7 +9,7 @@ impl Strlen {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let key = frame.get_arg(1);
 
-        if key.is_none() {
+        if frame.arg_len() != 2 || key.is_none() {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'strlen' command",
             ));
@@ -21,14 +21,14 @@ impl Strlen {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.get_string(&self.key)? {
+        match db.get_string_bytes(&self.key)? {
             Some(value) => Ok(Frame::Integer(value.len() as i64)),
             None => Ok(Frame::Integer(0)),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.get_string_async(&self.key).await? {
+        match db.get_string_bytes_async(&self.key).await? {
             Some(value) => Ok(Frame::Integer(value.len() as i64)),
             None => Ok(Frame::Integer(0)),
         }

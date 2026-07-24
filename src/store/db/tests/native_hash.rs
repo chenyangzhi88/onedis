@@ -68,6 +68,20 @@ fn hash_delete_removes_meta_when_last_field_is_deleted() {
 }
 
 #[test]
+fn hash_delete_counts_duplicate_fields_once() {
+    let db = test_db();
+
+    db.hash_set("user:duplicate", "name", "alice").unwrap();
+    let field = String::from("name");
+    assert_eq!(
+        db.hash_delete("user:duplicate", &[field.clone(), field])
+            .unwrap(),
+        1
+    );
+    assert!(!db.exists("user:duplicate"));
+}
+
+#[test]
 fn hash_native_ops_reject_wrong_type() {
     let db = test_db();
     db.insert("plain".to_string(), Structure::String("value".to_string()));

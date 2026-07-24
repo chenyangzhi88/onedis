@@ -52,7 +52,7 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
             }
             _ => panic!("expected bulk string cursor"),
         },
-        other => panic!("expected scan array, got {}", other.to_string()),
+        other => panic!("expected scan array, got {}", other),
     };
     assert!(next_cursor > 0);
     let second_page = apply_async(

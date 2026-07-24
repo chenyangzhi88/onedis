@@ -98,11 +98,9 @@ impl Handler {
                 }
             }
             Command::Bzmpop(command) => {
-                match txn_db
+                txn_db
                     .zset_multi_pop_async(&command.keys, command.min, command.count)
-                    .await?
-                {
-                    Some((key, entries)) => Some(Frame::Array(vec![
+                    .await?.map(|(key, entries)| Frame::Array(vec![
                         Frame::bulk_string(key),
                         Frame::Array(
                             entries
@@ -115,9 +113,7 @@ impl Handler {
                                 })
                                 .collect(),
                         ),
-                    ])),
-                    None => None,
-                }
+                    ]))
             }
             _ => unreachable!("non blocking-zset command routed to blocking zset handler"),
         };

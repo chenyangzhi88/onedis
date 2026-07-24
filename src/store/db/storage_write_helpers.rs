@@ -9,28 +9,32 @@ impl Db {
         version: u64,
     ) {
         let mut batch = WriteBatch::new();
-        if version > 0 {}
+        let version = if version == 0 && !matches!(value, Structure::String(_)) {
+            self.next_persisted_version()
+        } else {
+            version
+        };
         // Clean up old version's sub-keys if overwriting
         let key_bytes = self.mk(key);
-        if let Some(raw) = self.store.get_raw(&key_bytes) {
-            if let Some(old_header) = decode_meta_header(&raw) {
-                if old_header.expire_ms > 0 && old_header.expire_ms != expire_ms {
-                    self.ttl_manager.remove_known_to_batch(
-                        &mut batch,
-                        old_header.expire_ms,
-                        self.db_index,
-                        key,
-                    );
-                }
-                if old_header.version != version {
-                    delete_sub_keys_to_batch(
-                        &mut batch,
-                        self.db_index,
-                        key,
-                        old_header.version,
-                        old_header.type_tag,
-                    );
-                }
+        if let Some(raw) = self.store.get_raw(&key_bytes)
+            && let Some(old_header) = decode_meta_header(&raw)
+        {
+            if old_header.expire_ms > 0 && old_header.expire_ms != expire_ms {
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    old_header.expire_ms,
+                    self.db_index,
+                    key,
+                );
+            }
+            if old_header.version != version {
+                delete_sub_keys_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    key,
+                    old_header.version,
+                    old_header.type_tag,
+                );
             }
         }
         Self::write_structure_to_batch(&mut batch, self.db_index, key, value, expire_ms, version);
@@ -50,34 +54,10 @@ impl Db {
         self.write_batch_if_not_empty(&batch);
     }
 
-    pub(in crate::store::db) async fn write_string_async(
-        &self,
-        key: &str,
-        value: &[u8],
-        expire_ms: u64,
-        old_raw: Option<&[u8]>,
-    ) {
-        let mut batch = WriteBatch::new();
-        self.write_string_to_batch_with_old_raw(&mut batch, key, value, expire_ms, old_raw);
-        self.write_batch_if_not_empty_async(&batch).await;
-    }
-
     pub(in crate::store::db) fn write_plain_string(&self, key: &str, value: &[u8], expire_ms: u64) {
         let mut batch = WriteBatch::new();
         self.write_string_to_batch_with_old_raw(&mut batch, key, value, expire_ms, None);
         self.write_plain_string_batch_if_not_empty(&batch);
-    }
-
-    pub(in crate::store::db) async fn write_plain_string_async(
-        &self,
-        key: &str,
-        value: &[u8],
-        expire_ms: u64,
-    ) {
-        let mut batch = WriteBatch::new();
-        self.write_string_to_batch_with_old_raw(&mut batch, key, value, expire_ms, None);
-        self.write_plain_string_batch_if_not_empty_async(&batch)
-            .await;
     }
 
     pub(in crate::store::db) fn write_string_to_batch(
@@ -99,10 +79,48 @@ impl Db {
         old_raw: Option<&[u8]>,
     ) {
         let key_bytes = self.mk(key);
+        let stored_raw = old_raw
+            .is_none()
+            .then(|| self.store.get_raw(&key_bytes))
+            .flatten();
         if let Some(old_raw) = old_raw {
             self.cleanup_old_complex_subkeys_for_string_overwrite(batch, key, Some(old_raw));
-        } else if let Some(stored_raw) = self.store.get_raw(&key_bytes) {
-            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, &stored_raw);
+        } else if let Some(stored_raw) = stored_raw.as_deref() {
+            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, stored_raw);
+        }
+        let effective_old_raw = old_raw.or(stored_raw.as_deref());
+        self.write_string_value_to_batch(batch, key, value, expire_ms, effective_old_raw);
+    }
+
+    pub(in crate::store::db) fn write_string_to_batch_with_deferred_old_raw(
+        &self,
+        batch: &mut WriteBatch,
+        key: &str,
+        value: &[u8],
+        expire_ms: u64,
+        old_raw: Option<&[u8]>,
+    ) {
+        if let Some(old_raw) = old_raw {
+            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, old_raw);
+        }
+        self.write_string_value_to_batch(batch, key, value, expire_ms, old_raw);
+    }
+
+    fn write_string_value_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        key: &str,
+        value: &[u8],
+        expire_ms: u64,
+        old_raw: Option<&[u8]>,
+    ) {
+        let key_bytes = self.mk(key);
+        if let Some(header) = old_raw.and_then(decode_meta_header)
+            && header.expire_ms > 0
+            && header.expire_ms != expire_ms
+        {
+            self.ttl_manager
+                .remove_known_to_batch(batch, header.expire_ms, self.db_index, key);
         }
         batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
         if expire_ms > 0 {
@@ -113,7 +131,23 @@ impl Db {
         }
     }
 
-    pub(in crate::store::db) fn write_string_byte_key_to_batch_with_old_raw(
+    pub(in crate::store::db) fn write_string_byte_key_to_batch_with_deferred_old_raw(
+        &self,
+        batch: &mut WriteBatch,
+        key: &[u8],
+        value: &[u8],
+        expire_ms: u64,
+        old_raw: Option<&[u8]>,
+    ) {
+        if let Some(old_raw) = old_raw
+            && let Ok(key) = std::str::from_utf8(key)
+        {
+            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, old_raw);
+        }
+        self.write_string_byte_key_value_to_batch(batch, key, value, expire_ms, old_raw);
+    }
+
+    fn write_string_byte_key_value_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &[u8],
@@ -122,29 +156,21 @@ impl Db {
         old_raw: Option<&[u8]>,
     ) {
         let key_bytes = main_key_bytes(self.db_index, key);
-        let stored_raw = old_raw
-            .is_none()
-            .then(|| self.store.get_raw(&key_bytes))
-            .flatten();
-        if let Some(old_raw) = old_raw {
-            self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
-                batch,
-                key,
-                Some(old_raw),
-            );
-        } else if let Some(stored_raw) = stored_raw.as_deref()
+        if let Some(header) = old_raw.and_then(decode_meta_header)
+            && header.expire_ms > 0
+            && header.expire_ms != expire_ms
             && let Ok(key) = std::str::from_utf8(key)
         {
-            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, stored_raw);
+            self.ttl_manager
+                .remove_known_to_batch(batch, header.expire_ms, self.db_index, key);
         }
-        let effective_old_raw = old_raw.or(stored_raw.as_deref());
         batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
         if expire_ms > 0
             && let Ok(key) = std::str::from_utf8(key)
         {
             self.ttl_manager
                 .add_to_batch(batch, expire_ms, self.db_index, key);
-        } else if let Some(header) = effective_old_raw.and_then(decode_meta_header)
+        } else if let Some(header) = old_raw.and_then(decode_meta_header)
             && header.expire_ms > 0
             && let Ok(key) = std::str::from_utf8(key)
         {
@@ -214,6 +240,26 @@ impl Db {
         }
     }
 
+    pub(in crate::store::db) fn cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        key: &str,
+        old_raw: Option<&[u8]>,
+    ) {
+        let Some(raw) = old_raw else {
+            return;
+        };
+        let Some(header) = decode_meta_header(raw) else {
+            return;
+        };
+        if header.type_tag == TYPE_STRING || header.version == 0 {
+            return;
+        }
+
+        delete_sub_keys_to_batch(batch, self.db_index, key, header.version, header.type_tag);
+        self.enqueue_fulltext_delete_for_string_overwrite(batch, key, raw);
+    }
+
     pub(in crate::store::db) fn cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
         &self,
         batch: &mut WriteBatch,
@@ -226,22 +272,12 @@ impl Db {
         let Some(header) = decode_meta_header(raw) else {
             return;
         };
-        if header.type_tag != TYPE_STRING && header.version > 0 {
-            delete_sub_keys_to_batch_bytes(
-                batch,
-                self.db_index,
-                key,
-                header.version,
-                header.type_tag,
-            );
-            delete_sub_keys_by_scan_to_batch_bytes(
-                &self.store,
-                batch,
-                self.db_index,
-                key,
-                header.version,
-                header.type_tag,
-            );
+        if header.type_tag == TYPE_STRING || header.version == 0 {
+            return;
+        }
+        delete_sub_keys_to_batch_bytes(batch, self.db_index, key, header.version, header.type_tag);
+        if let Ok(key) = std::str::from_utf8(key) {
+            self.enqueue_fulltext_delete_for_string_overwrite(batch, key, raw);
         }
     }
 

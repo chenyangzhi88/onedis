@@ -20,7 +20,7 @@ impl Db {
         let mut bytes = self.get_string_bytes(key)?.unwrap_or_default();
         let byte_idx = offset / 8;
         if bytes.len() <= byte_idx {
-            bytes.resize(byte_idx + 1, 0);
+            resize_bitmap(&mut bytes, byte_idx.saturating_add(1))?;
         }
         let mask = 1u8 << (7 - (offset % 8));
         let old = if bytes[byte_idx] & mask == 0 { 0 } else { 1 };
@@ -29,7 +29,13 @@ impl Db {
         } else {
             bytes[byte_idx] &= !mask;
         }
-        self.insert_string_bytes(key.to_string(), bytes, None);
+        self.set_string_bytes(
+            key.to_string(),
+            bytes,
+            SetExpiration::KeepTtl,
+            SetCondition::Always,
+            false,
+        )?;
         Ok(old)
     }
 
@@ -42,27 +48,21 @@ impl Db {
         if bit > 1 {
             return Err(Error::msg("ERR bit is not an integer or out of range"));
         }
-        let mut bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
-        let byte_idx = offset / 8;
-        if bytes.len() <= byte_idx {
-            bytes.resize(byte_idx + 1, 0);
-        }
-        let mask = 1u8 << (7 - (offset % 8));
-        let old = if bytes[byte_idx] & mask == 0 { 0 } else { 1 };
-        if bit == 1 {
-            bytes[byte_idx] |= mask;
-        } else {
-            bytes[byte_idx] &= !mask;
-        }
-        self.set_string_bytes_async(
-            key.to_string(),
-            bytes,
-            SetExpiration::KeepTtl,
-            SetCondition::Always,
-            false,
-        )
-        .await?;
-        Ok(old)
+        self.mutate_string_bytes_async(key, |bytes, _| {
+            let byte_idx = offset / 8;
+            if bytes.len() <= byte_idx {
+                resize_bitmap(bytes, byte_idx.saturating_add(1))?;
+            }
+            let mask = 1u8 << (7 - (offset % 8));
+            let old = u8::from(bytes[byte_idx] & mask != 0);
+            if bit == 1 {
+                bytes[byte_idx] |= mask;
+            } else {
+                bytes[byte_idx] &= !mask;
+            }
+            Ok(old)
+        })
+        .await
     }
 
     pub fn string_bitcount(
@@ -103,14 +103,10 @@ impl Db {
             .and_then(|idx| normalize_byte_index(bytes.len(), idx))
             .unwrap_or(bytes.len().saturating_sub(1));
         if start_byte > end_byte || start_byte >= bytes.len() {
-            return Ok(if bit == 0 {
-                (bytes.len() * 8) as i64
-            } else {
-                -1
-            });
+            return Ok(if bit == 0 && bytes.is_empty() { 0 } else { -1 });
         }
-        for byte_idx in start_byte..=end_byte {
-            let byte = bytes[byte_idx];
+        for (offset, &byte) in bytes[start_byte..=end_byte].iter().enumerate() {
+            let byte_idx = start_byte + offset;
             for bit_idx in 0..8 {
                 let current = (byte >> (7 - bit_idx)) & 1;
                 if current == bit {
@@ -141,14 +137,10 @@ impl Db {
             .and_then(|idx| normalize_byte_index(bytes.len(), idx))
             .unwrap_or(bytes.len().saturating_sub(1));
         if start_byte > end_byte || start_byte >= bytes.len() {
-            return Ok(if bit == 0 {
-                (bytes.len() * 8) as i64
-            } else {
-                -1
-            });
+            return Ok(if bit == 0 && bytes.is_empty() { 0 } else { -1 });
         }
-        for byte_idx in start_byte..=end_byte {
-            let byte = bytes[byte_idx];
+        for (offset, &byte) in bytes[start_byte..=end_byte].iter().enumerate() {
+            let byte_idx = start_byte + offset;
             for bit_idx in 0..8 {
                 let current = (byte >> (7 - bit_idx)) & 1;
                 if current == bit {
@@ -185,7 +177,7 @@ impl Db {
                 out = source.into_iter().map(|byte| !byte).collect();
             }
             "AND" | "OR" | "XOR" => {
-                for idx in 0..max_len {
+                for (idx, output) in out.iter_mut().enumerate() {
                     let mut acc = match op.to_ascii_uppercase().as_str() {
                         "AND" => 0xFF,
                         _ => 0,
@@ -203,7 +195,7 @@ impl Db {
                             _ => unreachable!(),
                         }
                     }
-                    out[idx] = acc;
+                    *output = acc;
                 }
             }
             _ => return Err(Error::msg("ERR syntax error")),
@@ -240,7 +232,7 @@ impl Db {
                 out = source.into_iter().map(|byte| !byte).collect();
             }
             "AND" | "OR" | "XOR" => {
-                for idx in 0..max_len {
+                for (idx, output) in out.iter_mut().enumerate() {
                     let mut acc = match op.to_ascii_uppercase().as_str() {
                         "AND" => 0xFF,
                         _ => 0,
@@ -258,14 +250,14 @@ impl Db {
                             _ => unreachable!(),
                         }
                     }
-                    out[idx] = acc;
+                    *output = acc;
                 }
             }
             _ => return Err(Error::msg("ERR syntax error")),
         }
         let len = out.len();
         self.insert_string_bytes_async(dest.to_string(), out, None)
-            .await;
+            .await?;
         Ok(len)
     }
 
@@ -279,15 +271,8 @@ impl Db {
         if width == 0 || width > 63 {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
-        let mut value = 0u64;
-        for bit_idx in 0..width {
-            value = (value << 1) | self.string_get_bit(key, offset + bit_idx)? as u64;
-        }
-        if signed && width < 64 && (value & (1u64 << (width - 1))) != 0 {
-            Ok((value as i64) - (1i64 << width))
-        } else {
-            Ok(value as i64)
-        }
+        let bytes = self.get_string_bytes(key)?.unwrap_or_default();
+        read_bits_from(&bytes, offset, width, signed)
     }
 
     pub async fn string_read_bits_async(
@@ -300,15 +285,8 @@ impl Db {
         if width == 0 || width > 63 {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
-        let mut value = 0u64;
-        for bit_idx in 0..width {
-            value = (value << 1) | self.string_get_bit_async(key, offset + bit_idx).await? as u64;
-        }
-        if signed && width < 64 && (value & (1u64 << (width - 1))) != 0 {
-            Ok((value as i64) - (1i64 << width))
-        } else {
-            Ok(value as i64)
-        }
+        let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
+        read_bits_from(&bytes, offset, width, signed)
     }
 
     pub fn string_write_bits(
@@ -321,17 +299,15 @@ impl Db {
         if width == 0 || width > 63 {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
-        let mask = if width == 63 {
-            u64::MAX >> 1
-        } else {
-            (1u64 << width) - 1
-        };
-        let value = (value as u64) & mask;
-        for bit_idx in 0..width {
-            let shift = width - bit_idx - 1;
-            let bit = ((value >> shift) & 1) as u8;
-            self.string_set_bit(key, offset + bit_idx, bit)?;
-        }
+        let mut bytes = self.get_string_bytes(key)?.unwrap_or_default();
+        write_bits_into(&mut bytes, offset, width, value)?;
+        self.set_string_bytes(
+            key.to_string(),
+            bytes,
+            SetExpiration::KeepTtl,
+            SetCondition::Always,
+            false,
+        )?;
         Ok(())
     }
 
@@ -345,18 +321,66 @@ impl Db {
         if width == 0 || width > 63 {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
-        let mask = if width == 63 {
-            u64::MAX >> 1
-        } else {
-            (1u64 << width) - 1
-        };
-        let value = (value as u64) & mask;
-        for bit_idx in 0..width {
-            let shift = width - bit_idx - 1;
-            let bit = ((value >> shift) & 1) as u8;
-            self.string_set_bit_async(key, offset + bit_idx, bit)
-                .await?;
-        }
-        Ok(())
+        self.mutate_string_bytes_async(key, |bytes, _| write_bits_into(bytes, offset, width, value))
+            .await
     }
+}
+
+fn read_bits_from(bytes: &[u8], offset: usize, width: usize, signed: bool) -> Result<i64, Error> {
+    offset
+        .checked_add(width)
+        .ok_or_else(|| Error::msg("ERR bit offset is not an integer or out of range"))?;
+    let mut value = 0u64;
+    for bit_idx in 0..width {
+        let absolute_bit = offset + bit_idx;
+        let byte = bytes.get(absolute_bit / 8).copied().unwrap_or(0);
+        value = (value << 1) | ((byte >> (7 - (absolute_bit % 8))) & 1) as u64;
+    }
+    if signed && (value & (1u64 << (width - 1))) != 0 {
+        Ok((value as i64) - (1i64 << width))
+    } else {
+        Ok(value as i64)
+    }
+}
+
+fn write_bits_into(
+    bytes: &mut Vec<u8>,
+    offset: usize,
+    width: usize,
+    value: i64,
+) -> Result<(), Error> {
+    let required_bits = offset
+        .checked_add(width)
+        .ok_or_else(|| Error::msg("ERR bit offset is not an integer or out of range"))?;
+    let required_bytes = required_bits.saturating_add(7) / 8;
+    resize_bitmap(bytes, required_bytes)?;
+    let mask = if width == 63 {
+        u64::MAX >> 1
+    } else {
+        (1u64 << width) - 1
+    };
+    let value = (value as u64) & mask;
+    for bit_idx in 0..width {
+        let absolute_bit = offset + bit_idx;
+        let byte_idx = absolute_bit / 8;
+        let bit_mask = 1u8 << (7 - (absolute_bit % 8));
+        let shift = width - bit_idx - 1;
+        if (value >> shift) & 1 == 1 {
+            bytes[byte_idx] |= bit_mask;
+        } else {
+            bytes[byte_idx] &= !bit_mask;
+        }
+    }
+    Ok(())
+}
+
+fn resize_bitmap(bytes: &mut Vec<u8>, required_bytes: usize) -> Result<(), Error> {
+    if required_bytes <= bytes.len() {
+        return Ok(());
+    }
+    bytes
+        .try_reserve_exact(required_bytes - bytes.len())
+        .map_err(|_| Error::msg("ERR string exceeds maximum allowed size"))?;
+    bytes.resize(required_bytes, 0);
+    Ok(())
 }

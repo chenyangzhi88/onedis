@@ -3,14 +3,20 @@ use super::*;
 impl Db {
     pub(crate) fn copy_key_between_dbs(
         store: &KvStore,
-        source_db_index: u16,
-        source_key: &str,
-        target_db_index: u16,
-        target_key: &str,
+        source: DbKeyRef<'_>,
+        target: DbKeyRef<'_>,
         replace: bool,
         version_counter: &VersionCounter,
         ttl_manager: Option<&TtlManager>,
     ) -> Result<bool, Error> {
+        let DbKeyRef {
+            db_index: source_db_index,
+            key: source_key,
+        } = source;
+        let DbKeyRef {
+            db_index: target_db_index,
+            key: target_key,
+        } = target;
         if source_db_index == target_db_index && source_key == target_key {
             return Ok(false);
         }
@@ -49,15 +55,15 @@ impl Db {
             }
         }
         Self::copy_structure_between_dbs_to_batch(
-            &source_store,
-            &target_store,
             &mut batch,
-            source_db_index,
-            source_key,
-            target_db_index,
-            target_key,
-            &source_raw,
-            version_counter,
+            StructureCopyContext::new(
+                &source_store,
+                &target_store,
+                DbKeyRef::new(source_db_index, source_key),
+                DbKeyRef::new(target_db_index, target_key),
+                &source_raw,
+                version_counter,
+            ),
         );
         if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
             && header.expire_ms > 0
@@ -70,14 +76,20 @@ impl Db {
 
     pub(crate) async fn copy_key_between_dbs_async(
         store: &KvStore,
-        source_db_index: u16,
-        source_key: &str,
-        target_db_index: u16,
-        target_key: &str,
+        source: DbKeyRef<'_>,
+        target: DbKeyRef<'_>,
         replace: bool,
         version_counter: &VersionCounter,
         ttl_manager: Option<&TtlManager>,
     ) -> Result<bool, Error> {
+        let DbKeyRef {
+            db_index: source_db_index,
+            key: source_key,
+        } = source;
+        let DbKeyRef {
+            db_index: target_db_index,
+            key: target_key,
+        } = target;
         if source_db_index == target_db_index && source_key == target_key {
             return Ok(false);
         }
@@ -85,13 +97,21 @@ impl Db {
         let source_store = store.for_db_index(source_db_index);
         let target_store = store.for_db_index(target_db_index);
 
-        let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(&source_store, source_db_index, source_key)
+        let Some(source_raw) = Self::load_live_raw_for_db_with_backend_async(
+            &source_store,
+            source_db_index,
+            source_key,
+        )
+        .await
         else {
             return Ok(false);
         };
-        let target_raw =
-            Self::load_live_raw_for_db_with_backend(&target_store, target_db_index, target_key);
+        let target_raw = Self::load_live_raw_for_db_with_backend_async(
+            &target_store,
+            target_db_index,
+            target_key,
+        )
+        .await;
         if target_raw.is_some() && !replace {
             return Ok(false);
         }
@@ -116,15 +136,15 @@ impl Db {
             }
         }
         Self::copy_structure_between_dbs_to_batch_async(
-            &source_store,
-            &target_store,
             &mut batch,
-            source_db_index,
-            source_key,
-            target_db_index,
-            target_key,
-            &source_raw,
-            version_counter,
+            StructureCopyContext::new(
+                &source_store,
+                &target_store,
+                DbKeyRef::new(source_db_index, source_key),
+                DbKeyRef::new(target_db_index, target_key),
+                &source_raw,
+                version_counter,
+            ),
         )
         .await;
         if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
@@ -132,7 +152,7 @@ impl Db {
         {
             ttl_manager.add_to_batch(&mut batch, header.expire_ms, target_db_index, target_key);
         }
-        target_store.write_batch(&batch);
+        target_store.write_batch_async(&batch).await;
         Ok(true)
     }
 
@@ -143,16 +163,23 @@ impl Db {
         target_key: &str,
         replace: bool,
     ) -> Result<bool, Error> {
-        Self::copy_key_between_dbs(
+        let copied = Self::copy_key_between_dbs(
             &self.store,
-            self.db_index,
-            source_key,
-            target_db_index,
-            target_key,
+            DbKeyRef::new(self.db_index, source_key),
+            DbKeyRef::new(target_db_index, target_key),
             replace,
             &self.version_counter,
             Some(&self.ttl_manager),
-        )
+        )?;
+        if copied {
+            let raw_key = self.key_layout.main_key(target_db_index, target_key);
+            self.record_external_key_mutation(target_db_index, raw_key.clone());
+            if !self.store.is_transactional() {
+                self.non_transactional_view_for_db(target_db_index)
+                    .fulltext_reconcile_committed_keys(&[raw_key], false)?;
+            }
+        }
+        Ok(copied)
     }
 
     pub async fn copy_key_to_db_async(
@@ -162,16 +189,52 @@ impl Db {
         target_key: &str,
         replace: bool,
     ) -> Result<bool, Error> {
-        Self::copy_key_between_dbs_async(
+        let source_shard = set_write_lock_shard(self.db_index, source_key);
+        let target_shard = set_write_lock_shard(target_db_index, target_key);
+        if source_shard == target_shard {
+            let _guard = self.set_write_locks[source_shard].lock().await;
+            self.copy_key_to_db_async_unlocked(target_db_index, source_key, target_key, replace)
+                .await
+        } else if source_shard < target_shard {
+            let _source_guard = self.set_write_locks[source_shard].lock().await;
+            let _target_guard = self.set_write_locks[target_shard].lock().await;
+            self.copy_key_to_db_async_unlocked(target_db_index, source_key, target_key, replace)
+                .await
+        } else {
+            let _target_guard = self.set_write_locks[target_shard].lock().await;
+            let _source_guard = self.set_write_locks[source_shard].lock().await;
+            self.copy_key_to_db_async_unlocked(target_db_index, source_key, target_key, replace)
+                .await
+        }
+    }
+
+    async fn copy_key_to_db_async_unlocked(
+        &self,
+        target_db_index: u16,
+        source_key: &str,
+        target_key: &str,
+        replace: bool,
+    ) -> Result<bool, Error> {
+        let copied = Self::copy_key_between_dbs_async(
             &self.store,
-            self.db_index,
-            source_key,
-            target_db_index,
-            target_key,
+            DbKeyRef::new(self.db_index, source_key),
+            DbKeyRef::new(target_db_index, target_key),
             replace,
             &self.version_counter,
             Some(&self.ttl_manager),
         )
-        .await
+        .await?;
+        if copied {
+            let raw_key = self.key_layout.main_key(target_db_index, target_key);
+            self.record_external_key_mutation(target_db_index, raw_key.clone());
+            if !self.store.is_transactional() {
+                self.run_blocking_store_task(move |db| {
+                    db.non_transactional_view_for_db(target_db_index)
+                        .fulltext_reconcile_committed_keys(&[raw_key], false)
+                })
+                .await?;
+            }
+        }
+        Ok(copied)
     }
 }

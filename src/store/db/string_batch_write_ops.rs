@@ -7,11 +7,27 @@ impl Db {
         }
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
+        let keys = key_vals
+            .iter()
+            .map(|(key, _)| self.mk(key))
+            .collect::<Vec<_>>();
+        let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
-        for (key, value) in key_vals {
-            self.write_string_to_batch_with_old_raw(&mut batch, key, value, 0, None);
+        for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
+            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
+                &mut batch,
+                key,
+                old_raw.as_deref(),
+            );
+            self.write_string_to_batch_with_deferred_old_raw(
+                &mut batch,
+                key,
+                value,
+                0,
+                old_raw.as_deref(),
+            );
         }
-        self.write_plain_string_batch_if_not_empty_without_watch_publish_async(&batch)
+        self.write_plain_string_batch_if_not_empty_async(&batch)
             .await;
     }
 
@@ -24,9 +40,25 @@ impl Db {
         }
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
+        let keys = key_vals
+            .iter()
+            .map(|(key, _)| self.mk(key))
+            .collect::<Vec<_>>();
+        let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
-        for (key, value) in key_vals {
-            self.write_string_to_batch_with_old_raw(&mut batch, key, value, 0, None);
+        for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
+            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
+                &mut batch,
+                key,
+                old_raw.as_deref(),
+            );
+            self.write_string_to_batch_with_deferred_old_raw(
+                &mut batch,
+                key,
+                value,
+                0,
+                old_raw.as_deref(),
+            );
         }
         self.write_plain_string_batch_if_not_empty_without_watch_publish_async(&batch)
             .await;
@@ -38,9 +70,25 @@ impl Db {
         }
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
+        let keys = key_vals
+            .iter()
+            .map(|(key, _)| main_key_bytes(self.db_index, key))
+            .collect::<Vec<_>>();
+        let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
-        for (key, value) in key_vals {
-            self.write_string_byte_key_to_batch_with_old_raw(&mut batch, key, value, 0, None);
+        for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
+            self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
+                &mut batch,
+                key,
+                old_raw.as_deref(),
+            );
+            self.write_string_byte_key_to_batch_with_deferred_old_raw(
+                &mut batch,
+                key,
+                value,
+                0,
+                old_raw.as_deref(),
+            );
         }
         self.write_plain_string_batch_owned_if_not_empty_async(batch)
             .await;
@@ -55,9 +103,25 @@ impl Db {
         }
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
+        let keys = key_vals
+            .iter()
+            .map(|(key, _)| main_key_bytes(self.db_index, key))
+            .collect::<Vec<_>>();
+        let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
-        for (key, value) in key_vals {
-            self.write_string_byte_key_to_batch_with_old_raw(&mut batch, key, value, 0, None);
+        for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
+            self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
+                &mut batch,
+                key,
+                old_raw.as_deref(),
+            );
+            self.write_string_byte_key_to_batch_with_deferred_old_raw(
+                &mut batch,
+                key,
+                value,
+                0,
+                old_raw.as_deref(),
+            );
         }
         self.write_plain_string_batch_if_not_empty_async(&batch)
             .await;
@@ -91,9 +155,25 @@ impl Db {
         }
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
+        let keys = key_vals
+            .iter()
+            .map(|(key, _)| self.mk(key))
+            .collect::<Vec<_>>();
+        let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
-        for (key, value) in key_vals {
-            self.write_string_to_batch_with_old_raw(&mut batch, &key, &value, 0, None);
+        for ((key, value), old_raw) in key_vals.into_iter().zip(old_values) {
+            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
+                &mut batch,
+                &key,
+                old_raw.as_deref(),
+            );
+            self.write_string_to_batch_with_deferred_old_raw(
+                &mut batch,
+                &key,
+                &value,
+                0,
+                old_raw.as_deref(),
+            );
         }
         self.write_plain_string_batch_if_not_empty_async(&batch)
             .await;
@@ -130,27 +210,37 @@ impl Db {
         for (key, _) in &key_vals {
             self.expire_if_needed_async(key).await;
         }
-        let keys = key_vals
-            .iter()
-            .map(|(key, _)| self.mk(key))
-            .collect::<Vec<_>>();
-        if self
-            .store
-            .multi_get_raw_async(&keys)
-            .await
-            .iter()
-            .any(Option::is_some)
-        {
-            return false;
+        let mut observations = Vec::with_capacity(key_vals.len());
+        for (key, _) in &key_vals {
+            let observed = self.store.get_raw_observed_async(&self.mk(key)).await;
+            if observed.exists() {
+                return false;
+            }
+            observations.push(observed);
         }
 
-        self.changes
-            .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let mut batch = WriteBatch::new();
         for (key, value) in key_vals {
-            self.write_string_to_batch(&mut batch, &key, &value, 0);
+            self.write_string_to_batch_with_deferred_old_raw(&mut batch, &key, &value, 0, None);
         }
-        self.write_batch_if_not_empty_async(&batch).await;
-        true
+        let conditions = observations
+            .iter()
+            .map(CompareCondition::from_observed)
+            .collect::<Vec<_>>();
+        match self
+            .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+            .await
+        {
+            Ok(true) => {
+                self.changes
+                    .fetch_add(observations.len() as u64, Ordering::Relaxed);
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                log::error!("failed to apply MSETNX batch: {error}");
+                false
+            }
+        }
     }
 }

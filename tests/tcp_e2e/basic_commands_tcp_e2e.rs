@@ -88,7 +88,7 @@ mod tests {
 
         let _: () = con.set("exists-test", "Helloworld").unwrap();
         let key_exists: bool = con.exists("exists-test").unwrap();
-        assert_eq!(key_exists, true);
+        assert!(key_exists);
     }
 
     #[test]
@@ -102,7 +102,7 @@ mod tests {
 
         log::info!("是否存在：{}", key_exists);
 
-        assert_eq!(key_exists, true);
+        assert!(key_exists);
     }
 
     #[test]

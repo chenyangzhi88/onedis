@@ -48,7 +48,6 @@ pub(super) fn frame_to_lua_value(lua: &Lua, frame: Frame) -> mlua::Result<Value>
             }
             Ok(Value::Table(table))
         }
-        Frame::RDBFile(bytes) => Ok(Value::String(lua.create_string(&bytes)?)),
     }
 }
 

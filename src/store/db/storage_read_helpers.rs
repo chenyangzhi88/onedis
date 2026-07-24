@@ -66,6 +66,20 @@ impl Db {
         hash
     }
 
+    pub(in crate::store::db) async fn read_hash_fields_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> HashMap<String, String> {
+        let mut hash = HashMap::new();
+        for (field, value) in self.hash_entries_raw_async(key, version).await {
+            if let (Ok(field), Ok(value)) = (String::from_utf8(field), String::from_utf8(value)) {
+                hash.insert(field, value);
+            }
+        }
+        hash
+    }
+
     pub(in crate::store::db) fn read_set_members(
         &self,
         key: &str,
@@ -77,12 +91,41 @@ impl Db {
             .collect()
     }
 
+    pub(in crate::store::db) async fn read_set_members_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> HashSet<String> {
+        self.set_members_raw_async(key, version)
+            .await
+            .into_iter()
+            .filter_map(|member| String::from_utf8(member).ok())
+            .collect()
+    }
+
     pub(in crate::store::db) fn read_zset_members(
         &self,
         key: &str,
         version: u64,
     ) -> BTreeMap<String, f64> {
         self.zset_members_raw(key, version)
+            .into_iter()
+            .filter_map(|(member, value)| {
+                match (String::from_utf8(member), decode_zset_score(&value)) {
+                    (Ok(member), Some(score)) => Some((member, score)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    pub(in crate::store::db) async fn read_zset_members_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> BTreeMap<String, f64> {
+        self.zset_members_raw_async(key, version)
+            .await
             .into_iter()
             .filter_map(|(member, value)| {
                 match (String::from_utf8(member), decode_zset_score(&value)) {
@@ -146,6 +189,29 @@ impl Db {
         items.into_iter().map(|(_, value)| value).collect()
     }
 
+    pub(in crate::store::db) async fn read_list_items_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<String> {
+        let prefix = list_item_prefix(self.db_index, key, version);
+        let mut items: Vec<(i64, String)> = Vec::new();
+        for (key_bytes, value_bytes) in self.store.scan_prefix_raw_async(&prefix).await {
+            let index_bytes = &key_bytes[prefix.len()..];
+            if index_bytes.len() != 8 {
+                continue;
+            }
+            let Ok(index_bytes) = <[u8; 8]>::try_from(index_bytes) else {
+                continue;
+            };
+            if let Ok(value) = String::from_utf8(value_bytes) {
+                items.push((i64::from_be_bytes(index_bytes), value));
+            }
+        }
+        items.sort_by_key(|(index, _)| *index);
+        items.into_iter().map(|(_, value)| value).collect()
+    }
+
     pub(in crate::store::db) fn read_stream_entries(
         &self,
         key: &str,
@@ -160,5 +226,22 @@ impl Db {
                 seq: u64::MAX,
             },
         )
+    }
+
+    pub(in crate::store::db) async fn read_stream_entries_async(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Vec<StreamEntry> {
+        self.stream_entries_between_async(
+            key,
+            version,
+            StreamId { ms: 0, seq: 0 },
+            StreamId {
+                ms: u64::MAX,
+                seq: u64::MAX,
+            },
+        )
+        .await
     }
 }

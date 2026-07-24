@@ -81,6 +81,45 @@ impl Db {
         &self.set_write_locks[set_write_lock_shard(self.db_index, key)]
     }
 
+    pub(in crate::store) async fn run_blocking_store_task<T, F>(
+        &self,
+        operation: F,
+    ) -> Result<T, Error>
+    where
+        T: Send + 'static,
+        F: FnOnce(Db) -> Result<T, Error> + Send + 'static,
+    {
+        let db = self.shared_task_view();
+        tokio::task::spawn_blocking(move || operation(db))
+            .await
+            .map_err(|error| Error::msg(format!("store worker task failed: {error}")))?
+    }
+
+    pub(crate) fn shared_task_view(&self) -> Self {
+        Db {
+            db_index: self.db_index,
+            store: self.store.clone(),
+            key_layout: self.key_layout,
+            version_counter: self.version_counter.clone(),
+            ttl_manager: self.ttl_manager.clone(),
+            changes: self.changes.clone(),
+            fulltext_runtimes: self.fulltext_runtimes.clone(),
+            vector_runtimes: self.vector_runtimes.clone(),
+            mutation_tracker: self.mutation_tracker.clone(),
+            pending_mutations: self.pending_mutations.clone(),
+            list_meta_cache: self.list_meta_cache.clone(),
+            list_meta_cache_maybe_non_empty: self.list_meta_cache_maybe_non_empty.clone(),
+            counter_cache: self.counter_cache.clone(),
+            counter_cache_maybe_non_empty: self.counter_cache_maybe_non_empty.clone(),
+            counter_cache_epoch: self.counter_cache_epoch.clone(),
+            set_write_locks: self.set_write_locks.clone(),
+        }
+    }
+
+    pub(crate) fn is_transactional(&self) -> bool {
+        self.store.is_transactional()
+    }
+
     pub(in crate::store::db) fn next_persisted_version(&self) -> u64 {
         Self::next_persisted_version_for_store(&self.store, &self.version_counter)
     }
@@ -132,9 +171,13 @@ impl Db {
             return Ok(());
         }
         self.store.commit_transaction()?;
-        let direct_db = self.non_transactional_view();
-        direct_db.fulltext_reconcile_committed_keys(&keys)?;
-        self.publish_mutations(keys, dbs);
+        self.publish_mutations(keys.clone(), dbs);
+        if let Err(err) = self.reconcile_committed_keys(&keys) {
+            // The storage transaction is already durable and cannot be rolled
+            // back here. Keep Redis transaction semantics truthful and let the
+            // durable fulltext repair path reconcile the index later.
+            log::error!("failed to reconcile fulltext indexes after commit: {err}");
+        }
         Ok(())
     }
 
@@ -149,16 +192,41 @@ impl Db {
             return Ok(());
         }
         self.store.commit_transaction_async().await?;
-        let direct_db = self.non_transactional_view();
-        direct_db.fulltext_reconcile_committed_keys(&keys)?;
-        self.publish_mutations(keys, dbs);
+        self.publish_mutations(keys.clone(), dbs);
+        let reconcile_keys = keys.clone();
+        if let Err(err) = self
+            .run_blocking_store_task(move |db| db.reconcile_committed_keys(&reconcile_keys))
+            .await
+        {
+            log::error!("failed to reconcile fulltext indexes after async commit: {err}");
+        }
+        Ok(())
+    }
+
+    fn reconcile_committed_keys(&self, keys: &[(u16, Vec<u8>)]) -> Result<(), Error> {
+        let mut keys_by_db = BTreeMap::<u16, Vec<Vec<u8>>>::new();
+        for (db_index, key) in keys {
+            keys_by_db.entry(*db_index).or_default().push(key.clone());
+        }
+        for (db_index, keys) in keys_by_db {
+            let direct_db = self.non_transactional_view_for_db(db_index);
+            // The current DB shares this view's runtime registry, so an
+            // immediate refresh is safe. Cross-DB mutations leave the durable
+            // outbox for that DB's maintenance/search path instead of
+            // consuming it through a private runtime registry.
+            direct_db.fulltext_reconcile_committed_keys(&keys, db_index == self.db_index)?;
+        }
         Ok(())
     }
 
     pub(in crate::store::db) fn non_transactional_view(&self) -> Self {
+        self.non_transactional_view_for_db(self.db_index)
+    }
+
+    pub(in crate::store::db) fn non_transactional_view_for_db(&self, db_index: u16) -> Self {
         Db {
-            db_index: self.db_index,
-            store: self.store.non_transactional_view(),
+            db_index,
+            store: self.store.non_transactional_view().for_db_index(db_index),
             key_layout: self.key_layout,
             version_counter: self.version_counter.clone(),
             ttl_manager: self.ttl_manager.clone(),

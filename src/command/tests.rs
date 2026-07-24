@@ -87,6 +87,14 @@ fn parse_dispatch_covers_aliases_and_extension_command_families() {
 #[test]
 fn parse_dispatch_reports_empty_and_unknown_commands() {
     assert!(Command::parse_from_frame(Frame::Array(Vec::new())).is_err());
+    let oversized_name = "x".repeat(129);
+    assert!(
+        Command::parse_from_frame(frame_args(&[&oversized_name]))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("command name is too long")
+    );
     let mget_error = Command::parse_from_frame(frame_args(&["MGET"]))
         .err()
         .expect("MGET without keys must fail");
@@ -101,6 +109,15 @@ fn parse_dispatch_reports_empty_and_unknown_commands() {
     ));
     let unknown = Command::parse_from_frame(frame_args(&["definitely-not-redis"])).unwrap();
     assert_eq!(unknown.effective_name(), "definitely-not-redis");
+
+    let large_arg = "y".repeat(1024 * 1024);
+    let response = match Command::parse_from_frame(frame_args(&["unknown", &large_arg])).unwrap() {
+        Command::Unknown(command) => command.apply().unwrap(),
+        _ => panic!("expected unknown command"),
+    };
+    assert!(
+        matches!(response, Frame::Error(message) if message.len() < 512 && message.ends_with("...`"))
+    );
 }
 
 #[test]
@@ -127,16 +144,21 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
             true,
         ),
         (&["FT._LIST"], "FT._LIST", false),
-        (&["FT.DROPINDEX", "idx"], "FT.DROPINDEX", false),
+        (&["FT.DROPINDEX", "idx"], "FT.DROPINDEX", true),
         (
             &["FT.ALTER", "idx", "SCHEMA", "ADD", "body", "TEXT"],
             "FT.ALTER",
-            false,
+            true,
         ),
-        (&["FT.ALIASADD", "alias", "idx"], "FT.ALIASADD", false),
-        (&["FT.ALIASUPDATE", "alias", "idx"], "FT.ALIASUPDATE", false),
-        (&["FT.ALIASDEL", "alias"], "FT.ALIASDEL", false),
+        (&["FT.ALIASADD", "alias", "idx"], "FT.ALIASADD", true),
+        (&["FT.ALIASUPDATE", "alias", "idx"], "FT.ALIASUPDATE", true),
+        (&["FT.ALIASDEL", "alias"], "FT.ALIASDEL", true),
         (&["FT.CONFIG", "GET", "DEFAULT_DIALECT"], "FT.CONFIG", false),
+        (
+            &["FT.CONFIG", "SET", "DEFAULT_DIALECT", "2"],
+            "FT.CONFIG",
+            true,
+        ),
         (&["FT.INFO", "idx"], "FT.INFO", false),
         (&["FT.SEARCH", "idx", "*"], "FT.SEARCH", false),
         (
@@ -160,11 +182,22 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
             false,
         ),
         (&["FT.EXPLAIN", "idx", "*"], "FT.EXPLAIN", false),
+        (&["FT.EXPLAINCLI", "idx", "*"], "FT.EXPLAINCLI", false),
         (&["FT.TAGVALS", "idx", "tag"], "FT.TAGVALS", false),
-        (&["FT.DICTADD", "dict", "term"], "FT.DICT", false),
+        (&["FT.DICTADD", "dict", "term"], "FT.DICTADD", true),
+        (&["FT.DICTDEL", "dict", "term"], "FT.DICTDEL", true),
+        (&["FT.DICTDUMP", "dict"], "FT.DICTDUMP", false),
         (&["FT.SPELLCHECK", "idx", "term"], "FT.SPELLCHECK", false),
-        (&["FT.SUGADD", "key", "term", "1"], "FT.SUG", false),
-        (&["FT.SYNUPDATE", "idx", "grp", "term"], "FT.SYN", false),
+        (&["FT.SUGADD", "key", "term", "1"], "FT.SUGADD", true),
+        (&["FT.SUGDEL", "key", "term"], "FT.SUGDEL", true),
+        (&["FT.SUGGET", "key", "term"], "FT.SUGGET", false),
+        (&["FT.SUGLEN", "key"], "FT.SUGLEN", false),
+        (
+            &["FT.SYNUPDATE", "idx", "grp", "term"],
+            "FT.SYNUPDATE",
+            true,
+        ),
+        (&["FT.SYNDUMP", "idx"], "FT.SYNDUMP", false),
         (&["LPUSHX", "list", "v"], "LPUSHX", true),
         (&["RPUSHX", "list", "v"], "RPUSHX", true),
         (&["DECR", "n"], "DECR", true),
@@ -250,6 +283,8 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         (&["XTRIM", "s", "MAXLEN", "10"], "XTRIM", true),
         (&["DECRBY", "n", "2"], "DECRBY", true),
         (&["ECHO", "hello"], "ECHO", false),
+        (&["GETRANGE", "key", "0", "-1"], "GETRANGE", false),
+        (&["SUBSTR", "key", "0", "-1"], "SUBSTR", false),
         (&["EXPIREAT", "k", "1"], "EXPIREAT", true),
         (&["RANDOMKEY"], "RANDOMKEY", false),
         (&["PEXPIREAT", "k", "1"], "PEXPIREAT", true),
@@ -267,6 +302,34 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         (&["SSCAN", "s", "0"], "SSCAN", false),
         (&["TOUCH", "k"], "TOUCH", false),
         (&["UNLINK", "k"], "UNLINK", true),
+        (&["BITFIELD", "k", "GET", "i8", "0"], "BITFIELD", true),
+        (
+            &["BITFIELD_RO", "k", "GET", "i8", "0"],
+            "BITFIELD_RO",
+            false,
+        ),
+        (
+            &["GEORADIUS", "geo", "0", "0", "1", "km"],
+            "GEORADIUS",
+            false,
+        ),
+        (
+            &["GEORADIUS", "geo", "0", "0", "1", "km", "STORE", "dst"],
+            "GEORADIUS",
+            true,
+        ),
+        (
+            &["GEORADIUS_RO", "geo", "0", "0", "1", "km"],
+            "GEORADIUS_RO",
+            false,
+        ),
+        (
+            &["GEORADIUSBYMEMBER_RO", "geo", "member", "1", "km"],
+            "GEORADIUSBYMEMBER_RO",
+            false,
+        ),
+        (&["LMOVE", "a", "b", "LEFT", "RIGHT"], "LMOVE", true),
+        (&["RPOPLPUSH", "a", "b"], "RPOPLPUSH", true),
         (&["MULTI"], "MULTI", false),
         (&["DISCARD"], "DISCARD", false),
         (&["EXEC"], "EXEC", false),
@@ -287,8 +350,23 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         (&["JSON.GET", "j"], "JSON.GET", false),
         (&["JSON.DEL", "j"], "JSON.DEL", true),
         (&["JSON.TYPE", "j"], "JSON.TYPE", false),
-        (&["EVAL", "return 1", "0"], "LUA", true),
-        (&["WASM.LIST"], "WASM", false),
+        (&["EVAL", "return 1", "0"], "EVAL", true),
+        (&["EVAL_RO", "return 1", "0"], "EVAL_RO", false),
+        (&["EVALSHA", "deadbeef", "0"], "EVALSHA", true),
+        (&["EVALSHA_RO", "deadbeef", "0"], "EVALSHA_RO", false),
+        (&["SCRIPT", "LOAD", "return 1"], "SCRIPT", false),
+        (&["SCRIPT", "EXISTS", "deadbeef"], "SCRIPT", false),
+        (&["WASM.LOAD", "mod", "bytes"], "WASM.LOAD", true),
+        (&["WASM.CALL", "mod", "run"], "WASM.CALL", true),
+        (&["WASM.CALL_RO", "mod", "run"], "WASM.CALL_RO", false),
+        (&["WASM.DEL", "mod"], "WASM.DEL", true),
+        (&["WASM.SCAN", "mod", "scan", "p"], "WASM.SCAN", false),
+        (&["WASM.LIST"], "WASM.LIST", false),
+        (&["FUNCTION", "LOAD", "mod", "bytes"], "FUNCTION", true),
+        (&["FUNCTION", "DELETE", "mod"], "FUNCTION", true),
+        (&["FUNCTION", "LIST"], "FUNCTION", false),
+        (&["FCALL", "mod.run", "0"], "FCALL", true),
+        (&["FCALL_RO", "mod.run", "0"], "FCALL_RO", false),
     ];
 
     for (args, expected_name, expected_aof) in cases {
@@ -302,9 +380,91 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         FtUnsupported::parse_from_frame(frame_args(&["FT.DEBUG", "idx"])).unwrap(),
     );
     assert_eq!(unsupported.name(), "FT.UNSUPPORTED");
+    assert_eq!(unsupported.effective_name(), "FT.DEBUG");
     assert!(!unsupported.propagate_aof_if_needed());
 
     let unknown = Command::parse_from_frame(frame_args(&["NOTACOMMAND"])).unwrap();
     assert_eq!(unknown.name(), "UNKNOWN");
     assert!(!unknown.propagate_aof_if_needed());
+}
+
+#[test]
+fn geo_read_only_aliases_and_geosearch_reject_store_options() {
+    for args in [
+        &["GEORADIUS_RO", "geo", "0", "0", "1", "km", "STORE", "dst"][..],
+        &[
+            "GEORADIUSBYMEMBER_RO",
+            "geo",
+            "member",
+            "1",
+            "km",
+            "STOREDIST",
+            "dst",
+        ][..],
+        &[
+            "GEOSEARCH",
+            "geo",
+            "FROMLONLAT",
+            "0",
+            "0",
+            "BYRADIUS",
+            "1",
+            "km",
+            "STOREDIST",
+        ][..],
+    ] {
+        assert!(
+            Command::parse_from_frame(frame_args(args)).is_err(),
+            "{args:?} must reject store options"
+        );
+    }
+
+    let command = Command::parse_from_frame(frame_args(&[
+        "GEOSEARCHSTORE",
+        "dst",
+        "geo",
+        "FROMLONLAT",
+        "0",
+        "0",
+        "BYRADIUS",
+        "1",
+        "km",
+        "STOREDIST",
+    ]))
+    .unwrap();
+    assert_eq!(command.name(), "GEOSEARCHSTORE");
+    assert!(command.propagate_aof_if_needed());
+}
+
+#[test]
+fn fixed_arity_commands_reject_trailing_arguments() {
+    for args in [
+        &["GET", "key", "extra"][..],
+        &["GETSET", "key", "value", "extra"][..],
+        &["GETRANGE", "key", "0", "1", "extra"][..],
+        &["STRLEN", "key", "extra"][..],
+        &["HEXISTS", "key", "field", "extra"][..],
+        &["HGET", "key", "field", "extra"][..],
+        &["HGETALL", "key", "extra"][..],
+        &["HKEYS", "key", "extra"][..],
+        &["HLEN", "key", "extra"][..],
+        &["HSETNX", "key", "field", "value", "extra"][..],
+        &["HSTRLEN", "key", "field", "extra"][..],
+        &["HVALS", "key", "extra"][..],
+        &["PERSIST", "key", "extra"][..],
+        &["PTTL", "key", "extra"][..],
+        &["RENAME", "old", "new", "extra"][..],
+        &["RENAMENX", "old", "new", "extra"][..],
+        &["TTL", "key", "extra"][..],
+        &["TYPE", "key", "extra"][..],
+        &["LINDEX", "key", "0", "extra"][..],
+        &["LLEN", "key", "extra"][..],
+        &["LRANGE", "key", "0", "-1", "extra"][..],
+        &["LTRIM", "key", "0", "-1", "extra"][..],
+    ] {
+        assert!(
+            Command::parse_from_frame(frame_args(args)).is_err(),
+            "{args:?} must reject trailing arguments"
+        );
+    }
 }

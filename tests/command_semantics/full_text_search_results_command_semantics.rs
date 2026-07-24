@@ -215,6 +215,9 @@ fn ft_search_results_filters_keys_fields_sort_and_limit() {
             "1",
             "doc:2",
             "NOCONTENT",
+            "LIMIT",
+            "0",
+            "1",
         ],
     ));
     assert_eq!(integer(&result[0]), 1);

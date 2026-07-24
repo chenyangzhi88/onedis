@@ -18,6 +18,18 @@ struct BitType {
 }
 
 impl Bitfield {
+    pub(crate) fn command_name(&self) -> &'static str {
+        if self.readonly {
+            "BITFIELD_RO"
+        } else {
+            "BITFIELD"
+        }
+    }
+
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.readonly
+    }
+
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         parse(frame, false)
     }

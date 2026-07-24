@@ -169,7 +169,7 @@ fn command_dispatch_names_and_aof_flags_cover_wide_command_surface() {
         (vec!["auth", "secret"], "AUTH"),
         (vec!["bitcount", "bits"], "BITCOUNT"),
         (vec!["bitfield", "bits", "get", "u1", "0"], "BITFIELD"),
-        (vec!["bitfield_ro", "bits", "get", "u1", "0"], "BITFIELD"),
+        (vec!["bitfield_ro", "bits", "get", "u1", "0"], "BITFIELD_RO"),
         (vec!["bitop", "and", "out", "a", "b"], "BITOP"),
         (vec!["bitpos", "bits", "1"], "BITPOS"),
         (vec!["copy", "src", "dst"], "COPY"),
@@ -179,7 +179,7 @@ fn command_dispatch_names_and_aof_flags_cover_wide_command_surface() {
         (vec!["flushall"], "FLUSHALL"),
         (vec!["flushdb"], "FLUSHDB"),
         (vec!["getrange", "key", "0", "-1"], "GETRANGE"),
-        (vec!["substr", "key", "0", "-1"], "GETRANGE"),
+        (vec!["substr", "key", "0", "-1"], "SUBSTR"),
         (vec!["getdel", "key"], "GETDEL"),
         (vec!["getex", "key"], "GETEX"),
         (vec!["get", "key"], "GET"),
@@ -432,7 +432,7 @@ fn new_stream_commands_are_dispatched_to_kv_engine() {
     let db = test_db();
     let id = match apply_command(&db, &["xadd", "xs", "1-0", "f", "v"]) {
         Frame::BulkString(value) => String::from_utf8(value).unwrap(),
-        other => panic!("unexpected XADD frame: {}", other.to_string()),
+        other => panic!("unexpected XADD frame: {}", other),
     };
     assert!(matches!(
         apply_command(&db, &["xgroup", "create", "xs", "g", "0-0"]),

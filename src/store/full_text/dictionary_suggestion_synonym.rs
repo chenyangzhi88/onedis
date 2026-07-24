@@ -19,7 +19,9 @@ impl Db {
         dict: &str,
         terms: Vec<String>,
     ) -> Result<Frame, Error> {
-        self.fulltext_dict_add(dict, terms)
+        let dict = dict.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_dict_add(&dict, terms))
+            .await
     }
 
     pub fn fulltext_dict_del(&self, dict: &str, terms: Vec<String>) -> Result<Frame, Error> {
@@ -41,7 +43,9 @@ impl Db {
         dict: &str,
         terms: Vec<String>,
     ) -> Result<Frame, Error> {
-        self.fulltext_dict_del(dict, terms)
+        let dict = dict.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_dict_del(&dict, terms))
+            .await
     }
 
     pub fn fulltext_dict_dump(&self, dict: &str) -> Result<Frame, Error> {
@@ -54,7 +58,9 @@ impl Db {
     }
 
     pub async fn fulltext_dict_dump_async(&self, dict: &str) -> Result<Frame, Error> {
-        self.fulltext_dict_dump(dict)
+        let dict = dict.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_dict_dump(&dict))
+            .await
     }
 
     pub fn fulltext_spellcheck(
@@ -127,7 +133,12 @@ impl Db {
         include: Vec<String>,
         exclude: Vec<String>,
     ) -> Result<Frame, Error> {
-        self.fulltext_spellcheck(index, query, distance, include, exclude)
+        let index = index.to_string();
+        let query = query.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_spellcheck(&index, &query, distance, include, exclude)
+        })
+        .await
     }
 
     pub fn fulltext_sugadd(
@@ -169,7 +180,12 @@ impl Db {
         incr: bool,
         payload: Option<String>,
     ) -> Result<Frame, Error> {
-        self.fulltext_sugadd(key, string, score, incr, payload)
+        let key = key.to_string();
+        let string = string.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_sugadd(&key, &string, score, incr, payload)
+        })
+        .await
     }
 
     pub fn fulltext_sugget(
@@ -192,8 +208,8 @@ impl Db {
                 continue;
             };
             let string_norm = string.to_lowercase();
-            if !string_norm.starts_with(&prefix_norm)
-                && !(fuzzy && fulltext_edit_distance(&prefix_norm, &string_norm) <= 1)
+            if !(string_norm.starts_with(&prefix_norm)
+                || fuzzy && fulltext_edit_distance(&prefix_norm, &string_norm) <= 1)
             {
                 continue;
             }
@@ -236,7 +252,12 @@ impl Db {
         with_payloads: bool,
         max: usize,
     ) -> Result<Frame, Error> {
-        self.fulltext_sugget(key, prefix, fuzzy, with_scores, with_payloads, max)
+        let key = key.to_string();
+        let prefix = prefix.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_sugget(&key, &prefix, fuzzy, with_scores, with_payloads, max)
+        })
+        .await
     }
 
     pub fn fulltext_sugdel(&self, key: &str, string: &str) -> Result<Frame, Error> {
@@ -251,7 +272,10 @@ impl Db {
     }
 
     pub async fn fulltext_sugdel_async(&self, key: &str, string: &str) -> Result<Frame, Error> {
-        self.fulltext_sugdel(key, string)
+        let key = key.to_string();
+        let string = string.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_sugdel(&key, &string))
+            .await
     }
 
     pub fn fulltext_suglen(&self, key: &str) -> Result<Frame, Error> {
@@ -263,7 +287,9 @@ impl Db {
     }
 
     pub async fn fulltext_suglen_async(&self, key: &str) -> Result<Frame, Error> {
-        self.fulltext_suglen(key)
+        let key = key.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_suglen(&key))
+            .await
     }
 
     pub fn fulltext_synupdate(
@@ -295,8 +321,10 @@ impl Db {
         group: &str,
         terms: Vec<String>,
     ) -> Result<Frame, Error> {
-        let _ = group;
-        self.fulltext_synupdate(index, group, terms)
+        let index = index.to_string();
+        let group = group.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_synupdate(&index, &group, terms))
+            .await
     }
 
     pub fn fulltext_syndump(&self, index: &str) -> Result<Frame, Error> {
@@ -324,7 +352,9 @@ impl Db {
     }
 
     pub async fn fulltext_syndump_async(&self, index: &str) -> Result<Frame, Error> {
-        self.fulltext_syndump(index)
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_syndump(&index))
+            .await
     }
 
 

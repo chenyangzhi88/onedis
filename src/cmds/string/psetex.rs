@@ -45,7 +45,7 @@ impl Psetex {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         db.insert_string_bytes_async(self.key, self.value, Some(self.milliseconds))
-            .await;
+            .await?;
         Ok(Frame::Ok)
     }
 }

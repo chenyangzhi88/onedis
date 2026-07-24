@@ -74,14 +74,14 @@ fn parse_err(args: &[&str]) -> String {
 fn bulk(frame: Frame) -> String {
     match frame {
         Frame::BulkString(bytes) => String::from_utf8(bytes).unwrap(),
-        other => panic!("expected bulk string, got {}", other.to_string()),
+        other => panic!("expected bulk string, got {}", other),
     }
 }
 
 fn array(frame: Frame) -> Vec<Frame> {
     match frame {
         Frame::Array(values) => values,
-        other => panic!("expected array, got {}", other.to_string()),
+        other => panic!("expected array, got {}", other),
     }
 }
 
@@ -137,7 +137,7 @@ async fn wait_async_total(db: &Db, args: &[&str], expected: i64) -> Frame {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("expected total {expected}, got {}", last.to_string());
+    panic!("expected total {expected}, got {}", last);
 }
 
 async fn expect_async_ok(db: &Db, args: &[&str]) -> Frame {
@@ -145,7 +145,7 @@ async fn expect_async_ok(db: &Db, args: &[&str]) -> Frame {
     assert!(
         !matches!(frame, Frame::Error(_)),
         "{args:?} returned {}",
-        frame.to_string()
+        frame
     );
     frame
 }

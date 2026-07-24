@@ -23,13 +23,13 @@ pub fn is_match(key: &str, pattern: &str) -> bool {
                 '?' => regex_pattern.push('.'),
                 '[' => {
                     regex_pattern.push('[');
-                    if let Some(next) = chars.peek() {
-                        if *next == '^' {
-                            regex_pattern.push('^');
-                            chars.next(); // 跳过 '^'
-                        }
+                    if let Some(next) = chars.peek()
+                        && *next == '^'
+                    {
+                        regex_pattern.push('^');
+                        chars.next(); // 跳过 '^'
                     }
-                    while let Some(ch) = chars.next() {
+                    for ch in chars.by_ref() {
                         if ch == ']' {
                             break;
                         }

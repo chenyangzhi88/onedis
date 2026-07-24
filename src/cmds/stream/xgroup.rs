@@ -180,10 +180,15 @@ impl Xgroup {
                 key,
                 group,
                 consumer,
-            } => match db.stream_group_create_consumer(&key, &group, &consumer) {
-                Ok(count) => Ok(Frame::Integer(count as i64)),
-                Err(err) => Ok(Frame::Error(err.to_string())),
-            },
+            } => {
+                match db
+                    .stream_group_create_consumer_async(&key, &group, &consumer)
+                    .await
+                {
+                    Ok(count) => Ok(Frame::Integer(count as i64)),
+                    Err(err) => Ok(Frame::Error(err.to_string())),
+                }
+            }
             Self::DelConsumer {
                 key,
                 group,

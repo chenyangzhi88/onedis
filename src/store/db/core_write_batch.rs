@@ -122,15 +122,32 @@ impl Db {
                 .pending_mutations
                 .lock()
                 .expect("pending mutation mutex poisoned");
-            pending.keys.extend(keys);
+            pending
+                .keys
+                .extend(keys.into_iter().map(|key| (self.db_index, key)));
             pending.dbs.extend(dbs);
             return;
         }
 
-        self.publish_mutations(keys, dbs);
+        self.publish_mutations(
+            keys.into_iter().map(|key| (self.db_index, key)).collect(),
+            dbs,
+        );
     }
 
-    pub(in crate::store::db) fn take_pending_mutations(&self) -> (Vec<Vec<u8>>, Vec<u16>) {
+    pub(in crate::store::db) fn record_external_key_mutation(&self, db_index: u16, key: Vec<u8>) {
+        if self.store.is_transactional() {
+            self.pending_mutations
+                .lock()
+                .expect("pending mutation mutex poisoned")
+                .keys
+                .push((db_index, key));
+        } else {
+            self.publish_mutations(vec![(db_index, key)], Vec::new());
+        }
+    }
+
+    pub(in crate::store::db) fn take_pending_mutations(&self) -> (Vec<(u16, Vec<u8>)>, Vec<u16>) {
         let mut pending = self
             .pending_mutations
             .lock()
@@ -140,11 +157,11 @@ impl Db {
         (keys, dbs)
     }
 
-    pub(in crate::store::db) fn publish_mutations(&self, keys: Vec<Vec<u8>>, dbs: Vec<u16>) {
+    pub(in crate::store::db) fn publish_mutations(&self, keys: Vec<(u16, Vec<u8>)>, dbs: Vec<u16>) {
         let mut seen_keys = HashSet::new();
-        for key in keys {
-            if seen_keys.insert(key.clone()) {
-                self.mutation_tracker.bump_key(key);
+        for (db_index, key) in keys {
+            if seen_keys.insert((db_index, key.clone())) {
+                self.mutation_tracker.bump_key(db_index, key);
             }
         }
 

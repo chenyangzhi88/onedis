@@ -75,7 +75,7 @@ impl Unknown {
         Ok(Frame::Error(format!(
             "ERR unknown command `{}`, with args beginning with: `{}`",
             self.command_name,
-            self.args.join(" ")
+            format_args_preview(&self.args)
         )))
     }
 
@@ -86,6 +86,27 @@ impl Unknown {
     pub fn args(&self) -> &[String] {
         &self.args
     }
+}
+
+fn format_args_preview(args: &[String]) -> String {
+    const MAX_PREVIEW_ARGS: usize = 3;
+    const MAX_PREVIEW_CHARS: usize = 128;
+
+    let mut preview = args
+        .iter()
+        .take(MAX_PREVIEW_ARGS)
+        .map(|arg| arg.chars().take(MAX_PREVIEW_CHARS).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if args.len() > MAX_PREVIEW_ARGS
+        || args
+            .iter()
+            .take(MAX_PREVIEW_ARGS)
+            .any(|arg| arg.chars().count() > MAX_PREVIEW_CHARS)
+    {
+        preview.push_str("...");
+    }
+    preview
 }
 
 fn command_response(args: &[String]) -> Frame {
@@ -137,15 +158,8 @@ fn cluster_response(args: &[String]) -> Frame {
     }
 }
 
-fn simple_subcommand_response(args: &[String]) -> Frame {
-    if args
-        .first()
-        .is_some_and(|arg| arg.eq_ignore_ascii_case("HELP"))
-    {
-        Frame::Array(Vec::new())
-    } else {
-        Frame::Array(Vec::new())
-    }
+fn simple_subcommand_response(_args: &[String]) -> Frame {
+    Frame::Array(Vec::new())
 }
 
 fn pubsub_response(args: &[String]) -> Frame {

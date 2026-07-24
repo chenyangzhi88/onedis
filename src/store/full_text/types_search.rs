@@ -87,6 +87,12 @@ struct FullTextCollectedHits {
     hits: Vec<FullTextLiveHit>,
 }
 
+#[derive(Clone, Copy)]
+struct FullTextSearchDeadline {
+    at: Instant,
+    fail_on_timeout: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FullTextCollectMode {
     Page,

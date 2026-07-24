@@ -552,9 +552,34 @@ fn handler_fast_paths_acl_pubsub_and_monitor_cover_private_routes() {
         .unwrap()
         .unwrap();
     assert_eq!(bytes, b":2\r\n");
-    let mut payload = vec![0; 256];
-    let read = rt.block_on(client_stream.read(&mut payload)).unwrap();
-    assert!(String::from_utf8_lossy(&payload[..read]).contains("payload"));
+    let delivered = rt
+        .block_on(async {
+            tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                let mut response = Vec::new();
+                let mut chunk = [0; 256];
+                while response.len() < 4096 {
+                    let read = client_stream.read(&mut chunk).await?;
+                    if read == 0 {
+                        break;
+                    }
+                    response.extend_from_slice(&chunk[..read]);
+                    if response
+                        .windows(b"payload".len())
+                        .any(|window| window == b"payload")
+                    {
+                        return Ok::<bool, std::io::Error>(true);
+                    }
+                }
+                Ok(false)
+            },
+            )
+            .await
+        })
+        .expect("timed out waiting for pubsub delivery")
+        .unwrap();
+    assert!(delivered);
 
     let unsubscribe = command(&["unsubscribe"]);
     let bytes = rt
@@ -1225,6 +1250,31 @@ fn command_apply_routes_server_and_db_commands_without_full_tcp_loop() {
         Frame::Null
     ));
     assert!(handler.login(None, "secret").is_ok());
+    handler
+        .session_manager
+        .acl_setuser("default", &["-set".to_string()])
+        .unwrap();
+    let lua_guard = crate::lua::LUA_TEST_LOCK.lock().unwrap();
+    let lua_acl_error = match rt.block_on(handler.apply_command(command(&[
+            "eval",
+            "return redis.call('set', 'lua-acl-key', 'blocked')",
+            "0",
+        ]))) {
+        Ok(frame) => panic!("expected nested Lua ACL error, got {frame}"),
+        Err(error) => error,
+    };
+    drop(lua_guard);
+    assert!(lua_acl_error.to_string().contains("NOPERM"));
+    assert!(
+        !handler
+            .get_session()
+            .get_db()
+            .exists_readonly("lua-acl-key")
+    );
+    handler
+        .session_manager
+        .acl_setuser("default", &["+@all".to_string()])
+        .unwrap();
     assert!(
         matches!(rt.block_on(handler.apply_command(command(&["ping"]))).unwrap(), Frame::SimpleString(value) if value == "PONG")
     );

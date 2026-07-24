@@ -241,9 +241,9 @@ async fn async_full_text_vector_and_extension_dispatch_paths_are_covered_inner()
         &["FT.AGGREGATE", "idx", "*", "WITHCURSOR", "COUNT", "1"],
     )
     .await;
-    if let Frame::Array(items) = cursor {
-        if let Some(Frame::Integer(cursor_id)) = items.get(1) {
-            if *cursor_id > 0 {
+    if let Frame::Array(items) = cursor
+        && let Some(Frame::Integer(cursor_id)) = items.get(1)
+            && *cursor_id > 0 {
                 let id = cursor_id.to_string();
                 let _ = onedis_server::command_dispatch::handle_command_async(
                     &db,
@@ -256,8 +256,6 @@ async fn async_full_text_vector_and_extension_dispatch_paths_are_covered_inner()
                 )
                 .await;
             }
-        }
-    }
     assert!(matches!(
         apply_async(&db, &["FT.DICTADD", "terms", "redis", "search"]).await,
         Frame::Integer(2)

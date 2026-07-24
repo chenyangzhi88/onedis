@@ -87,30 +87,30 @@ fn window_results(
 }
 
 fn reduce_vector_candidates(
-    mut candidates: Vec<VectorCandidate>,
+    candidates: Vec<VectorCandidate>,
     limit: usize,
 ) -> Result<Vec<VectorCandidate>, Error> {
+    let mut latest_by_id = HashMap::<String, VectorCandidate>::new();
+    for candidate in candidates {
+        match latest_by_id.entry(candidate.id.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if candidate.doc_version > entry.get().doc_version =>
+            {
+                entry.insert(candidate);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            _ => {}
+        }
+    }
+    let mut candidates = latest_by_id.into_values().collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         left.distance
             .partial_cmp(&right.distance)
             .unwrap_or(Ordering::Equal)
             .then_with(|| left.id.cmp(&right.id))
-            .then_with(|| left.doc_version.cmp(&right.doc_version))
     });
-    let mut seen = HashSet::new();
-    let mut reduced = Vec::with_capacity(limit.min(candidates.len()));
-    for candidate in candidates {
-        let key = VectorCandidateKey {
-            id: candidate.id.clone(),
-            doc_version: candidate.doc_version,
-        };
-        if !seen.insert(key) {
-            continue;
-        }
-        reduced.push(candidate);
-        if reduced.len() >= limit {
-            break;
-        }
-    }
-    Ok(reduced)
+    candidates.truncate(limit);
+    Ok(candidates)
 }

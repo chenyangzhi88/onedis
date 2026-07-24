@@ -67,7 +67,16 @@ impl Db {
             let cursor = if rest.is_empty() {
                 0
             } else {
-                register_fulltext_aggregate_cursor(self.db_index, index, rest)
+                register_fulltext_aggregate_cursor(
+                    self.db_index,
+                    index,
+                    rest,
+                    options.cursor_max_idle_ms.unwrap_or(300_000),
+                    self.fulltext_config_usize(
+                        "MEMORY_BUDGET_AGGREGATE_CURSOR_BYTES",
+                        16_777_216,
+                    )?,
+                )?
             };
             return Ok(Frame::Array(vec![
                 fulltext_aggregate_frame(total, first),
@@ -84,7 +93,10 @@ impl Db {
         query: &str,
         options: FullTextAggregateOptions,
     ) -> Result<Frame, Error> {
-        self.fulltext_aggregate(index, query, options)
+        let index = index.to_string();
+        let query = query.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_aggregate(&index, &query, options))
+            .await
     }
 
     pub fn fulltext_cursor_read(
@@ -108,7 +120,11 @@ impl Db {
         cursor_id: u64,
         count: usize,
     ) -> Result<Frame, Error> {
-        self.fulltext_cursor_read(index, cursor_id, count)
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_cursor_read(&index, cursor_id, count)
+        })
+        .await
     }
 
     pub fn fulltext_cursor_del(&self, index: &str, cursor_id: u64) -> Result<Frame, Error> {
@@ -121,7 +137,9 @@ impl Db {
         index: &str,
         cursor_id: u64,
     ) -> Result<Frame, Error> {
-        self.fulltext_cursor_del(index, cursor_id)
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_cursor_del(&index, cursor_id))
+            .await
     }
 
 

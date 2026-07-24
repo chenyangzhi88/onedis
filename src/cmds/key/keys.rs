@@ -18,19 +18,13 @@ impl Keys {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let keys = db.keys(&self.pattern);
-        let results: Vec<Frame> = keys
-            .into_iter()
-            .map(|key| Frame::bulk_string(key))
-            .collect();
+        let results: Vec<Frame> = keys.into_iter().map(Frame::bulk_string).collect();
         Ok(Frame::Array(results))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let keys = db.keys_async(&self.pattern).await;
-        let results: Vec<Frame> = keys
-            .into_iter()
-            .map(|key| Frame::bulk_string(key))
-            .collect();
+        let results: Vec<Frame> = keys.into_iter().map(Frame::bulk_string).collect();
         Ok(Frame::Array(results))
     }
 }

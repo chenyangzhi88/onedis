@@ -809,7 +809,11 @@ fn vector_store_create_schema_search_drop_rebuild_and_compact_paths() {
         .unwrap();
     assert_eq!(paged.len(), 1);
 
-    assert_eq!(db.vector_del("store-api", &["b".to_string()]).unwrap(), 1);
+    assert_eq!(
+        db.vector_del("store-api", &["b".to_string(), "b".to_string()])
+            .unwrap(),
+        1
+    );
     assert_eq!(db.vector_del("store-api", &["b".to_string()]).unwrap(), 0);
     db.vector_rebuild("store-api").unwrap();
     db.vector_compact("store-api").unwrap();
@@ -874,11 +878,10 @@ async fn vector_store_async_create_add_search_rebuild_compact_and_drop_paths() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, "a");
 
-    assert_eq!(
+    assert!(
         db.vector_set_attrs_async("async-store", "a", None)
             .await
-            .unwrap(),
-        true
+            .unwrap()
     );
     assert_eq!(
         db.vector_element_async("async-store", "a")

@@ -23,7 +23,7 @@ impl Db {
         let keys = self.logical_keys_async().await;
         let mut result = Vec::new();
         for key in keys {
-            if let Some(raw) = self.store.get_raw(&self.mk(&key)) {
+            if let Some(raw) = self.store.get_raw_async(&self.mk(&key)).await {
                 let expire_ms = decode_expire_ms(&raw);
                 if expire_ms > 0 && now >= expire_ms {
                     continue;
@@ -46,7 +46,7 @@ impl Db {
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_nanos();
         let random_index = (now as usize) % keys.len();
         Some(keys[random_index].clone())
@@ -59,7 +59,7 @@ impl Db {
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_nanos();
         let random_index = (now as usize) % keys.len();
         Some(keys[random_index].clone())
@@ -70,6 +70,10 @@ impl Db {
      */
     pub fn len(&self) -> usize {
         self.keys("*").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub async fn len_async(&self) -> usize {
@@ -91,6 +95,7 @@ impl Db {
             self.write_batch_if_not_empty(&batch);
         }
         self.fulltext_clear_runtimes_for_db();
+        self.vector_runtimes.remove_db(self.db_index);
     }
 
     pub async fn clear_async(&self) {
@@ -103,8 +108,9 @@ impl Db {
             .remove_db_to_batch_async(&mut batch, self.db_index)
             .await;
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty_async(&batch).await;
         }
         self.fulltext_clear_runtimes_for_db();
+        self.vector_runtimes.remove_db(self.db_index);
     }
 }

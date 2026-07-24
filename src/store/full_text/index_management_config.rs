@@ -53,7 +53,9 @@ impl Db {
         index: &str,
         options: FullTextCreateOptions,
     ) -> Result<(), Error> {
-        self.fulltext_create(index, options)
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_create(&index, options))
+            .await
     }
 
     pub fn fulltext_list(&self) -> Result<Frame, Error> {
@@ -72,7 +74,7 @@ impl Db {
     }
 
     pub async fn fulltext_list_async(&self) -> Result<Frame, Error> {
-        self.fulltext_list()
+        self.run_blocking_store_task(|db| db.fulltext_list()).await
     }
 
     pub fn fulltext_drop_index(&self, index: &str, delete_documents: bool) -> Result<Frame, Error> {
@@ -103,6 +105,11 @@ impl Db {
         self.write_batch_if_not_empty(&batch);
         self.fulltext_delete_vector_indexes(index, meta);
         self.fulltext_runtimes.remove(self.db_index, index);
+        if let Err(error) = delete_fulltext_aggregate_cursors_for_index(self.db_index, index) {
+            log::warn!(
+                "failed to clean aggregate cursors after dropping full-text index {index}: {error}"
+            );
+        }
         Ok(())
     }
 
@@ -111,7 +118,11 @@ impl Db {
         index: &str,
         delete_documents: bool,
     ) -> Result<Frame, Error> {
-        self.fulltext_drop_index(index, delete_documents)
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_drop_index(&index, delete_documents)
+        })
+        .await
     }
 
     pub fn fulltext_alter(
@@ -253,7 +264,9 @@ impl Db {
         index: &str,
         fields: Vec<FullTextFieldSchema>,
     ) -> Result<Frame, Error> {
-        self.fulltext_alter(index, fields)
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_alter(&index, fields))
+            .await
     }
 
     pub fn fulltext_alias_add(&self, alias: &str, index: &str) -> Result<Frame, Error> {
@@ -269,7 +282,10 @@ impl Db {
     }
 
     pub async fn fulltext_alias_add_async(&self, alias: &str, index: &str) -> Result<Frame, Error> {
-        self.fulltext_alias_add(alias, index)
+        let alias = alias.to_string();
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_alias_add(&alias, &index))
+            .await
     }
 
     pub fn fulltext_alias_update(&self, alias: &str, index: &str) -> Result<Frame, Error> {
@@ -281,7 +297,10 @@ impl Db {
         alias: &str,
         index: &str,
     ) -> Result<Frame, Error> {
-        self.fulltext_alias_update(alias, index)
+        let alias = alias.to_string();
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_alias_update(&alias, &index))
+            .await
     }
 
     pub fn fulltext_alias_del(&self, alias: &str) -> Result<Frame, Error> {
@@ -302,7 +321,9 @@ impl Db {
     }
 
     pub async fn fulltext_alias_del_async(&self, alias: &str) -> Result<Frame, Error> {
-        self.fulltext_alias_del(alias)
+        let alias = alias.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_alias_del(&alias))
+            .await
     }
 
     pub fn fulltext_config_get(&self, name: &str) -> Result<Frame, Error> {
@@ -343,7 +364,9 @@ impl Db {
     }
 
     pub async fn fulltext_config_get_async(&self, name: &str) -> Result<Frame, Error> {
-        self.fulltext_config_get(name)
+        let name = name.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_config_get(&name))
+            .await
     }
 
     pub fn fulltext_config_set(&self, name: &str, value: &str) -> Result<Frame, Error> {
@@ -359,6 +382,9 @@ impl Db {
     }
 
     pub async fn fulltext_config_set_async(&self, name: &str, value: &str) -> Result<Frame, Error> {
-        self.fulltext_config_set(name, value)
+        let name = name.to_string();
+        let value = value.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_config_set(&name, &value))
+            .await
     }
 }

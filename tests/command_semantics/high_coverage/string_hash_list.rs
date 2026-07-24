@@ -5,6 +5,8 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
     assert!(matches!(apply(&db, &["SET", "s", "10"]), Frame::Ok));
     assert_eq!(bulk(apply(&db, &["GETSET", "s", "11"])), "10");
     assert_eq!(bulk(apply(&db, &["GETRANGE", "s", "0", "0"])), "1");
+    assert_eq!(bulk(apply(&db, &["GETRANGE", "missing", "0", "-1"])), "");
+    assert!(parse_err(&["GETRANGE", "s", "0", "1", "extra"]).contains("wrong number"));
     assert!(matches!(
         apply(&db, &["SETRANGE", "s", "2", "xy"]),
         Frame::Integer(4)
@@ -206,5 +208,4 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
     assert!(parse_err(&["BLMPOP", "-1", "1", "list", "LEFT"]).contains("negative"));
     assert!(parse_err(&["MSET", "only-key"]).contains("wrong"));
 }
-
 

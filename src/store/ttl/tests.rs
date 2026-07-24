@@ -359,13 +359,12 @@
         let vc = VersionCounter::new();
         manager.rebuild_from_store_async(1, &vc).await;
         assert_eq!(vc.current(), 30);
-        assert!(!manager.sweep_once());
         assert!(!manager.sweep_once_async().await);
         assert_eq!(manager.stats().sweep_cycles.load(Ordering::Relaxed), 0);
     }
 
-    #[test]
-    fn ttl_sweep_deletes_valid_expired_keys_and_skips_not_found_stale_and_hook_rejected() {
+    #[tokio::test]
+    async fn ttl_sweep_deletes_valid_expired_keys_and_skips_not_found_stale_and_hook_rejected() {
         let store = test_store();
         let db0_store = store.for_db_index(0);
         let manager = TtlManager::new(
@@ -391,15 +390,14 @@
 
         db0_store.put_raw(&main_key(0, "hooked"), &regular_meta(expired, 3, TYPE_LIST));
         manager.add(expired, 0, "hooked".to_string());
-        manager.set_expire_hook(std::sync::Arc::new(|_, key, _, batch| {
+        manager.set_expire_hook(std::sync::Arc::new(|_, key, _, _| {
             if key == "hooked" {
-                batch.put(b"hook:called", b"1");
                 return false;
             }
             true
         }));
 
-        assert!(!manager.sweep_once());
+        assert!(!manager.sweep_once_async().await);
         assert_eq!(db0_store.get_raw(&main_key(0, "valid")), None);
         assert_eq!(db0_store.get_raw(&main_key(0, "missing")), None);
         assert_eq!(
@@ -414,7 +412,7 @@
             db0_store.get_raw(&main_key(0, "hooked")),
             Some(regular_meta(expired, 3, TYPE_LIST))
         );
-        assert_eq!(db0_store.get_raw(b"hook:called"), Some(b"1".to_vec()));
+        assert_eq!(db0_store.get_raw(b"hook:called"), None);
         assert_eq!(manager.stats().keys_expired.load(Ordering::Relaxed), 1);
         assert_eq!(
             manager
@@ -464,4 +462,50 @@
                 .scan_prefix_raw(&json_node_prefix(0, "json-b", 8))
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn ttl_async_sweep_does_not_delete_a_concurrently_replaced_value() {
+        let store = test_store();
+        let db0_store = store.for_db_index(0);
+        let manager = TtlManager::new(
+            store,
+            TtlConfig {
+                sweep_interval_ms: 10,
+                batch_size: 10,
+            },
+        );
+        let expired = now_ms().saturating_sub(1000);
+        let replacement_expire = now_ms().saturating_add(60_000);
+        db0_store.put_raw(
+            &main_key(0, "raced"),
+            &regular_meta(expired, 1, TYPE_HASH),
+        );
+        manager.add(expired, 0, "raced".to_string());
+
+        let hook_store = db0_store.clone();
+        manager.set_expire_hook(std::sync::Arc::new(move |db_index, key, _, _| {
+            if key == "raced" {
+                hook_store.put_raw(
+                    &main_key(db_index, key),
+                    &regular_meta(replacement_expire, 2, TYPE_HASH),
+                );
+            }
+            true
+        }));
+
+        assert!(!manager.sweep_once_async().await);
+        assert_eq!(
+            db0_store.get_raw(&main_key(0, "raced")),
+            Some(regular_meta(replacement_expire, 2, TYPE_HASH))
+        );
+        assert_eq!(manager.stats().keys_expired.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            manager
+                .stats()
+                .stale_entries_skipped
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(manager.index_size(), 1);
     }

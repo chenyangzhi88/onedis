@@ -52,11 +52,10 @@ impl Db {
             FullTextSourceType::Hash => TYPE_HASH,
             FullTextSourceType::Json => TYPE_JSON,
         };
-        if !self
+        if self
             .store
             .get_raw(&self.mk(&key))
-            .and_then(|raw| decode_meta_header(&raw))
-            .is_some_and(|header| header.type_tag == expected_type)
+            .and_then(|raw| decode_meta_header(&raw)).is_none_or(|header| header.type_tag != expected_type)
         {
             return Ok(None);
         }

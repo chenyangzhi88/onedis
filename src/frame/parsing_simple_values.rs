@@ -8,11 +8,6 @@ fn scalar_payload<'a>(bytes: &'a [u8], frame_type: &str) -> Result<&'a [u8], Err
 }
 
 impl Frame {
-    /**
-     * 简单字符串
-     *
-     * @param bytes 二进制
-     */
     fn parse_simple_string(bytes: &[u8]) -> Result<Frame, Error> {
         let content = String::from_utf8(scalar_payload(bytes, "simple string")?.to_vec())?;
         Ok(Frame::SimpleString(content))
@@ -25,7 +20,8 @@ impl Frame {
 
     fn parse_integer(bytes: &[u8]) -> Result<Frame, Error> {
         let content = std::str::from_utf8(scalar_payload(bytes, "integer")?)?;
-        let value = content.parse::<i64>()?;
+        let value =
+            parse_protocol_i64(content).ok_or_else(|| Error::msg("Invalid integer frame"))?;
         Ok(Frame::Integer(value))
     }
 }

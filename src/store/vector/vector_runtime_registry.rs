@@ -31,20 +31,16 @@ impl VectorRuntimeRegistry {
         db_index: u16,
         index: &str,
         version: u64,
-        dim: usize,
-        distance: VectorDistance,
-        m: usize,
-        ef_construction: usize,
-        initial_cap: usize,
+        config: VectorRuntimeConfig,
     ) {
         self.indexes.insert(
             Self::key(db_index, index, version),
             Arc::new(RwLock::new(VectorRuntime::new(
-                dim,
-                distance,
-                m,
-                ef_construction,
-                initial_cap,
+                config.dim,
+                config.distance,
+                config.m,
+                config.ef_construction,
+                config.initial_cap,
                 1,
             ))),
         );
@@ -72,25 +68,19 @@ impl VectorRuntimeRegistry {
         db_index: u16,
         index: &str,
         version: u64,
-        dim: usize,
-        distance: VectorDistance,
-        m: usize,
-        ef_construction: usize,
-        initial_cap: usize,
-        id: String,
-        doc_version: u64,
-        vector: Vec<f32>,
+        config: VectorRuntimeConfig,
+        entry: VectorRuntimeEntry,
     ) -> Result<(), Error> {
         let runtime = self
             .indexes
             .entry(Self::key(db_index, index, version))
             .or_insert_with(|| {
                 Arc::new(RwLock::new(VectorRuntime::new(
-                    dim,
-                    distance,
-                    m,
-                    ef_construction,
-                    initial_cap,
+                    config.dim,
+                    config.distance,
+                    config.m,
+                    config.ef_construction,
+                    config.initial_cap,
                     1,
                 )))
             })
@@ -99,7 +89,7 @@ impl VectorRuntimeRegistry {
         runtime
             .write()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
-            .upsert(id, doc_version, vector)
+            .upsert(entry.id, entry.doc_version, entry.vector)
     }
 
     fn mark_deleted(&self, db_index: u16, index: &str, version: u64, id: &str) {
@@ -110,7 +100,33 @@ impl VectorRuntimeRegistry {
         }
     }
 
+    fn reconcile_docs(
+        &self,
+        db_index: u16,
+        index: &str,
+        version: u64,
+        docs: Vec<VectorDocRecord>,
+    ) -> Result<(), Error> {
+        let runtime = self
+            .get(db_index, index, version)
+            .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
+        runtime
+            .write()
+            .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
+            .reconcile_docs(docs)
+    }
+
     fn remove(&self, db_index: u16, index: &str, version: u64) {
         self.indexes.remove(&Self::key(db_index, index, version));
+        self.write_locks.remove(&VectorWriteLockKey {
+            db_index,
+            index: index.to_string(),
+        });
+    }
+
+    pub(crate) fn remove_db(&self, db_index: u16) {
+        self.indexes.retain(|key, _| key.db_index != db_index);
+        self.write_locks
+            .retain(|key, _| key.db_index != db_index);
     }
 }

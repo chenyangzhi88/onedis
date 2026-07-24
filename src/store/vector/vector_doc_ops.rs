@@ -72,22 +72,21 @@ impl Db {
         validate_attrs_against_schema(&meta.schema, &new_attrs)?;
         let old_attrs = parse_attrs(&doc.attrs_json)?;
         let mut batch = WriteBatch::new();
-        delete_attr_index_entries_to_batch(
-            &mut batch,
-            self.db_index,
+        let attr_context = VectorAttrIndexContext {
+            db_index: self.db_index,
             index,
             version,
-            &meta.schema,
-            &doc.id,
+            schema: &meta.schema,
+            doc_id: &doc.id,
+        };
+        delete_attr_index_entries_to_batch(
+            &mut batch,
+            &attr_context,
             &old_attrs,
         );
         put_attr_index_entries_to_batch(
             &mut batch,
-            self.db_index,
-            index,
-            version,
-            &meta.schema,
-            &doc.id,
+            &attr_context,
             doc.doc_version,
             &new_attrs,
         )?;
@@ -111,6 +110,10 @@ impl Db {
         id: &str,
         attrs_json: Option<String>,
     ) -> Result<bool, Error> {
-        self.vector_set_attrs(index, id, attrs_json)
+        let _key_write_guard = self.set_write_lock(index).lock().await;
+        let index = index.to_string();
+        let id = id.to_string();
+        self.run_blocking_store_task(move |db| db.vector_set_attrs(&index, &id, attrs_json))
+            .await
     }
 }

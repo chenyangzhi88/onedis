@@ -319,7 +319,7 @@ fn sdiffstore_writes_difference_to_destination() {
             assert_eq!(values.len(), 1);
             assert!(matches!(&values[0], Frame::BulkString(value) if value.as_slice() == b"one"));
         }
-        other => panic!("unexpected frame: {}", other.to_string()),
+        other => panic!("unexpected frame: {}", other),
     }
 
     let empty = apply_command(&db, &["sdiffstore", "out", "b", "b"]);
@@ -896,7 +896,7 @@ async fn bitmap_commands_cover_parser_errors_ranges_ro_signed_and_async_errors()
         &["bitfield", "not-string-bits", "get", "u1", "0"][..],
     ] {
         assert!(
-            matches!(apply_command_async(&db, args).await, Frame::Error(message) if message.contains("Type parsing")),
+            matches!(apply_command_async(&db, args).await, Frame::Error(message) if message.contains("wrong kind")),
             "{args:?}"
         );
     }

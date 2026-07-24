@@ -28,7 +28,7 @@ pub(in crate::store::db) const LIST_META_MAGIC: [u8; 4] = *b"ULST";
 pub(in crate::store::db) const STREAM_META_MAGIC: [u8; 4] = *b"USTR";
 pub(in crate::store::db) const JSON_INDEXED_MARKER: &str = "__onedis_json_indexed_v1__";
 pub(in crate::store::db) const WRONG_TYPE_ERROR: &str =
-    "ERR Operation against a key holding the wrong kind of value";
+    "WRONGTYPE Operation against a key holding the wrong kind of value";
 pub(in crate::store::db) const SET_WRITE_LOCK_SHARDS: usize = 256;
 
 pub(in crate::store::db) fn trace_lrange_sample() -> Option<u64> {

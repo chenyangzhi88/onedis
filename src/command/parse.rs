@@ -5,7 +5,11 @@ impl Command {
         let command_name = frame
             .get_arg(0)
             .ok_or_else(|| Error::msg("ERR empty command"))?;
-        let command = match command_name.to_uppercase().as_str() {
+        if command_name.len() > 128 {
+            return Err(Error::msg("ERR command name is too long"));
+        }
+        let command_name_upper = command_name.to_ascii_uppercase();
+        let command = match command_name_upper.as_str() {
             "AUTH" => Command::Auth(Auth::parse_from_frame(frame)?),
             "BITCOUNT" => Command::Bitcount(Bitcount::parse_from_frame(frame)?),
             "BITFIELD" => Command::Bitfield(Bitfield::parse_from_frame(frame)?),
@@ -261,6 +265,9 @@ impl Command {
             "WASM.LOAD" | "WASM.CALL" | "WASM.CALL_RO" | "WASM.DEL" | "WASM.SCAN" | "WASM.LIST"
             | "FUNCTION" | "FCALL" | "FCALL_RO" => {
                 Command::Wasm(WasmCommand::parse_from_frame(frame)?)
+            }
+            _ if command_name_upper.starts_with("FT.") => {
+                Command::FtUnsupported(FtUnsupported::parse_from_frame(frame)?)
             }
             _ => Command::Unknown(Unknown::parse_from_frame(frame)?),
         };

@@ -124,7 +124,7 @@ async fn assert_basic_read_and_range_commands(db: &Db) {
 async fn assert_lex_range_commands(db: &Db) {
     assert!(matches!(
         apply(
-            &db,
+            db,
             &["zadd", "lex", "0", "alpha", "0", "bravo", "0", "charlie"]
         ),
         Frame::Integer(3)
@@ -186,7 +186,7 @@ async fn assert_setops_store_scan_and_random_commands(db: &Db) {
     ));
     assert!(matches!(
         apply(
-            &db,
+            db,
             &[
                 "zrangestore",
                 "zr-score",
@@ -203,7 +203,7 @@ async fn assert_setops_store_scan_and_random_commands(db: &Db) {
     ));
     assert!(matches!(
         apply_async(
-            &db,
+            db,
             &[
                 "zrangestore",
                 "zr-rev",

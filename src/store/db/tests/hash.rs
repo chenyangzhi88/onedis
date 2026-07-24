@@ -148,6 +148,7 @@ async fn hash_field_ttl_getex_setex_and_async_conditions_cover_edges() {
         .unwrap(),
         vec![2]
     );
+    assert!(!db.exists_readonly_async("async-h").await);
     assert_eq!(
         db.hash_get_ex_async(
             "async-h",

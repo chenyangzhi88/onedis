@@ -14,6 +14,7 @@ impl Db {
         field: &str,
         value: &str,
     ) -> Result<bool, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         for _ in 0..64 {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
@@ -83,6 +84,7 @@ impl Db {
         field: &str,
         increment: i64,
     ) -> Result<i64, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         for _ in 0..64 {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
@@ -171,6 +173,7 @@ impl Db {
         field: &str,
         increment: f64,
     ) -> Result<String, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         for _ in 0..64 {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);

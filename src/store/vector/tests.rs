@@ -254,7 +254,8 @@
             10,
         )
         .unwrap();
-        assert_eq!(reduced.len(), 2);
+        assert_eq!(reduced.len(), 1);
+        assert_eq!(reduced[0].doc_version, 2);
         assert_eq!(sortable_f64(-1.0), sortable_f64(-1.0));
         assert_eq!(unsortable_f64(sortable_f64(12.5)), 12.5);
     }
@@ -307,6 +308,8 @@
         segment.graph_key = b"graph-key".to_vec();
         runtime.set_segment_graph_key(10, segment.graph_key.clone());
         assert_eq!(runtime.segments[0].meta.graph_key, b"graph-key".to_vec());
+        runtime.upsert("r1".to_string(), 3, vec![0.9, 0.1]).unwrap();
+        assert_eq!(runtime.len(), 2);
         runtime.upsert("r3".to_string(), 3, vec![0.2, 0.2]).unwrap();
         assert_eq!(runtime.len(), 3);
         assert!(!runtime.search(&[1.0, 0.0], 3, 2, None).unwrap().is_empty());
@@ -337,8 +340,77 @@
         assert_eq!(segmented.next_segment_id, 20);
         assert_eq!(segmented.segments.len(), 1);
 
+        let mut recovered = VectorRuntime::new(2, VectorDistance::L2, 4, 8, 2, 1);
+        recovered
+            .upsert("deleted-before-newer-segment".to_string(), 1, vec![1.0, 0.0])
+            .unwrap();
+        recovered
+            .upsert("kept".to_string(), 2, vec![0.0, 1.0])
+            .unwrap();
+        recovered.freeze_active().unwrap();
+        recovered
+            .upsert("newer-a".to_string(), 4, vec![0.2, 0.8])
+            .unwrap();
+        recovered
+            .upsert("newer-b".to_string(), 5, vec![0.3, 0.7])
+            .unwrap();
+        recovered.freeze_active().unwrap();
+        recovered
+            .reconcile_docs(vec![
+                VectorDocRecord {
+                    id: "deleted-before-newer-segment".to_string(),
+                    doc_version: 3,
+                    vector: vec![1.0, 0.0],
+                    attrs_json: "{}".to_string(),
+                    deleted: true,
+                },
+                VectorDocRecord {
+                    id: "kept".to_string(),
+                    doc_version: 2,
+                    vector: vec![0.0, 1.0],
+                    attrs_json: "{}".to_string(),
+                    deleted: false,
+                },
+                VectorDocRecord {
+                    id: "newer-a".to_string(),
+                    doc_version: 4,
+                    vector: vec![0.2, 0.8],
+                    attrs_json: "{}".to_string(),
+                    deleted: false,
+                },
+                VectorDocRecord {
+                    id: "newer-b".to_string(),
+                    doc_version: 5,
+                    vector: vec![0.3, 0.7],
+                    attrs_json: "{}".to_string(),
+                    deleted: false,
+                },
+            ])
+            .unwrap();
+        assert_eq!(recovered.len(), 3);
+        assert!(
+            recovered
+                .search(
+                    &[1.0, 0.0],
+                    10,
+                    10,
+                    Some(&HashSet::from([
+                        "deleted-before-newer-segment".to_string()
+                    ])),
+                )
+                .unwrap()
+                .is_empty()
+        );
+
         let registry = VectorRuntimeRegistry::default();
-        registry.reset(0, "idx", 1, 2, VectorDistance::L2, 4, 8, 2);
+        let runtime_config = VectorRuntimeConfig {
+            dim: 2,
+            distance: VectorDistance::L2,
+            m: 4,
+            ef_construction: 8,
+            initial_cap: 2,
+        };
+        registry.reset(0, "idx", 1, runtime_config);
         assert!(Arc::ptr_eq(
             &registry.write_lock(0, "idx"),
             &registry.write_lock(0, "idx")
@@ -348,14 +420,12 @@
                 0,
                 "idx",
                 1,
-                2,
-                VectorDistance::L2,
-                4,
-                8,
-                2,
-                "id".to_string(),
-                1,
-                vec![1.0, 0.0],
+                runtime_config,
+                VectorRuntimeEntry {
+                    id: "id".to_string(),
+                    doc_version: 1,
+                    vector: vec![1.0, 0.0],
+                },
             )
             .unwrap();
         assert_eq!(registry.get(0, "idx", 1).unwrap().read().unwrap().len(), 1);
@@ -363,4 +433,18 @@
         assert_eq!(registry.get(0, "idx", 1).unwrap().read().unwrap().len(), 0);
         registry.remove(0, "idx", 1);
         assert!(registry.get(0, "idx", 1).is_none());
+        assert!(registry.write_locks.is_empty());
+        registry.reset(0, "db0", 1, runtime_config);
+        registry.reset(1, "db1", 1, runtime_config);
+        registry.write_lock(0, "db0");
+        registry.write_lock(1, "db1");
+        registry.remove_db(0);
+        assert!(registry.get(0, "db0", 1).is_none());
+        assert!(registry.get(1, "db1", 1).is_some());
+        assert!(
+            registry
+                .write_locks
+                .iter()
+                .all(|entry| entry.key().db_index == 1)
+        );
     }

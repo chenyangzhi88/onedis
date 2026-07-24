@@ -23,7 +23,7 @@ impl Hscan {
         let mut count = None;
         let mut i = 2;
         while i < args.len() {
-            let arg = &args[i].to_uppercase();
+            let arg = &args[i].to_ascii_uppercase();
             if arg == "MATCH" {
                 if i + 1 >= args.len() {
                     return Err(Error::msg("MATCH option requires an argument"));
@@ -154,10 +154,10 @@ mod tests {
                 assert!(matches!(&items[0], Frame::BulkString(cursor) if cursor == b"0"));
                 match &items[1] {
                     Frame::Array(entries) => assert_eq!(entries.len(), 4),
-                    other => panic!("expected entry array, got {}", other.to_string()),
+                    other => panic!("expected entry array, got {}", other),
                 }
             }
-            other => panic!("expected array frame, got {}", other.to_string()),
+            other => panic!("expected array frame, got {}", other),
         }
     }
 }

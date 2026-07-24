@@ -155,7 +155,7 @@ fn ft_cluster_default_and_single_shard_keep_local_search_behavior() {
 }
 
 #[test]
-fn ft_cluster_multi_shard_uses_local_coordinator_results() {
+fn ft_cluster_multi_shard_rejects_queries_without_a_distributed_coordinator() {
     let (_dir, db) = make_db();
     seed_docs(&db);
     assert!(matches!(
@@ -167,9 +167,19 @@ fn ft_cluster_multi_shard_uses_local_coordinator_results() {
         Frame::Ok
     ));
 
-    assert_eq!(total(&apply(&db, &["FT.SEARCH", "idx", "fox"])), Some(2));
-    assert_eq!(total(&apply(&db, &["FT.AGGREGATE", "idx", "*"])), Some(2));
-    assert_eq!(total(&apply(&db, &["FT.HYBRID", "idx", "fox"])), Some(2));
+    for args in [
+        &["FT.SEARCH", "idx", "fox"][..],
+        &["FT.AGGREGATE", "idx", "*"][..],
+        &["FT.HYBRID", "idx", "fox"][..],
+    ] {
+        let Err(err) = try_apply(&db, args) else {
+            panic!("multi-shard query should fail");
+        };
+        assert!(
+            err.to_string()
+                .contains("not supported with multiple fulltext shards")
+        );
+    }
 }
 
 #[test]
@@ -195,7 +205,7 @@ fn ft_cluster_info_and_config_expose_contract() {
     let info = array(apply(&db, &["FT.INFO", "idx"]));
     let cluster = match info_value(&info, "cluster") {
         Some(Frame::Array(items)) => items,
-        Some(other) => panic!("missing cluster info: {}", other.to_string()),
+        Some(other) => panic!("missing cluster info: {}", other),
         None => panic!("missing cluster info"),
     };
     assert!(matches!(
@@ -212,11 +222,11 @@ fn ft_cluster_info_and_config_expose_contract() {
     ));
     assert!(matches!(
         nested_value(cluster, "router_state"),
-        Some(Frame::BulkString(value)) if value == b"local_coordinator"
+        Some(Frame::BulkString(value)) if value == b"unsupported_multi_shard"
     ));
     assert!(matches!(
         nested_value(cluster, "merge_policy"),
-        Some(Frame::BulkString(value)) if value == b"score_desc_key_asc"
+        Some(Frame::BulkString(value)) if value == b"none"
     ));
 }
 

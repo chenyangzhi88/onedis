@@ -101,7 +101,7 @@ fn setrange_writes_sparse_string_into_kv_engine() {
     let frame = SetRange {
         key: "blob".to_string(),
         offset: 5,
-        value: "Z".to_string(),
+        value: b"Z".to_vec(),
     }
     .apply(&db)
     .unwrap();
@@ -176,7 +176,7 @@ fn key_command_smoke_covers_copy_unlink_touch_and_expiretime() {
     ));
     let pexpiretime = match apply_command(&db, &["pexpiretime", "ttl-key"]) {
         Frame::Integer(value) => value,
-        other => panic!("unexpected pexpiretime frame: {}", other.to_string()),
+        other => panic!("unexpected pexpiretime frame: {}", other),
     };
     assert!(pexpiretime > 0);
     assert!(matches!(
@@ -332,7 +332,7 @@ fn ttl_and_persist_observe_same_backed_key() {
         .unwrap();
     let ttl_seconds = match ttl_frame {
         Frame::Integer(value) => value,
-        other => panic!("unexpected frame: {}", other.to_string()),
+        other => panic!("unexpected frame: {}", other),
     };
     assert!((1..=2).contains(&ttl_seconds));
 
@@ -354,7 +354,7 @@ fn expire_still_removes_key_after_command_level_write() {
     let db = test_db();
     Append {
         key: "temp".to_string(),
-        val: "value".to_string(),
+        val: b"value".to_vec(),
     }
     .apply(&db)
     .unwrap();
@@ -402,7 +402,7 @@ fn binary_string_values_round_trip_through_set_get_and_mget() {
             );
             assert!(matches!(&values[1], Frame::Null));
         }
-        other => panic!("unexpected frame: {}", other.to_string()),
+        other => panic!("unexpected frame: {}", other),
     }
 }
 
@@ -476,7 +476,7 @@ fn set_options_cover_conditions_get_absolute_expiry_and_keep_ttl() {
     ));
     let before_keep = match apply_command(&db, &["pttl", "ephemeral"]) {
         Frame::Integer(value) => value,
-        other => panic!("unexpected PTTL frame: {}", other.to_string()),
+        other => panic!("unexpected PTTL frame: {}", other),
     };
     assert!(matches!(
         apply_command(&db, &["set", "ephemeral", "v2", "keepttl"]),
@@ -484,7 +484,7 @@ fn set_options_cover_conditions_get_absolute_expiry_and_keep_ttl() {
     ));
     let after_keep = match apply_command(&db, &["pttl", "ephemeral"]) {
         Frame::Integer(value) => value,
-        other => panic!("unexpected PTTL frame: {}", other.to_string()),
+        other => panic!("unexpected PTTL frame: {}", other),
     };
     assert!(after_keep > 0 && after_keep <= before_keep);
 
@@ -848,7 +848,7 @@ fn mset_mget_and_strlen_share_same_kv_backing() {
             assert!(matches!(&values[1], Frame::BulkString(value) if value.as_slice() == b"xyz"));
             assert!(matches!(&values[2], Frame::Null));
         }
-        other => panic!("unexpected frame: {}", other.to_string()),
+        other => panic!("unexpected frame: {}", other),
     }
 }
 
@@ -911,7 +911,7 @@ async fn string_async_wrappers_cover_numeric_range_and_lcs_edges() {
     ));
     assert!(matches!(
         apply_command_async(&db, &["getrange", "missing", "0", "-1"]).await,
-        Frame::Null
+        Frame::BulkString(value) if value.is_empty()
     ));
 
     assert!(matches!(

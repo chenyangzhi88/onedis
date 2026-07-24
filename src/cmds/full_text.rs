@@ -161,6 +161,60 @@ pub struct FtUnsupported {
     command_name: String,
 }
 
+impl FtConfig {
+    pub(crate) fn may_write_data(&self) -> bool {
+        matches!(self, Self::Set { .. })
+    }
+}
+
+impl FtDict {
+    pub(crate) fn command_name(&self) -> &'static str {
+        match self {
+            Self::Add { .. } => "FT.DICTADD",
+            Self::Del { .. } => "FT.DICTDEL",
+            Self::Dump { .. } => "FT.DICTDUMP",
+        }
+    }
+
+    pub(crate) fn may_write_data(&self) -> bool {
+        matches!(self, Self::Add { .. } | Self::Del { .. })
+    }
+}
+
+impl FtSug {
+    pub(crate) fn command_name(&self) -> &'static str {
+        match self {
+            Self::Add { .. } => "FT.SUGADD",
+            Self::Get { .. } => "FT.SUGGET",
+            Self::Del { .. } => "FT.SUGDEL",
+            Self::Len { .. } => "FT.SUGLEN",
+        }
+    }
+
+    pub(crate) fn may_write_data(&self) -> bool {
+        matches!(self, Self::Add { .. } | Self::Del { .. })
+    }
+}
+
+impl FtSyn {
+    pub(crate) fn command_name(&self) -> &'static str {
+        match self {
+            Self::Update { .. } => "FT.SYNUPDATE",
+            Self::Dump { .. } => "FT.SYNDUMP",
+        }
+    }
+
+    pub(crate) fn may_write_data(&self) -> bool {
+        matches!(self, Self::Update { .. })
+    }
+}
+
+impl FtUnsupported {
+    pub(crate) fn command_name(&self) -> &str {
+        &self.command_name
+    }
+}
+
 include!("full_text/create_index_management.rs");
 include!("full_text/search.rs");
 include!("full_text/aggregate_profile.rs");

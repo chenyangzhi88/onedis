@@ -25,7 +25,7 @@ impl Msetex {
             .get_arg(2)
             .ok_or_else(|| Error::msg("ERR syntax error"))?;
         let expiration = parse_expiration(&option, &value)?;
-        if (frame.arg_len() - 3) % 2 != 0 {
+        if !(frame.arg_len() - 3).is_multiple_of(2) {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'msetex' command",
             ));

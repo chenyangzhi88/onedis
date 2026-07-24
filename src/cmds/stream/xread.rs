@@ -24,7 +24,7 @@ impl Xread {
         let mut block_ms = None;
         let mut idx = 1;
         while idx < frame.arg_len() {
-            match frame.get_arg(idx).unwrap().to_uppercase().as_str() {
+            match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
                 "COUNT" if idx + 1 < frame.arg_len() => {
                     count = Some(
                         frame
@@ -61,7 +61,7 @@ impl Xread {
             return Err(Error::msg("ERR syntax error"));
         }
         let remaining = frame.arg_len() - idx;
-        if remaining == 0 || remaining % 2 != 0 {
+        if remaining == 0 || !remaining.is_multiple_of(2) {
             return Err(Error::msg("ERR syntax error"));
         }
         let stream_count = remaining / 2;

@@ -2,7 +2,7 @@ use anyhow::{Error, Result};
 
 use crate::{
     frame::Frame,
-    lua::{LuaEval, lua_registry},
+    lua::{LuaCommandAuthorizer, LuaEval, lua_registry},
     observability::metrics::{elapsed_us, global_metrics},
     store::db::Db,
 };
@@ -146,6 +146,7 @@ mod tests {
 
     #[test]
     fn lua_command_apply_covers_script_cache_and_help_paths() {
+        let _lua_guard = crate::lua::LUA_TEST_LOCK.lock().unwrap();
         let db = test_db("onedis-lua-cmd");
         let sha = match LuaCommand::parse_from_frame(frame(&["SCRIPT", "LOAD", "return 'cached'"]))
             .unwrap()
@@ -153,7 +154,7 @@ mod tests {
             .unwrap()
         {
             Frame::BulkString(bytes) => String::from_utf8(bytes).unwrap(),
-            other => panic!("expected sha bulk, got {}", other.to_string()),
+            other => panic!("expected sha bulk, got {}", other),
         };
         assert!(matches!(
             LuaCommand::parse_from_frame(frame(&["SCRIPT", "EXISTS", &sha, "missing"]))

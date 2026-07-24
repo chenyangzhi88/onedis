@@ -17,10 +17,12 @@ impl KvStore {
     }
 
     pub fn new<P: AsRef<Path>>(db_path: P, wal_dir: P, engine_id: u32) -> Self {
-        let mut options = Options::default();
-        options.db_path = db_path.as_ref().to_path_buf();
-        options.wal_dir = wal_dir.as_ref().to_path_buf();
-        options.engine_id = engine_id;
+        let options = Options {
+            db_path: db_path.as_ref().to_path_buf(),
+            wal_dir: wal_dir.as_ref().to_path_buf(),
+            engine_id,
+            ..Options::default()
+        };
         Self::open(options)
     }
 

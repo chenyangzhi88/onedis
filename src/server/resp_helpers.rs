@@ -54,7 +54,7 @@ fn parse_borrowed_plain_set_commands(bytes: &[u8]) -> Option<Vec<(&[u8], &[u8])>
     Some(commands)
 }
 
-fn parse_borrowed_plain_hset_commands(bytes: &[u8]) -> Option<Vec<(&[u8], &[u8], &[u8])>> {
+fn parse_borrowed_plain_hset_commands(bytes: &[u8]) -> Option<Vec<BorrowedHsetCommand<'_>>> {
     let mut commands = Vec::new();
     let mut pos = 0;
     while pos < bytes.len() {
@@ -224,4 +224,5 @@ fn append_usize_decimal(out: &mut Vec<u8>, mut value: usize) {
     out.extend_from_slice(&buf[idx..]);
 }
 
+type BorrowedHsetCommand<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 

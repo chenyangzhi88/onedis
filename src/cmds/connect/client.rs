@@ -18,7 +18,7 @@ impl Client {
             ));
         }
 
-        let subcommand = args[1].to_uppercase();
+        let subcommand = args[1].to_ascii_uppercase();
         let args: Vec<String> = args.iter().skip(2).map(|s| s.to_string()).collect();
         Ok(Client { subcommand, args })
     }

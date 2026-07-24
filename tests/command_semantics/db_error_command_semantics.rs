@@ -40,6 +40,6 @@ fn db_command_errors_are_returned_to_caller() {
     match result {
         Err(e) => assert_eq!(e.to_string(), "ERR no such key"),
         Ok(Frame::Error(message)) => assert_eq!(message, "ERR no such key"),
-        Ok(other) => panic!("expected error, got {}", other.to_string()),
+        Ok(other) => panic!("expected error, got {}", other),
     }
 }

@@ -1,14 +1,12 @@
 impl Db {
     fn hnsw_candidates(
         &self,
-        index: &str,
-        version: u64,
-        meta: &VectorIndexMeta,
-        query: &[f32],
-        options: &VectorSearchOptions,
-        allow_doc_ids: Option<&HashSet<String>>,
+        context: &VectorSearchContext<'_>,
     ) -> Result<Option<Vec<VectorCandidate>>, Error> {
-        let Some(runtime) = self.vector_runtimes.get(self.db_index, index, version) else {
+        let Some(runtime) =
+            self.vector_runtimes
+                .get(self.db_index, context.index, context.version)
+        else {
             return Ok(None);
         };
         let runtime = runtime
@@ -17,81 +15,49 @@ impl Db {
         if runtime.len() == 0 {
             return Ok(Some(Vec::new()));
         }
-        let candidate_limit = options.k.saturating_mul(32).max(64).min(runtime.len());
-        let ef = options
+        let candidate_limit = context
+            .options
+            .k
+            .saturating_mul(32)
+            .max(64)
+            .min(runtime.len());
+        let ef = context
+            .options
             .ef
-            .unwrap_or(meta.ef_runtime as usize)
+            .unwrap_or(context.meta.ef_runtime as usize)
             .max(candidate_limit)
-            .max(options.k);
+            .max(context.options.k);
         runtime
-            .search(query, candidate_limit, ef, allow_doc_ids)
+            .search(
+                context.query,
+                candidate_limit,
+                ef,
+                context.allow_doc_ids,
+            )
             .map(Some)
     }
 
     fn vector_results_from_candidates(
         &self,
-        index: &str,
-        version: u64,
-        meta: &VectorIndexMeta,
-        query: &[f32],
-        options: &VectorSearchOptions,
-        filters: &[FilterPredicate],
+        context: &VectorSearchContext<'_>,
         candidates: Vec<VectorCandidate>,
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let mut results = Vec::new();
         for candidate in candidates {
             let Some(raw) = self.store.get_raw(&vector_doc_key(
                 self.db_index,
-                index,
-                version,
+                context.index,
+                context.version,
                 &candidate.id,
             )) else {
                 continue;
             };
             if let Some(result) = doc_to_search_result(
                 raw,
-                meta,
-                query,
-                &options.with_attrs,
-                filters,
-                Some(candidate.doc_version),
-            )? {
-                results.push(result);
-            }
-        }
-        Ok(results)
-    }
-
-    async fn vector_results_from_candidates_async(
-        &self,
-        index: &str,
-        version: u64,
-        meta: &VectorIndexMeta,
-        query: &[f32],
-        options: &VectorSearchOptions,
-        filters: &[FilterPredicate],
-        candidates: Vec<VectorCandidate>,
-    ) -> Result<Vec<VectorSearchResult>, Error> {
-        let mut results = Vec::new();
-        for candidate in candidates {
-            let Some(raw) = self
-                .store
-                .get_raw_async(&vector_doc_key(
-                    self.db_index,
-                    index,
-                    version,
-                    &candidate.id,
-                ))
-                .await
-            else {
-                continue;
-            };
-            if let Some(result) = doc_to_search_result(
-                raw,
-                meta,
-                query,
-                &options.with_attrs,
-                filters,
+                context.meta,
+                context.query,
+                &context.options.with_attrs,
+                context.filters,
                 Some(candidate.doc_version),
             )? {
                 results.push(result);
@@ -102,74 +68,45 @@ impl Db {
 
     fn vector_exact_results(
         &self,
-        index: &str,
-        version: u64,
-        meta: &VectorIndexMeta,
-        query: &[f32],
-        options: &VectorSearchOptions,
-        filters: &[FilterPredicate],
-        allow_doc_ids: Option<&HashSet<String>>,
+        context: &VectorSearchContext<'_>,
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let mut results = Vec::new();
-        if let Some(allow_doc_ids) = allow_doc_ids {
+        if let Some(allow_doc_ids) = context.allow_doc_ids {
             for id in allow_doc_ids {
-                if let Some(raw) =
-                    self.store
-                        .get_raw(&vector_doc_key(self.db_index, index, version, id))
-                    && let Some(result) =
-                        doc_to_search_result(raw, meta, query, &options.with_attrs, filters, None)?
+                if let Some(raw) = self.store.get_raw(&vector_doc_key(
+                    self.db_index,
+                    context.index,
+                    context.version,
+                    id,
+                )) && let Some(result) = doc_to_search_result(
+                    raw,
+                    context.meta,
+                    context.query,
+                    &context.options.with_attrs,
+                    context.filters,
+                    None,
+                )?
                 {
                     results.push(result);
                 }
             }
         } else {
-            let prefix = vector_doc_prefix(self.db_index, index, version);
+            let prefix = vector_doc_prefix(self.db_index, context.index, context.version);
             for (_, raw) in self.store.scan_prefix_raw(&prefix) {
-                if let Some(result) =
-                    doc_to_search_result(raw, meta, query, &options.with_attrs, filters, None)?
+                if let Some(result) = doc_to_search_result(
+                    raw,
+                    context.meta,
+                    context.query,
+                    &context.options.with_attrs,
+                    context.filters,
+                    None,
+                )?
                 {
                     results.push(result);
                 }
             }
         }
-        sort_and_limit_results(&mut results, options.k);
-        Ok(results)
-    }
-
-    async fn vector_exact_results_async(
-        &self,
-        index: &str,
-        version: u64,
-        meta: &VectorIndexMeta,
-        query: &[f32],
-        options: &VectorSearchOptions,
-        filters: &[FilterPredicate],
-        allow_doc_ids: Option<&HashSet<String>>,
-    ) -> Result<Vec<VectorSearchResult>, Error> {
-        let mut results = Vec::new();
-        if let Some(allow_doc_ids) = allow_doc_ids {
-            for id in allow_doc_ids {
-                if let Some(raw) = self
-                    .store
-                    .get_raw_async(&vector_doc_key(self.db_index, index, version, id))
-                    .await
-                    && let Some(result) =
-                        doc_to_search_result(raw, meta, query, &options.with_attrs, filters, None)?
-                {
-                    results.push(result);
-                }
-            }
-        } else {
-            let prefix = vector_doc_prefix(self.db_index, index, version);
-            for (_, raw) in self.store.scan_prefix_raw_async(&prefix).await {
-                if let Some(result) =
-                    doc_to_search_result(raw, meta, query, &options.with_attrs, filters, None)?
-                {
-                    results.push(result);
-                }
-            }
-        }
-        sort_and_limit_results(&mut results, options.k);
+        sort_and_limit_results(&mut results, context.options.k);
         Ok(results)
     }
 

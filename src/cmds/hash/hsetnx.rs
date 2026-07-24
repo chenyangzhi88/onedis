@@ -13,7 +13,7 @@ impl Hsetnx {
         let field = frame.get_arg(2);
         let value = frame.get_arg(3);
 
-        if key.is_none() || field.is_none() || value.is_none() {
+        if frame.arg_len() != 4 || key.is_none() || field.is_none() || value.is_none() {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'hsetnx' command",
             ));

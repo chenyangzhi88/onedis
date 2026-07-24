@@ -69,15 +69,11 @@ impl Copy {
             return Ok(Frame::Error("ERR DB index is out of range".to_string()));
         }
         let dm = handler.get_db_manager();
-        let copied = crate::store::db::Db::copy_key_between_dbs(
-            dm.store(),
-            source_db,
-            &self.source,
+        let copied = dm.get_db(source_db as usize).copy_key_to_db(
             target_db as u16,
+            &self.source,
             &self.destination,
             self.replace,
-            dm.version_counter(),
-            Some(dm.ttl_manager()),
         )?;
         Ok(Frame::Integer(if copied { 1 } else { 0 }))
     }

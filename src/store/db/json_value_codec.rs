@@ -275,3 +275,18 @@ pub(in crate::store::db) fn delete_json_nodes_to_batch(
         batch.delete(&node_key);
     }
 }
+
+pub(in crate::store::db) async fn delete_json_nodes_to_batch_async(
+    store: &KvStore,
+    batch: &mut WriteBatch,
+    db_index: u16,
+    key: &str,
+    version: u64,
+) {
+    for (node_key, _) in store
+        .scan_prefix_raw_async(&json_node_prefix(db_index, key, version))
+        .await
+    {
+        batch.delete(&node_key);
+    }
+}

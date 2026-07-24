@@ -39,6 +39,11 @@ impl WasmCommand {
                     function,
                     args,
                     read_only: command == "WASM.CALL_RO",
+                    command_name: if command == "WASM.CALL_RO" {
+                        "WASM.CALL_RO"
+                    } else {
+                        "WASM.CALL"
+                    },
                 })
             }
             "WASM.DEL" => {
@@ -171,5 +176,6 @@ fn parse_fcall_command(frame: Frame, read_only: bool) -> Result<WasmCommand> {
         function: function.to_string(),
         args,
         read_only,
+        command_name: if read_only { "FCALL_RO" } else { "FCALL" },
     })
 }

@@ -17,19 +17,32 @@ impl Db {
         }
         fulltext_validate_search_geo_filters(&meta, &options.geo_filters)?;
         self.ensure_fulltext_runtime(&index)?;
-        let now = Instant::now();
-        let deadline = now
+        let query_timeout_ms = options.timeout_ms.unwrap_or(500);
+        let refresh_started = Instant::now();
+        let refresh_deadline = refresh_started
             .checked_add(Duration::from_millis(
-                options.timeout_ms.unwrap_or(500),
+                self.fulltext_search_refresh_timeout_ms(query_timeout_ms)?,
             ))
-            .unwrap_or_else(|| now + Duration::from_secs(100 * 365 * 24 * 60 * 60));
+            .unwrap_or_else(|| {
+                refresh_started + Duration::from_secs(100 * 365 * 24 * 60 * 60)
+            });
         let fail_on_timeout = self
             .fulltext_config_string("ON_TIMEOUT", "RETURN")?
             .eq_ignore_ascii_case("FAIL");
-        let caught_up = self.fulltext_refresh_index_until_caught_up(&index, deadline)?;
+        let caught_up =
+            self.fulltext_refresh_index_until_caught_up(&index, refresh_deadline)?;
         if !caught_up && fail_on_timeout {
             return Err(Error::msg("Timeout limit was reached"));
         }
+        // RedisSearch's TIMEOUT applies to query execution. Durable index
+        // catch-up has its own REFRESH_TIMEOUT_MS budget and must not consume
+        // the client's query budget.
+        let query_started = Instant::now();
+        let deadline = query_started
+            .checked_add(Duration::from_millis(query_timeout_ms))
+            .unwrap_or_else(|| {
+                query_started + Duration::from_secs(100 * 365 * 24 * 60 * 60)
+            });
         let runtime = self
             .fulltext_runtimes
             .get(self.db_index, &index)
@@ -47,8 +60,10 @@ impl Db {
                 &runtime,
                 &ast,
                 options,
-                deadline,
-                fail_on_timeout,
+                FullTextSearchDeadline {
+                    at: deadline,
+                    fail_on_timeout,
+                },
             )?;
             return Ok(FullTextCollectedHits {
                 total: hits.len(),
@@ -71,6 +86,8 @@ impl Db {
         }
         let fetch_all = matches!(mode, FullTextCollectMode::All)
             || options.sort_by.is_some()
+            || options.in_keys.is_some()
+            || !options.filters.is_empty()
             || !options.geo_filters.is_empty()
             || options.inorder
             || !matches!(options.scorer, FullTextScorer::Bm25Std)
@@ -93,7 +110,7 @@ impl Db {
                 continue;
             }
             if let Some(hit) =
-                self.fulltext_live_hit_from_source(&meta, &options, hit.key, hit.score)?
+                self.fulltext_live_hit_from_source(&meta, options, hit.key, hit.score)?
             {
                 if options.inorder
                     && !fulltext_eval_ast_against_fields(

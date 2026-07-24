@@ -34,7 +34,6 @@
 //!   version, enabling O(1) bulk cleanup via a single DeleteRange per
 //!   namespace instead of scan + individual delete.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};

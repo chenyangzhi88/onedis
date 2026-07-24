@@ -6,11 +6,17 @@ use mlua::{Lua, Value, Variadic};
 use crate::{command::Command, frame::Frame, store::db::Db};
 
 use super::{
+    LuaCommandAuthorizer,
     registry::{lua_registry, sha1_hex},
     value_bridge::{command_frame_from_lua, error_table, frame_to_lua_value, status_table},
 };
 
-pub(super) fn install_redis_api(lua: &Lua, db: Arc<Db>, read_only: bool) -> Result<()> {
+pub(super) fn install_redis_api(
+    lua: &Lua,
+    db: Arc<Db>,
+    read_only: bool,
+    authorizer: Option<LuaCommandAuthorizer>,
+) -> Result<()> {
     let redis = lua.create_table()?;
     redis.set("LOG_DEBUG", 0)?;
     redis.set("LOG_VERBOSE", 1)?;
@@ -19,17 +25,33 @@ pub(super) fn install_redis_api(lua: &Lua, db: Arc<Db>, read_only: bool) -> Resu
     redis.set("REDIS_VERSION", env!("CARGO_PKG_VERSION"))?;
     redis.set("REDIS_VERSION_NUM", 0)?;
     let call_db = db.clone();
+    let call_authorizer = authorizer.clone();
     redis.set(
         "call",
         lua.create_function(move |lua, args: Variadic<Value>| {
-            redis_call(lua, call_db.clone(), args, read_only, false)
+            redis_call(
+                lua,
+                call_db.clone(),
+                args,
+                read_only,
+                false,
+                call_authorizer.clone(),
+            )
         })?,
     )?;
     let pcall_db = db.clone();
+    let pcall_authorizer = authorizer.clone();
     redis.set(
         "pcall",
         lua.create_function(move |lua, args: Variadic<Value>| {
-            redis_call(lua, pcall_db.clone(), args, read_only, true)
+            redis_call(
+                lua,
+                pcall_db.clone(),
+                args,
+                read_only,
+                true,
+                pcall_authorizer.clone(),
+            )
         })?,
     )?;
     redis.set(
@@ -52,7 +74,11 @@ pub(super) fn install_redis_api(lua: &Lua, db: Arc<Db>, read_only: bool) -> Resu
                     Command::parse_from_frame(frame)
                         .map_err(|err| mlua::Error::runtime(err.to_string()))
                 })
-                .is_ok())
+                .is_ok_and(|command| {
+                    authorizer
+                        .as_ref()
+                        .is_none_or(|allows| allows(command.effective_name()))
+                }))
         })?,
     )?;
     redis.set("log", lua.create_function(|_, _: Variadic<Value>| Ok(()))?)?;
@@ -76,6 +102,7 @@ fn redis_call(
     args: Variadic<Value>,
     read_only: bool,
     protected: bool,
+    authorizer: Option<LuaCommandAuthorizer>,
 ) -> mlua::Result<Value> {
     let frame = match command_frame_from_lua(lua, args) {
         Ok(frame) => frame,
@@ -87,6 +114,19 @@ fn redis_call(
         Err(err) if protected => return error_table(lua, &err.to_string()).map(Value::Table),
         Err(err) => return Err(mlua::Error::runtime(err.to_string())),
     };
+    if authorizer
+        .as_ref()
+        .is_some_and(|allows| !allows(command.effective_name()))
+    {
+        let err = format!(
+            "NOPERM this user has no permissions to run the '{}' command",
+            command.effective_name().to_ascii_lowercase()
+        );
+        if protected {
+            return error_table(lua, &err).map(Value::Table);
+        }
+        return Err(mlua::Error::runtime(err));
+    }
     let is_write = command.propagate_aof_if_needed();
     if read_only && is_write {
         let err = "ERR write command is not allowed from read-only script";

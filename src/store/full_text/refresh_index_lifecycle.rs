@@ -1,6 +1,12 @@
 impl Db {
     pub(crate) fn shutdown_fulltext_runtime(&self) {
         self.fulltext_runtimes.remove_db(self.db_index);
+        if let Err(err) = delete_fulltext_aggregate_cursors_for_db(self.db_index) {
+            log::error!(
+                "failed to clear fulltext cursors while shutting down DB {}: {err}",
+                self.db_index
+            );
+        }
     }
 
     fn fulltext_refresh_index(&self, index: &str, force: bool) -> Result<(), Error> {
@@ -170,11 +176,9 @@ impl Db {
         if let Some(raw) = self.store.get_raw(&marker)
             && let Ok(value) = String::from_utf8(raw)
             && let Ok(previous) = value.parse::<u64>()
-        {
-            if now.saturating_sub(previous) < throttle_ms {
+            && now.saturating_sub(previous) < throttle_ms {
                 return Ok(false);
             }
-        }
         let mut batch = WriteBatch::new();
         batch.put(&marker, now.to_string().as_bytes());
         self.write_batch_if_not_empty(&batch);

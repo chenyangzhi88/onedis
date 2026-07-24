@@ -29,6 +29,7 @@ pub struct Geosearch {
     shape: GeoShape,
     options: SearchOptions,
     store: Option<GeoStore>,
+    read_only_alias: bool,
 }
 
 pub struct Geosearchstore {
@@ -92,5 +93,15 @@ impl GeoShape {
                 unit_factor(unit).unwrap_or(1.0)
             }
         }
+    }
+}
+
+impl Geosearch {
+    pub(crate) fn is_read_only_alias(&self) -> bool {
+        self.read_only_alias
+    }
+
+    pub(crate) fn stores_result(&self) -> bool {
+        self.store.is_some()
     }
 }

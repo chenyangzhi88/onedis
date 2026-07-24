@@ -7,6 +7,7 @@ pub struct FullTextAggregateOptions {
     pub offset: usize,
     pub limit: usize,
     pub cursor_count: Option<usize>,
+    pub cursor_max_idle_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

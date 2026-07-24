@@ -31,7 +31,12 @@ impl Db {
         options: FullTextSearchOptions,
         cli: bool,
     ) -> Result<Frame, Error> {
-        self.fulltext_explain(index, query, options, cli)
+        let index = index.to_string();
+        let query = query.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_explain(&index, &query, options, cli)
+        })
+        .await
     }
 
     pub fn fulltext_tagvals(&self, index: &str, field: &str) -> Result<Frame, Error> {
@@ -72,6 +77,9 @@ impl Db {
     }
 
     pub async fn fulltext_tagvals_async(&self, index: &str, field: &str) -> Result<Frame, Error> {
-        self.fulltext_tagvals(index, field)
+        let index = index.to_string();
+        let field = field.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_tagvals(&index, &field))
+            .await
     }
 }

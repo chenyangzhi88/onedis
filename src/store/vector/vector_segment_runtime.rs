@@ -42,6 +42,7 @@ impl VectorRuntime {
     }
 
     fn upsert(&mut self, id: String, doc_version: u64, vector: Vec<f32>) -> Result<(), Error> {
+        self.mark_deleted(&id);
         self.active.upsert(id, doc_version, vector)
     }
 
@@ -52,13 +53,59 @@ impl VectorRuntime {
         }
     }
 
+    fn reconcile_docs(&mut self, docs: Vec<VectorDocRecord>) -> Result<(), Error> {
+        let current = docs
+            .into_iter()
+            .map(|doc| (doc.id.clone(), doc))
+            .collect::<HashMap<_, _>>();
+        let mut found = HashSet::new();
+
+        for node in &mut self.active.nodes {
+            let is_current = !node.deleted
+                && current.get(&node.id).is_some_and(|doc| {
+                    !doc.deleted && doc.doc_version == node.doc_version
+                })
+                && found.insert(node.id.clone());
+            if !is_current {
+                node.deleted = true;
+            }
+        }
+        for segment in &mut self.segments {
+            for node in &mut segment.graph.nodes {
+                let is_current = !node.deleted
+                    && current.get(&node.id).is_some_and(|doc| {
+                        !doc.deleted && doc.doc_version == node.doc_version
+                    })
+                    && found.insert(node.id.clone());
+                if !is_current {
+                    node.deleted = true;
+                }
+            }
+        }
+
+        for (id, doc) in current {
+            if !doc.deleted && !found.contains(&id) {
+                self.active.upsert(id, doc.doc_version, doc.vector)?;
+            }
+        }
+        Ok(())
+    }
+
     fn len(&self) -> usize {
-        self.active.len()
-            + self
-                .segments
-                .iter()
-                .map(|segment| segment.graph.len())
-                .sum::<usize>()
+        let mut ids = HashSet::new();
+        for node in &self.active.nodes {
+            if !node.deleted {
+                ids.insert(node.id.as_str());
+            }
+        }
+        for segment in &self.segments {
+            for node in &segment.graph.nodes {
+                if !node.deleted {
+                    ids.insert(node.id.as_str());
+                }
+            }
+        }
+        ids.len()
     }
 
     fn search(

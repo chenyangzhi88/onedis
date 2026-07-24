@@ -1,4 +1,7 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    frame::Frame,
+    store::db::{Db, SetCondition, SetExpiration, SetOutcome},
+};
 use anyhow::Error;
 
 pub struct GetSet {
@@ -10,7 +13,7 @@ impl GetSet {
     /// 从 Frame 解析出 GetSet 命令
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         // 确保参数数量正确（key + value）
-        if frame.get_args().len() < 3 {
+        if frame.arg_len() != 3 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'getset' command",
             ));
@@ -30,27 +33,37 @@ impl GetSet {
 
     /// 应用 GetSet 命令到数据库
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        // 获取旧值（同时检查类型）
-        let old_value = db.get_string(&self.key).unwrap_or(None);
-
-        // 插入新值（覆盖旧值）
-        db.insert_string(self.key.clone(), self.value.clone(), None);
-
-        // TODO 是否移除过期时间
-
-        // 返回结果：旧值或 nil
-        match old_value {
-            Some(val) => Ok(Frame::bulk_string(val)),
-            None => Ok(Frame::Null),
+        match db.set_string_bytes(
+            self.key,
+            self.value.into_bytes(),
+            SetExpiration::Clear,
+            SetCondition::Always,
+            true,
+        )? {
+            SetOutcome::Set {
+                old_value: Some(value),
+            } => Ok(Frame::BulkString(value)),
+            SetOutcome::Set { old_value: None } => Ok(Frame::Null),
+            SetOutcome::NotSet => unreachable!("unconditional GETSET must write"),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let old_value = db.get_string_async(&self.key).await?;
-        db.insert_string_async(self.key, self.value, None).await;
-        match old_value {
-            Some(val) => Ok(Frame::bulk_string(val)),
-            None => Ok(Frame::Null),
+        match db
+            .set_string_bytes_async(
+                self.key,
+                self.value.into_bytes(),
+                SetExpiration::Clear,
+                SetCondition::Always,
+                true,
+            )
+            .await?
+        {
+            SetOutcome::Set {
+                old_value: Some(value),
+            } => Ok(Frame::BulkString(value)),
+            SetOutcome::Set { old_value: None } => Ok(Frame::Null),
+            SetOutcome::NotSet => unreachable!("unconditional GETSET must write"),
         }
     }
 }

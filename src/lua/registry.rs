@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -8,12 +8,23 @@ use sha1_smol::Sha1;
 
 use crate::{frame::Frame, store::db::Db};
 
-use super::runtime::run_lua_script;
+use super::{LuaCommandAuthorizer, runtime::run_lua_script};
+
+const MAX_LUA_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LUA_SCRIPT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_LUA_SCRIPT_CACHE_ENTRIES: usize = 10_000;
 
 #[derive(Default)]
 pub struct LuaRegistry {
-    scripts: Mutex<HashMap<String, String>>,
+    scripts: Mutex<LuaScriptCache>,
     execution: Mutex<LuaExecutionState>,
+}
+
+#[derive(Default)]
+struct LuaScriptCache {
+    scripts: HashMap<String, String>,
+    insertion_order: VecDeque<String>,
+    bytes: usize,
 }
 
 #[derive(Default)]
@@ -39,6 +50,9 @@ impl Drop for LuaExecutionGuard<'_> {
 
 pub static LUA_REGISTRY: OnceLock<LuaRegistry> = OnceLock::new();
 
+#[cfg(test)]
+pub(crate) static LUA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn lua_registry() -> &'static LuaRegistry {
     LUA_REGISTRY.get_or_init(LuaRegistry::default)
 }
@@ -52,11 +66,30 @@ pub struct LuaEval {
 
 impl LuaRegistry {
     pub fn load(&self, script: &str) -> Result<String> {
+        if script.len() > MAX_LUA_SCRIPT_BYTES {
+            return Err(Error::msg("ERR Lua script is too large"));
+        }
         let sha = sha1_hex(script);
-        self.scripts
+        let mut cache = self
+            .scripts
             .lock()
-            .map_err(|_| Error::msg("ERR lua script cache lock poisoned"))?
-            .insert(sha.clone(), script.to_string());
+            .map_err(|_| Error::msg("ERR lua script cache lock poisoned"))?;
+        if cache.scripts.contains_key(&sha) {
+            return Ok(sha);
+        }
+        while cache.scripts.len() >= MAX_LUA_SCRIPT_CACHE_ENTRIES
+            || cache.bytes.saturating_add(script.len()) > MAX_LUA_SCRIPT_CACHE_BYTES
+        {
+            let Some(evicted_sha) = cache.insertion_order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = cache.scripts.remove(&evicted_sha) {
+                cache.bytes = cache.bytes.saturating_sub(evicted.len());
+            }
+        }
+        cache.bytes = cache.bytes.saturating_add(script.len());
+        cache.insertion_order.push_back(sha.clone());
+        cache.scripts.insert(sha.clone(), script.to_string());
         Ok(sha)
     }
 
@@ -65,6 +98,7 @@ impl LuaRegistry {
             .scripts
             .lock()
             .map_err(|_| Error::msg("ERR lua script cache lock poisoned"))?
+            .scripts
             .get(sha)
             .cloned())
     }
@@ -74,14 +108,20 @@ impl LuaRegistry {
             .scripts
             .lock()
             .map_err(|_| Error::msg("ERR lua script cache lock poisoned"))?;
-        Ok(shas.iter().map(|sha| scripts.contains_key(sha)).collect())
+        Ok(shas
+            .iter()
+            .map(|sha| scripts.scripts.contains_key(sha))
+            .collect())
     }
 
     pub fn flush(&self) -> Result<()> {
-        self.scripts
+        let mut cache = self
+            .scripts
             .lock()
-            .map_err(|_| Error::msg("ERR lua script cache lock poisoned"))?
-            .clear();
+            .map_err(|_| Error::msg("ERR lua script cache lock poisoned"))?;
+        cache.scripts.clear();
+        cache.insertion_order.clear();
+        cache.bytes = 0;
         Ok(())
     }
 
@@ -103,17 +143,31 @@ impl LuaRegistry {
     }
 
     pub fn eval(&self, db: &Db, eval: LuaEval) -> Result<Frame> {
+        self.eval_authorized(db, eval, None)
+    }
+
+    pub(crate) fn eval_authorized(
+        &self,
+        db: &Db,
+        eval: LuaEval,
+        authorizer: Option<LuaCommandAuthorizer>,
+    ) -> Result<Frame> {
         self.load(&eval.script)?;
         let _guard = self.begin_execution()?;
+
+        if db.is_transactional() {
+            return run_lua_script(Arc::new(db.shared_task_view()), &eval, authorizer);
+        }
+
         let txn_db = Arc::new(db.transactional_view()?);
-        let result = match run_lua_script(txn_db.clone(), &eval) {
+        let result = match run_lua_script(txn_db.clone(), &eval, authorizer) {
             Ok(result) => result,
             Err(err) => {
                 txn_db.discard_transaction();
                 return Err(err);
             }
         };
-        if eval.read_only {
+        if eval.read_only || matches!(result, Frame::Error(_)) {
             txn_db.discard_transaction();
         } else {
             txn_db.commit_transaction()?;

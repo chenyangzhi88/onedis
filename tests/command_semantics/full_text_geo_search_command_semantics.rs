@@ -66,7 +66,7 @@ fn wait_total(db: &Db, args: &[&str], expected: i64) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("expected total {expected}, got {}", last.to_string());
+    panic!("expected total {expected}, got {}", last);
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn ft_geoshape_invalid_wkt_returns_error() {
         &db,
         &["FT.SEARCH", "idx", "@geom:[WITHIN LINESTRING(0 0, 1 1)]"],
     ) {
-        Ok(frame) => panic!("invalid WKT should fail, got {}", frame.to_string()),
+        Ok(frame) => panic!("invalid WKT should fail, got {}", frame),
         Err(err) => err,
     };
     assert!(err.to_string().contains("WKT"));
@@ -241,7 +241,7 @@ fn ft_geoshape_invalid_wkt_returns_error() {
         &db,
         &["FT.SEARCH", "idx", "@geom:[WITHIN LINESTRING(0 0, 1 1)]"],
     ) {
-        Ok(frame) => panic!("invalid WKT should fail, got {}", frame.to_string()),
+        Ok(frame) => panic!("invalid WKT should fail, got {}", frame),
         Err(err) => err,
     };
     assert!(err.to_string().contains("WKT"));

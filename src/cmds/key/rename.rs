@@ -11,7 +11,7 @@ impl Rename {
         let old_key = frame.get_arg(1);
         let new_key = frame.get_arg(2);
 
-        if old_key.is_none() || new_key.is_none() {
+        if frame.arg_len() != 3 || old_key.is_none() || new_key.is_none() {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'rename' command",
             ));

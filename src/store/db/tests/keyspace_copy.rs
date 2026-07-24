@@ -1,7 +1,56 @@
 use super::*;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_rename_and_hash_write_do_not_lose_the_field_update() {
+    let db = Arc::new(test_db());
+    for iteration in 0..12 {
+        let old_key = format!("rename-race-old-{iteration}");
+        let new_key = format!("rename-race-new-{iteration}");
+        db.hash_set_async(&old_key, "base", "value").await.unwrap();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let rename_db = db.clone();
+        let rename_barrier = barrier.clone();
+        let rename_old = old_key.clone();
+        let rename_new = new_key.clone();
+        let rename = tokio::spawn(async move {
+            rename_barrier.wait().await;
+            rename_db
+                .rename_key_async(&rename_old, &rename_new, true)
+                .await
+        });
+
+        let write_db = db.clone();
+        let write_barrier = barrier.clone();
+        let write_old = old_key.clone();
+        let write = tokio::spawn(async move {
+            write_barrier.wait().await;
+            write_db.hash_set_async(&write_old, "raced", "kept").await
+        });
+
+        barrier.wait().await;
+        assert!(rename.await.unwrap().unwrap());
+        write.await.unwrap().unwrap();
+        assert_eq!(
+            db.hash_get_async(&new_key, "base").await.unwrap(),
+            Some("value".to_string())
+        );
+        assert!(
+            db.hash_get_async(&old_key, "raced")
+                .await
+                .unwrap()
+                .is_some()
+                || db
+                    .hash_get_async(&new_key, "raced")
+                    .await
+                    .unwrap()
+                    .is_some()
+        );
+    }
+}
+
 #[test]
-fn repeated_expire_appends_ttl_index_entries() {
+fn repeated_expire_replaces_the_previous_ttl_index_entry() {
     let db = test_db();
 
     db.insert("hot-key".to_string(), Structure::String("v".to_string()));
@@ -9,8 +58,22 @@ fn repeated_expire_appends_ttl_index_entries() {
     assert!(db.expire("hot-key".to_string(), 20_000));
     assert!(db.expire("hot-key".to_string(), 30_000));
 
-    assert_eq!(db.ttl_manager.index_size(), 3);
+    assert_eq!(db.ttl_manager.index_size(), 1);
     assert!(db.ttl_millis("hot-key") > 20_000);
+}
+
+#[test]
+fn overwriting_a_string_replaces_or_removes_its_ttl_index_entry() {
+    let db = test_db();
+
+    db.insert_string("session".to_string(), "v1".to_string(), Some(30_000));
+    assert_eq!(db.ttl_manager.index_size(), 1);
+
+    db.insert_string("session".to_string(), "v2".to_string(), Some(60_000));
+    assert_eq!(db.ttl_manager.index_size(), 1);
+
+    db.insert_string("session".to_string(), "v3".to_string(), None);
+    assert_eq!(db.ttl_manager.index_size(), 0);
 }
 
 #[test]
@@ -24,6 +87,127 @@ fn persist_removes_ttl_index_entry() {
     assert!(db.persist("session"));
     assert_eq!(db.ttl_manager.index_size(), 0);
     assert_eq!(db.ttl_millis("session"), -1);
+}
+
+#[tokio::test]
+async fn removing_the_last_collection_item_removes_its_ttl_index_entry() {
+    let db = test_db();
+
+    db.hash_set_async("hash", "field", "value").await.unwrap();
+    assert!(db.expire("hash".to_string(), 60_000));
+    assert_eq!(
+        db.hash_delete_async("hash", &["field".to_string()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.ttl_manager.index_size(), 0);
+
+    db.list_push_right_async("list", &["value".to_string()], false)
+        .await
+        .unwrap();
+    assert!(db.expire("list".to_string(), 60_000));
+    assert_eq!(
+        db.list_pop_left_async("list").await.unwrap(),
+        Some("value".to_string())
+    );
+    assert_eq!(db.ttl_manager.index_size(), 0);
+
+    db.set_add_async("set", &["member".to_string()])
+        .await
+        .unwrap();
+    assert!(db.expire("set".to_string(), 60_000));
+    assert_eq!(
+        db.set_remove_async("set", &["member".to_string()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.ttl_manager.index_size(), 0);
+
+    db.zset_add_async("zset", &[(1.0, "member".to_string())])
+        .await
+        .unwrap();
+    assert!(db.expire("zset".to_string(), 60_000));
+    assert_eq!(
+        db.zset_remove_async("zset", &["member".to_string()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.ttl_manager.index_size(), 0);
+}
+
+#[test]
+fn transactional_copy_and_move_commit_cross_db_changes() {
+    let root = test_root("onedis-cross-db-transaction-test");
+    let db_path = root.join("db");
+    let wal_dir = root.join("wal");
+    std::fs::create_dir_all(&db_path).unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let store = KvStore::new(db_path, wal_dir, 1);
+    let version_counter = Arc::new(VersionCounter::new());
+    let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
+    let tracker = Arc::new(KeyMutationTracker::default());
+    let db0 = Db::new_with_mutation_tracker(
+        0,
+        store.clone(),
+        version_counter.clone(),
+        ttl_manager.clone(),
+        tracker.clone(),
+    );
+    let db1 = Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker);
+
+    db0.insert_string_ref("copy-source", "copy-value");
+    let copy_txn = db0.transactional_view().unwrap();
+    assert!(
+        copy_txn
+            .copy_key_to_db(1, "copy-source", "copy-target", false)
+            .unwrap()
+    );
+    copy_txn.commit_transaction().unwrap();
+    assert_eq!(
+        db1.get_string("copy-target").unwrap(),
+        Some("copy-value".to_string())
+    );
+
+    db0.insert_string_ref("move-source", "move-value");
+    let move_txn = db0.transactional_view().unwrap();
+    assert!(move_txn.move_key_to_db(1, "move-source").unwrap());
+    move_txn.commit_transaction().unwrap();
+    assert!(!db0.exists("move-source"));
+    assert_eq!(
+        db1.get_string("move-source").unwrap(),
+        Some("move-value".to_string())
+    );
+}
+
+#[test]
+fn watch_key_versions_are_isolated_by_database() {
+    let root = test_root("onedis-watch-db-isolation-test");
+    let db_path = root.join("db");
+    let wal_dir = root.join("wal");
+    std::fs::create_dir_all(&db_path).unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let store = KvStore::new(db_path, wal_dir, 1);
+    let version_counter = Arc::new(VersionCounter::new());
+    let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
+    let tracker = Arc::new(KeyMutationTracker::default());
+    let db0 = Db::new_with_mutation_tracker(
+        0,
+        store.clone(),
+        version_counter.clone(),
+        ttl_manager.clone(),
+        tracker.clone(),
+    );
+    let db1 = Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker);
+
+    let (key_version, db_version) = db0.watch_version_snapshot("same-key");
+    db1.insert_string_ref("same-key", "db-one");
+    assert!(!db0.watch_version_changed("same-key", key_version, db_version));
+
+    db0.insert_string_ref("same-key", "db-zero");
+    assert!(db0.watch_version_changed("same-key", key_version, db_version));
 }
 
 #[test]
@@ -392,10 +576,8 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
         assert!(
             Db::copy_key_between_dbs(
                 &db0.store,
-                0,
-                key,
-                1,
-                &format!("{key}-copy"),
+                DbKeyRef::new(0, key),
+                DbKeyRef::new(1, &format!("{key}-copy")),
                 false,
                 &db0.version_counter,
                 Some(&db0.ttl_manager),
@@ -422,10 +604,8 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
     assert!(
         !Db::copy_key_between_dbs(
             &db0.store,
-            0,
-            "missing",
-            1,
-            "missing-copy",
+            DbKeyRef::new(0, "missing"),
+            DbKeyRef::new(1, "missing-copy"),
             false,
             &db0.version_counter,
             Some(&db0.ttl_manager),
@@ -435,10 +615,8 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
     assert!(
         !Db::copy_key_between_dbs(
             &db0.store,
-            0,
-            "hash",
-            1,
-            "hash-copy",
+            DbKeyRef::new(0, "hash"),
+            DbKeyRef::new(1, "hash-copy"),
             false,
             &db0.version_counter,
             Some(&db0.ttl_manager),
@@ -448,10 +626,8 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
     assert!(
         Db::copy_key_between_dbs(
             &db0.store,
-            0,
-            "hash",
-            1,
-            "hash-copy",
+            DbKeyRef::new(0, "hash"),
+            DbKeyRef::new(1, "hash-copy"),
             true,
             &db0.version_counter,
             Some(&db0.ttl_manager),

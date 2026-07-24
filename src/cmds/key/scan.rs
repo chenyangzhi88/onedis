@@ -21,7 +21,7 @@ impl Scan {
 
         let mut i = 1;
         while i < args.len() {
-            let arg = &args[i].to_uppercase();
+            let arg = &args[i].to_ascii_uppercase();
             if arg == "MATCH" {
                 if i + 1 >= args.len() {
                     return Err(Error::msg("MATCH option requires an argument"));

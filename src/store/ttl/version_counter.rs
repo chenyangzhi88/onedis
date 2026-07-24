@@ -14,6 +14,12 @@ pub struct VersionCounter {
     reservation_lock: AtomicBool,
 }
 
+impl Default for VersionCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VersionCounter {
     pub fn new() -> Self {
         Self {

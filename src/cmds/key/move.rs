@@ -47,15 +47,9 @@ impl Move {
         }
 
         let dm = handler.get_db_manager();
-        let moved = crate::store::db::Db::move_key_between_dbs(
-            dm.store(),
-            source_db,
-            &self.key,
-            target_db,
-            &self.key,
-            dm.version_counter(),
-            Some(dm.ttl_manager()),
-        )?;
+        let moved = dm
+            .get_db(source_db as usize)
+            .move_key_to_db(target_db, &self.key)?;
         Ok(Frame::Integer(if moved { 1 } else { 0 }))
     }
 }

@@ -82,9 +82,7 @@ impl KvStore {
         let started = Instant::now();
         if let Some(value) = self.with_transaction_mut(|txn| {
             txn.get(key)
-                .expect("failed to read key from kv_engine transaction")
-                .map(Bytes::from)
-        }) {
+                .expect("failed to read key from kv_engine transaction")}) {
             global_metrics().record_storage_read(elapsed_us(started));
             return value;
         }
@@ -100,9 +98,7 @@ impl KvStore {
         let started = Instant::now();
         if let Some(value) = self.with_transaction_mut(|txn| {
             txn.get(key)
-                .expect("failed to read key from kv_engine transaction")
-                .map(Bytes::from)
-        }) {
+                .expect("failed to read key from kv_engine transaction")}) {
             global_metrics().record_storage_read(elapsed_us(started));
             return value;
         }

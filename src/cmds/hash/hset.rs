@@ -8,7 +8,7 @@ pub struct Hset {
 
 impl Hset {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        if frame.arg_len() < 4 || frame.arg_len() % 2 != 0 {
+        if frame.arg_len() < 4 || !frame.arg_len().is_multiple_of(2) {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'hset' command",
             ));

@@ -225,6 +225,16 @@ fn list_move_supports_lmove_and_rpoplpush_shapes() {
         vec!["b".to_string(), "a".to_string()]
     );
     assert_eq!(db.list_move("missing", "dest", false, true).unwrap(), None);
+
+    db.insert_string_ref("plain-destination", "value");
+    assert!(
+        db.list_move("source", "plain-destination", false, true)
+            .is_err()
+    );
+    assert_eq!(
+        db.list_range("source", 0, -1).unwrap(),
+        vec!["b".to_string(), "a".to_string()]
+    );
 }
 
 #[test]

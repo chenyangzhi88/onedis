@@ -125,6 +125,108 @@ fn integer_increment_rejects_complex_type_after_overwrite() {
 }
 
 #[tokio::test]
+async fn concurrent_set_nx_has_exactly_one_winner() {
+    let db = Arc::new(test_db());
+    let mut tasks = Vec::new();
+    for index in 0..16 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.set_string_bytes_async(
+                "set-nx-race".to_string(),
+                format!("value-{index}").into_bytes(),
+                SetExpiration::Clear,
+                SetCondition::Nx,
+                false,
+            )
+            .await
+            .unwrap()
+        }));
+    }
+
+    let mut winners = 0;
+    for task in tasks {
+        if matches!(task.await.unwrap(), SetOutcome::Set { .. }) {
+            winners += 1;
+        }
+    }
+    assert_eq!(winners, 1);
+}
+
+#[tokio::test]
+async fn concurrent_msetnx_has_exactly_one_winner() {
+    let db = Arc::new(test_db());
+    let mut tasks = Vec::new();
+    for index in 0..16 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.insert_string_bytes_many_nx_async(vec![
+                (
+                    "msetnx-shared".to_string(),
+                    format!("value-{index}").into_bytes(),
+                ),
+                (format!("msetnx-side-{index}"), b"side".to_vec()),
+            ])
+            .await
+        }));
+    }
+
+    let mut winners = 0;
+    for task in tasks {
+        winners += usize::from(task.await.unwrap());
+    }
+    assert_eq!(winners, 1);
+    assert_eq!(
+        (0..16)
+            .filter(|index| db.exists(&format!("msetnx-side-{index}")))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_async_integer_updates_do_not_lose_writes() {
+    let db = Arc::new(test_db());
+    let mut tasks = Vec::new();
+    for _ in 0..32 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.update_integer_string_async("integer-rmw-race", |current| current.checked_add(1))
+                .await
+                .unwrap()
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(
+        db.get_string_async("integer-rmw-race").await.unwrap(),
+        Some("32".to_string())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_async_bit_updates_do_not_lose_writes() {
+    let db = Arc::new(test_db());
+    let mut tasks = Vec::new();
+    for offset in 0..32 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.string_set_bit_async("bitmap-race", offset, 1)
+                .await
+                .unwrap()
+        }));
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), 0);
+    }
+    assert_eq!(
+        db.get_string_bytes_async("bitmap-race").await.unwrap(),
+        Some(vec![0xff; 4])
+    );
+}
+
+#[tokio::test]
 async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
     let db = test_db();
 
@@ -149,7 +251,7 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
         Some(b"v2".to_vec())
     );
 
-    assert!(db.insert_string_bytes_many_nx(Vec::new()) == false);
+    assert!(!db.insert_string_bytes_many_nx(Vec::new()));
     assert!(db.insert_string_bytes_many_nx(vec![("nx-a".to_string(), b"1".to_vec())]));
     assert!(!db.insert_string_bytes_many_nx(vec![("nx-a".to_string(), b"2".to_vec())]));
     assert!(!db.insert_string_bytes_many_nx_async(Vec::new()).await);
@@ -215,6 +317,13 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
     assert_eq!(db.string_set_bit_async("bits", 3, 1).await.unwrap(), 0);
     assert_eq!(db.string_set_bit("bits", 3, 0).unwrap(), 1);
     assert!(db.string_set_bit("bits", 0, 2).is_err());
+    db.insert_string("ttl-bits".to_string(), "x".to_string(), Some(30_000));
+    db.string_set_bit("ttl-bits", 0, 1).unwrap();
+    assert!(db.ttl_millis_readonly("ttl-bits") > 0);
+    db.string_write_bits_async("ttl-bits", 1, 3, 0b101)
+        .await
+        .unwrap();
+    assert!(db.ttl_millis_readonly("ttl-bits") > 0);
     db.string_write_bits("bits", 0, 8, 0b1010_0101).unwrap();
     assert_eq!(
         db.string_read_bits("bits", 0, 8, false).unwrap(),
@@ -251,7 +360,7 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
         db.string_bitpos_async("bits", 0, Some(99), None)
             .await
             .unwrap(),
-        8
+        -1
     );
 
     assert_eq!(

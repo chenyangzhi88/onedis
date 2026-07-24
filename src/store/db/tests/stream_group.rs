@@ -1,5 +1,63 @@
 use super::*;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_stream_group_reads_deliver_each_new_entry_once() {
+    let db = Arc::new(test_db());
+    for sequence in 1..=32 {
+        db.stream_add_async(
+            "concurrent-stream",
+            Some(StreamId {
+                ms: sequence,
+                seq: 0,
+            }),
+            &[("field".to_string(), sequence.to_string())],
+        )
+        .await
+        .unwrap();
+    }
+    db.stream_group_create_async(
+        "concurrent-stream",
+        "workers",
+        StreamId { ms: 0, seq: 0 },
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mut tasks = Vec::new();
+    for worker in 0..8 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.stream_read_group_async(
+                "workers",
+                &format!("worker-{worker}"),
+                &[("concurrent-stream".to_string(), StreamReadGroupStart::New)],
+                Some(4),
+                false,
+            )
+            .await
+            .unwrap()
+        }));
+    }
+
+    let mut delivered = HashSet::new();
+    for task in tasks {
+        for (_, entries) in task.await.unwrap() {
+            for entry in entries {
+                assert!(delivered.insert(entry.id));
+            }
+        }
+    }
+    assert_eq!(delivered.len(), 32);
+    assert_eq!(
+        db.stream_pending_summary_async("concurrent-stream", "workers")
+            .await
+            .unwrap()
+            .total,
+        32
+    );
+}
+
 #[tokio::test]
 async fn stream_group_pending_claim_autoclaim_and_async_paths_cover_edges() {
     let db = test_db();
@@ -85,7 +143,7 @@ async fn stream_group_pending_claim_autoclaim_and_async_paths_cover_edges() {
         .stream_auto_claim("s", "g", "c3", 0, StreamId { ms: 0, seq: 0 }, 10)
         .unwrap();
     assert_eq!(auto.entries.len(), 1);
-    assert_eq!(db.stream_ack("s", "g", &[id1, id2]).unwrap(), 1);
+    assert_eq!(db.stream_ack("s", "g", &[id1, id1, id2]).unwrap(), 1);
 
     let read_pending = db
         .stream_read_group(

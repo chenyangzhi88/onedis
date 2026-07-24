@@ -10,10 +10,10 @@ impl Db {
     }
 
     pub(in crate::store::db) fn get_expire_and_version(&self, key: &str) -> (u64, u64) {
-        if let Some(raw) = self.store.get_raw(&main_key(self.db_index, key)) {
-            if let Some(header) = decode_meta_header(&raw) {
-                return (header.expire_ms, header.version);
-            }
+        if let Some(raw) = self.store.get_raw(&main_key(self.db_index, key))
+            && let Some(header) = decode_meta_header(&raw)
+        {
+            return (header.expire_ms, header.version);
         }
         (0, 0)
     }

@@ -74,13 +74,7 @@ impl Db {
         keys: &[String],
     ) -> Result<usize, Error> {
         let difference = self.set_diff_async(keys).await?;
-        let len = difference.len();
-        if len == 0 {
-            self.remove(destination);
-        } else {
-            self.insert(destination.to_string(), Structure::Set(difference));
-        }
-        Ok(len)
+        self.set_store_members_async(destination, difference).await
     }
 
     pub fn set_intersection(&self, keys: &[String]) -> Result<HashSet<String>, Error> {
@@ -150,13 +144,8 @@ impl Db {
         keys: &[String],
     ) -> Result<usize, Error> {
         let intersection = self.set_intersection_async(keys).await?;
-        let len = intersection.len();
-        if len == 0 {
-            self.delete_key(destination);
-        } else {
-            self.insert(destination.to_string(), Structure::Set(intersection));
-        }
-        Ok(len)
+        self.set_store_members_async(destination, intersection)
+            .await
     }
 
     pub async fn set_union_async(&self, keys: &[String]) -> Result<HashSet<String>, Error> {
@@ -175,12 +164,22 @@ impl Db {
         keys: &[String],
     ) -> Result<usize, Error> {
         let union = self.set_union_async(keys).await?;
-        let len = union.len();
+        self.set_store_members_async(destination, union).await
+    }
+
+    async fn set_store_members_async(
+        &self,
+        destination: &str,
+        members: HashSet<String>,
+    ) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(destination).lock().await;
+        self.delete_key_internal_async(destination, true).await;
+        let len = members.len();
         if len == 0 {
-            self.delete_key(destination);
-        } else {
-            self.insert(destination.to_string(), Structure::Set(union));
+            return Ok(0);
         }
+        let members = members.into_iter().collect::<Vec<_>>();
+        self.set_add_async_unlocked(destination, &members).await?;
         Ok(len)
     }
 }

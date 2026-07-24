@@ -9,7 +9,7 @@ impl Db {
         };
         if meta.head >= meta.tail {
             let mut batch = WriteBatch::new();
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty(&batch);
             self.remove_list_meta_cache_if_non_transactional(key);
             return Ok(None);
@@ -24,7 +24,7 @@ impl Db {
         batch.delete(&item_key);
         meta.head += 1;
         if meta.head >= meta.tail {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
             batch.put(
                 &self.mk(key),
@@ -44,13 +44,21 @@ impl Db {
     }
 
     pub async fn list_pop_left_async(&self, key: &str) -> Result<Option<String>, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        self.list_pop_left_async_unlocked(key).await
+    }
+
+    pub(in crate::store::db) async fn list_pop_left_async_unlocked(
+        &self,
+        key: &str,
+    ) -> Result<Option<String>, Error> {
         let mut meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(None),
         };
         if meta.head >= meta.tail {
             let mut batch = WriteBatch::new();
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty_async(&batch).await;
             self.remove_list_meta_cache_if_non_transactional(key);
             return Ok(None);
@@ -66,7 +74,7 @@ impl Db {
         batch.delete(&item_key);
         meta.head += 1;
         if meta.head >= meta.tail {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
             batch.put(
                 &self.mk(key),
@@ -93,7 +101,7 @@ impl Db {
         };
         if meta.head >= meta.tail {
             let mut batch = WriteBatch::new();
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty(&batch);
             self.remove_list_meta_cache_if_non_transactional(key);
             return Ok(None);
@@ -108,7 +116,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         batch.delete(&item_key);
         if meta.head >= meta.tail {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
             batch.put(
                 &self.mk(key),
@@ -128,13 +136,21 @@ impl Db {
     }
 
     pub async fn list_pop_right_async(&self, key: &str) -> Result<Option<String>, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        self.list_pop_right_async_unlocked(key).await
+    }
+
+    pub(in crate::store::db) async fn list_pop_right_async_unlocked(
+        &self,
+        key: &str,
+    ) -> Result<Option<String>, Error> {
         let mut meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(None),
         };
         if meta.head >= meta.tail {
             let mut batch = WriteBatch::new();
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty_async(&batch).await;
             self.remove_list_meta_cache_if_non_transactional(key);
             return Ok(None);
@@ -150,7 +166,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         batch.delete(&item_key);
         if meta.head >= meta.tail {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
             batch.put(
                 &self.mk(key),

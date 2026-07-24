@@ -13,6 +13,7 @@ impl WasmCommand {
                 function,
                 args,
                 read_only,
+                ..
             } => {
                 let started = Instant::now();
                 let result = call_wasm(registry, db, &name, &function, &args, read_only).await;

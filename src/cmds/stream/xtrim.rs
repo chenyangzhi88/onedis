@@ -14,7 +14,7 @@ impl Xtrim {
                 "ERR wrong number of arguments for 'xtrim' command",
             ));
         }
-        if frame.get_arg(2).unwrap().to_ascii_uppercase() != "MAXLEN" {
+        if !frame.get_arg(2).unwrap().eq_ignore_ascii_case("MAXLEN") {
             return Err(Error::msg("ERR syntax error"));
         }
         let threshold_idx = if frame.get_arg(3).unwrap() == "=" || frame.get_arg(3).unwrap() == "~"

@@ -1,5 +1,26 @@
 use super::*;
 
+#[tokio::test]
+async fn async_batch_string_overwrite_removes_old_collection_subkeys() {
+    let db = test_db();
+    db.hash_set_async("batch-overwrite", "field", "value")
+        .await
+        .unwrap();
+    let raw = db.store.get_raw(&db.mk("batch-overwrite")).unwrap();
+    let version = decode_meta_header(&raw).unwrap().version;
+    let prefix = hash_field_prefix(db.db_index, "batch-overwrite", version);
+    assert_eq!(db.store.scan_prefix_raw_async(&prefix).await.len(), 1);
+
+    db.insert_string_bytes_many_async(vec![("batch-overwrite".to_string(), b"plain".to_vec())])
+        .await;
+
+    assert_eq!(
+        db.get_string_bytes_async("batch-overwrite").await.unwrap(),
+        Some(b"plain".to_vec())
+    );
+    assert!(db.store.scan_prefix_raw_async(&prefix).await.is_empty());
+}
+
 #[test]
 fn stream_add_len_and_range_use_ordered_ids() {
     let db = test_db();
@@ -150,6 +171,17 @@ fn stream_delete_removes_entry_namespace() {
     );
 }
 
+#[test]
+fn stream_delete_counts_duplicate_ids_once() {
+    let db = test_db();
+    let id = StreamId { ms: 1, seq: 0 };
+    db.stream_add("events", Some(id), &[("f".to_string(), "v".to_string())])
+        .unwrap();
+
+    assert_eq!(db.stream_delete("events", &[id, id]).unwrap(), 1);
+    assert_eq!(db.stream_len("events").unwrap(), 0);
+}
+
 #[tokio::test]
 async fn string_batch_async_helpers_cover_empty_versioned_and_byte_key_paths() {
     let db = test_db();
@@ -199,6 +231,17 @@ async fn string_batch_async_helpers_cover_empty_versioned_and_byte_key_paths() {
     )])
     .await;
     assert_eq!(db.get_string("raw:b").unwrap(), Some("2".to_string()));
+}
+
+#[tokio::test]
+async fn borrowed_string_batch_publishes_watch_mutations() {
+    let db = test_db();
+    let (key_version, db_version) = db.watch_version_snapshot("watched-fast-set");
+
+    db.insert_string_bytes_refs_async(&[("watched-fast-set", b"value")])
+        .await;
+
+    assert!(db.watch_version_changed("watched-fast-set", key_version, db_version));
 }
 
 #[tokio::test]

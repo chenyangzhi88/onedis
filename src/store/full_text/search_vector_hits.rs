@@ -6,8 +6,7 @@ impl Db {
         runtime: &Arc<RwLock<FullTextRuntime>>,
         ast: &FullTextQueryAst,
         options: &FullTextSearchOptions,
-        deadline: Instant,
-        fail_on_timeout: bool,
+        timeout: FullTextSearchDeadline,
     ) -> Result<Vec<FullTextLiveHit>, Error> {
         let plan = fulltext_vector_plan(ast)?;
         let query_vector = parse_fulltext_vector_param(&options.params, &plan.blob_param)?;
@@ -36,8 +35,8 @@ impl Db {
                 &vector_index,
                 vector_field,
                 &query_vector,
-                deadline,
-                fail_on_timeout,
+                timeout.at,
+                timeout.fail_on_timeout,
             )?
         } else {
             let vector_limit = match plan.kind {
@@ -63,7 +62,7 @@ impl Db {
         };
         let mut live = Vec::new();
         for result in vector_results {
-            if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
+            if fulltext_search_timeout_reached(timeout.at, timeout.fail_on_timeout)? {
                 break;
             }
             if allow
@@ -81,7 +80,7 @@ impl Db {
                 continue;
             }
             if let Some(mut hit) =
-                self.fulltext_live_hit_from_source(meta, &options, result.id, result.score)?
+                self.fulltext_live_hit_from_source(meta, options, result.id, result.score)?
             {
                 let score = format_fulltext_score(result.score);
                 hit.fields.push(("__vector_score".to_string(), score.clone()));

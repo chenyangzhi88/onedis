@@ -64,10 +64,9 @@ impl Db {
                                     continue;
                                 }
                                 let fields = self.hash_get_all(&record.key)?;
-                                if fields.is_empty() {
-                                    runtime.delete_hash(&record.key);
-                                    self.fulltext_delete_vectors(index, meta, &record.key)?;
-                                } else if !fulltext_index_filter_matches(meta, &fields)? {
+                                if fields.is_empty()
+                                    || !fulltext_index_filter_matches(meta, &fields)?
+                                {
                                     runtime.delete_hash(&record.key);
                                     self.fulltext_delete_vectors(index, meta, &record.key)?;
                                 } else {

@@ -1,6 +1,9 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    frame::Frame,
+    store::db::{Db, SetCondition, SetExpiration, SetOutcome},
+};
 
 pub struct Setnx {
     key: String,
@@ -35,12 +38,18 @@ impl Setnx {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        if db.exists(&self.key) {
-            return Ok(Frame::Integer(0));
-        }
-
-        db.insert_string_bytes_async(self.key, self.value, None)
-            .await;
-        Ok(Frame::Integer(1))
+        let outcome = db
+            .set_string_bytes_async(
+                self.key,
+                self.value,
+                SetExpiration::Clear,
+                SetCondition::Nx,
+                false,
+            )
+            .await?;
+        Ok(Frame::Integer(i64::from(matches!(
+            outcome,
+            SetOutcome::Set { .. }
+        ))))
     }
 }

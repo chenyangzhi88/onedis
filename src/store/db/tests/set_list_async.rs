@@ -48,6 +48,13 @@ async fn set_async_store_random_move_and_error_paths_cover_edges() {
     assert!(db.set_move_async("left", "right", "a").await.unwrap());
     assert!(!db.set_move_async("left", "right", "missing").await.unwrap());
     assert!(db.set_contains("right", "a").unwrap());
+    db.insert_string("wrong-destination".to_string(), "value".to_string(), None);
+    assert!(
+        db.set_move_async("left", "wrong-destination", "b")
+            .await
+            .is_err()
+    );
+    assert!(db.set_contains("left", "b").unwrap());
 
     assert_eq!(
         db.set_intersection_card(&["right".to_string(), "left".to_string()], 1)

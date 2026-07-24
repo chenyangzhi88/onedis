@@ -86,12 +86,13 @@ impl Db {
         min: &crate::cmds::sorted_set::zrange::LexBound,
         max: &crate::cmds::sorted_set::zrange::LexBound,
     ) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let members = self
             .zset_range_by_lex_async(key, min, max)
             .await?
             .into_iter()
             .map(|(member, _)| member)
             .collect::<Vec<_>>();
-        self.zset_remove_async(key, &members).await
+        self.zset_remove_async_unlocked(key, &members).await
     }
 }

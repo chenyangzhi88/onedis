@@ -116,7 +116,7 @@ fn fulltext_aggregate_reduce(
             rows.first()
                 .map(|row| {
                     eval_fulltext_aggregate_expression(arg, row)
-                        .unwrap_or_else(|_| FullTextAggregateValue::Null)
+                        .unwrap_or(FullTextAggregateValue::Null)
                 })
                 .unwrap_or(FullTextAggregateValue::Null)
         }
@@ -129,7 +129,7 @@ fn fulltext_aggregate_reduce(
                 rows.iter()
                     .map(|row| {
                         eval_fulltext_aggregate_expression(arg, row)
-                            .unwrap_or_else(|_| FullTextAggregateValue::Null)
+                            .unwrap_or(FullTextAggregateValue::Null)
                     })
                     .collect(),
             )

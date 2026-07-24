@@ -49,11 +49,10 @@ impl Lmpop {
 
         let mut count = 1;
         if frame.arg_len() == direction_idx + 3 {
-            if frame
+            if !frame
                 .get_arg(direction_idx + 1)
                 .unwrap()
-                .to_ascii_uppercase()
-                != "COUNT"
+                .eq_ignore_ascii_case("COUNT")
             {
                 return Err(Error::msg("ERR syntax error"));
             }

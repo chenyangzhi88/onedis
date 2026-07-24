@@ -63,63 +63,43 @@ impl Handler {
         let txn_db = db.transactional_view()?;
         let frame = match command {
             Command::Blpop(blpop) => {
-                match txn_db
+                txn_db
                     .list_multi_pop_async(&blpop.keys, true, 1)
                     .await?
-                    .and_then(|(key, mut values)| values.pop().map(|value| (key, value)))
-                {
-                    Some((key, value)) => Some(Frame::Array(vec![
+                    .and_then(|(key, mut values)| values.pop().map(|value| (key, value))).map(|(key, value)| Frame::Array(vec![
                         Frame::bulk_string(key),
                         Frame::bulk_string(value),
-                    ])),
-                    None => None,
-                }
+                    ]))
             }
-            Command::Brpop(brpop) => match txn_db
+            Command::Brpop(brpop) => txn_db
                 .list_multi_pop_async(&brpop.inner.keys, false, 1)
                 .await?
-                .and_then(|(key, mut values)| values.pop().map(|value| (key, value)))
-            {
-                Some((key, value)) => Some(Frame::Array(vec![
+                .and_then(|(key, mut values)| values.pop().map(|value| (key, value))).map(|(key, value)| Frame::Array(vec![
                     Frame::bulk_string(key),
                     Frame::bulk_string(value),
                 ])),
-                None => None,
-            },
             Command::Brpoplpush(command) => {
-                match txn_db
+                txn_db
                     .list_move_async(&command.source, &command.destination, false, true)
-                    .await?
-                {
-                    Some(value) => Some(Frame::bulk_string(value)),
-                    None => None,
-                }
+                    .await?.map(Frame::bulk_string)
             }
             Command::Blmove(command) => {
-                match txn_db
+                txn_db
                     .list_move_async(
                         &command.source,
                         &command.destination,
                         command.source_side.is_left(),
                         command.destination_side.is_left(),
                     )
-                    .await?
-                {
-                    Some(value) => Some(Frame::bulk_string(value)),
-                    None => None,
-                }
+                    .await?.map(Frame::bulk_string)
             }
             Command::Blmpop(command) => {
-                match txn_db
+                txn_db
                     .list_multi_pop_async(&command.keys, command.left, command.count)
-                    .await?
-                {
-                    Some((key, values)) => Some(Frame::Array(vec![
+                    .await?.map(|(key, values)| Frame::Array(vec![
                         Frame::bulk_string(key),
                         Frame::Array(values.into_iter().map(Frame::bulk_string).collect()),
-                    ])),
-                    None => None,
-                }
+                    ]))
             }
             _ => unreachable!("non blocking-list command routed to blocking list handler"),
         };

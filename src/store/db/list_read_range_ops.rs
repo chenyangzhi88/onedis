@@ -40,7 +40,7 @@ impl Db {
     }
 
     pub async fn list_index_async(&self, key: &str, index: i64) -> Result<Option<String>, Error> {
-        let meta = match self.list_meta(key)? {
+        let meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(None),
         };

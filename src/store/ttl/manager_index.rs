@@ -127,7 +127,10 @@ impl TtlManager {
         }
 
         for db_idx in 0..num_dbs.max(1) {
-            if let Some(raw) = self.store_for_db(db_idx).get_raw(VERSION_COUNTER_KEY)
+            if let Some(raw) = self
+                .store_for_db(db_idx)
+                .get_raw_async(VERSION_COUNTER_KEY)
+                .await
                 && raw.len() == 8
             {
                 let max_version = u64::from_be_bytes(raw[0..8].try_into().unwrap());
@@ -150,7 +153,7 @@ impl TtlManager {
             reserve_version_high_water_to_batch(&mut batch, max_version);
             if batch.count() > 0 {
                 for db_idx in 0..num_dbs.max(1) {
-                    self.store_for_db(db_idx).write_batch(&batch);
+                    self.store_for_db(db_idx).write_batch_async(&batch).await;
                 }
             }
         }

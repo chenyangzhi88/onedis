@@ -17,6 +17,7 @@ impl Db {
             self.write_batch_if_not_empty(&batch);
         }
         self.fulltext_clear_runtimes_for_db();
+        self.vector_runtimes.remove_db(self.db_index);
     }
 
     pub async fn flushdb_async(&self) {
@@ -33,8 +34,9 @@ impl Db {
             .remove_db_to_batch_async(&mut batch, self.db_index)
             .await;
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty_async(&batch).await;
         }
         self.fulltext_clear_runtimes_for_db();
+        self.vector_runtimes.remove_db(self.db_index);
     }
 }

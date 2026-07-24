@@ -9,7 +9,11 @@ impl Db {
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let mut acked = 0usize;
         let mut batch = WriteBatch::new();
+        let mut seen_ids = std::collections::BTreeSet::new();
         for id in ids {
+            if !seen_ids.insert(*id) {
+                continue;
+            }
             let key = stream_pel_key(self.db_index, key, meta.version, group, *id);
             if self.store.get_raw(&key).is_some() {
                 batch.delete(&key);
@@ -29,6 +33,16 @@ impl Db {
         group: &str,
         ids: &[StreamId],
     ) -> Result<usize, Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
+        self.stream_ack_async_unlocked(key, group, ids).await
+    }
+
+    pub(in crate::store::db) async fn stream_ack_async_unlocked(
+        &self,
+        key: &str,
+        group: &str,
+        ids: &[StreamId],
+    ) -> Result<usize, Error> {
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(0);
         };
@@ -37,7 +51,11 @@ impl Db {
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let mut acked = 0usize;
         let mut batch = WriteBatch::new();
+        let mut seen_ids = std::collections::BTreeSet::new();
         for id in ids {
+            if !seen_ids.insert(*id) {
+                continue;
+            }
             let key = stream_pel_key(self.db_index, key, meta.version, group, *id);
             if self.store.get_raw_async(&key).await.is_some() {
                 batch.delete(&key);
@@ -230,6 +248,7 @@ impl Db {
         min_idle_ms: u64,
         ids: &[StreamId],
     ) -> Result<Vec<StreamEntry>, Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
         global_metrics().record_stream_claim();
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(Vec::new());
@@ -339,6 +358,7 @@ impl Db {
         start: StreamId,
         count: usize,
     ) -> Result<StreamClaimedEntries, Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
         global_metrics().record_stream_autoclaim();
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(StreamClaimedEntries {

@@ -84,7 +84,13 @@ impl KvStore {
         upper_bound: Option<Vec<u8>>,
         limit: usize,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.scan_range_raw_limited(lower_bound, upper_bound, limit)
+        let store = self.clone();
+        let lower_bound = lower_bound.to_vec();
+        tokio::task::spawn_blocking(move || {
+            store.scan_range_raw_limited(&lower_bound, upper_bound, limit)
+        })
+        .await
+        .expect("kv_engine scan worker panicked")
     }
 
     pub fn scan_range_raw_visit<F>(
@@ -167,7 +173,50 @@ impl KvStore {
     where
         F: FnMut(&[u8], &[u8]) -> bool + Send,
     {
-        self.scan_range_raw_visit(lower_bound, upper_bound, limit, visitor)
+        const VISIT_BATCH_SIZE: usize = 1024;
+        if limit == 0 {
+            return 0;
+        }
+        let mut visitor = visitor;
+        let mut seen = 0usize;
+        let mut next_lower_bound = lower_bound.to_vec();
+        while seen < limit {
+            let batch_limit = limit.saturating_sub(seen).min(VISIT_BATCH_SIZE);
+            let entries = self
+                .scan_range_raw_limited_async(
+                    &next_lower_bound,
+                    upper_bound.clone(),
+                    batch_limit,
+                )
+                .await;
+            if entries.is_empty() {
+                break;
+            }
+            let entry_count = entries.len();
+            let mut last_key = None;
+            for (key, value) in entries {
+                last_key = Some(key.clone());
+                seen += 1;
+                if !visitor(&key, &value) {
+                    return seen;
+                }
+            }
+            if entry_count < batch_limit {
+                break;
+            }
+            let Some(mut last_key) = last_key else {
+                break;
+            };
+            last_key.push(0);
+            if upper_bound
+                .as_ref()
+                .is_some_and(|upper| last_key.as_slice() >= upper.as_slice())
+            {
+                break;
+            }
+            next_lower_bound = last_key;
+        }
+        seen
     }
 
     /// 范围删除 [start, end)，用于批量清理 sub-keys。

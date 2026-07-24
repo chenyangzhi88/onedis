@@ -140,6 +140,14 @@ impl Handler {
             Command::Unknown(unknown) => unknown.apply(),
             Command::Ping(ping) => ping.apply(),
             Command::Echo(echo) => echo.apply(),
+            Command::Lua(lua) => {
+                let db = self.session.get_db().clone();
+                let session_manager = self.session_manager.clone();
+                let user = self.session.user().to_string();
+                let authorizer: crate::lua::LuaCommandAuthorizer =
+                    Arc::new(move |command| session_manager.acl_allows(&user, command));
+                lua.apply_authorized(&db, authorizer)
+            }
             _ => {
                 let db = self.session.get_db().clone();
                 if Self::can_apply_direct(&command) {

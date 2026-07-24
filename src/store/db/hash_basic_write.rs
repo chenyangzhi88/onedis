@@ -53,6 +53,16 @@ impl Db {
     }
 
     pub async fn hash_set_async(&self, key: &str, field: &str, value: &str) -> Result<bool, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        self.hash_set_async_unlocked(key, field, value).await
+    }
+
+    async fn hash_set_async_unlocked(
+        &self,
+        key: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<bool, Error> {
         for _ in 0..64 {
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
@@ -174,6 +184,15 @@ impl Db {
         key: &str,
         fields: &[(String, String)],
     ) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        self.hash_set_many_async_unlocked(key, fields).await
+    }
+
+    async fn hash_set_many_async_unlocked(
+        &self,
+        key: &str,
+        fields: &[(String, String)],
+    ) -> Result<usize, Error> {
         for _ in 0..64 {
             let key_bytes = self.mk(key);
             let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
@@ -258,11 +277,11 @@ impl Db {
     /// 删除 hash fields，返回实际删除的字段数量。
     pub fn hash_delete(&self, key: &str, fields: &[String]) -> Result<usize, Error> {
         let meta = self.hash_expire_ms(key)?;
-        let Some((_, version)) = meta else {
+        let Some((expire_ms, version)) = meta else {
             return Ok(0);
         };
 
-        let existing_fields = self.hash_entries_raw(key, version);
+        let existing_fields = self.hash_live_entries_raw(key, version);
         let existing_field_keys: std::collections::HashSet<Vec<u8>> = existing_fields
             .iter()
             .map(|(field, _)| {
@@ -272,7 +291,11 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         let mut deleted = 0usize;
+        let mut seen_fields = HashSet::new();
         for field in fields {
+            if !seen_fields.insert(field) {
+                continue;
+            }
             let field_key = hash_field_key(self.db_index, key, version, field);
             if existing_field_keys.contains(&field_key) {
                 batch.delete(&field_key);
@@ -282,7 +305,7 @@ impl Db {
         }
 
         if deleted > 0 && existing_fields.len() == deleted {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, expire_ms);
         }
 
         if batch.count() > 0 {
@@ -299,12 +322,21 @@ impl Db {
     }
 
     pub async fn hash_delete_async(&self, key: &str, fields: &[String]) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        self.hash_delete_async_unlocked(key, fields).await
+    }
+
+    pub(in crate::store::db) async fn hash_delete_async_unlocked(
+        &self,
+        key: &str,
+        fields: &[String],
+    ) -> Result<usize, Error> {
         let meta = self.hash_expire_ms_async(key).await?;
-        let Some((_, version)) = meta else {
+        let Some((expire_ms, version)) = meta else {
             return Ok(0);
         };
 
-        let existing_fields = self.hash_entries_raw(key, version);
+        let existing_fields = self.hash_live_entries_raw_async(key, version).await;
         let existing_field_keys: std::collections::HashSet<Vec<u8>> = existing_fields
             .iter()
             .map(|(field, _)| {
@@ -314,7 +346,11 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         let mut deleted = 0usize;
+        let mut seen_fields = HashSet::new();
         for field in fields {
+            if !seen_fields.insert(field) {
+                continue;
+            }
             let field_key = hash_field_key(self.db_index, key, version, field);
             if existing_field_keys.contains(&field_key) {
                 batch.delete(&field_key);
@@ -324,7 +360,7 @@ impl Db {
         }
 
         if deleted > 0 && existing_fields.len() == deleted {
-            batch.delete(&self.mk(key));
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, expire_ms);
         }
 
         if batch.count() > 0 {

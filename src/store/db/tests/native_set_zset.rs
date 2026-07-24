@@ -154,7 +154,7 @@ fn zset_native_ops_use_dual_index_storage() {
             &[
                 (2.0, "bob".to_string()),
                 (1.0, "alice".to_string()),
-                (2.0, "bob".to_string()),
+                (4.0, "bob".to_string()),
             ],
         )
         .unwrap(),
@@ -162,6 +162,7 @@ fn zset_native_ops_use_dual_index_storage() {
     );
     assert_eq!(db.zset_card("leaders").unwrap(), 2);
     assert_eq!(db.zset_score("leaders", "alice").unwrap(), Some(1.0));
+    assert_eq!(db.zset_score("leaders", "bob").unwrap(), Some(4.0));
 
     assert_eq!(
         db.zset_add("leaders", &[(3.0, "alice".to_string())])
@@ -205,7 +206,11 @@ fn zset_remove_cleans_up_meta_when_empty() {
             .unwrap(),
         1
     );
-    assert_eq!(db.zset_remove("leaders", &["bob".to_string()]).unwrap(), 1);
+    assert_eq!(
+        db.zset_remove("leaders", &["bob".to_string(), "bob".to_string()])
+            .unwrap(),
+        1
+    );
     assert_eq!(db.zset_card("leaders").unwrap(), 0);
     assert!(!db.exists("leaders"));
 }

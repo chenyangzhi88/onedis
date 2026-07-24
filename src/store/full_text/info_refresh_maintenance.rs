@@ -1,6 +1,9 @@
 impl Db {
     pub(crate) fn fulltext_clear_runtimes_for_db(&self) {
         self.fulltext_runtimes.remove_db(self.db_index);
+        if let Err(err) = delete_fulltext_aggregate_cursors_for_db(self.db_index) {
+            log::error!("failed to clear fulltext cursors for DB {}: {err}", self.db_index);
+        }
     }
 
     pub(crate) fn fulltext_maintenance_tick(&self) -> Result<(), Error> {
@@ -24,6 +27,11 @@ impl Db {
         Ok(())
     }
 
+    pub(crate) async fn fulltext_maintenance_tick_async(&self) -> Result<(), Error> {
+        self.run_blocking_store_task(|db| db.fulltext_maintenance_tick())
+            .await
+    }
+
     pub(crate) fn fulltext_request_refresh(&self, key: &str) -> Result<(), Error> {
         self.fulltext_request_refresh_for_source(key, FullTextSourceType::Hash)
     }
@@ -35,6 +43,7 @@ impl Db {
     pub(crate) fn fulltext_reconcile_committed_keys(
         &self,
         raw_keys: &[Vec<u8>],
+        refresh_immediately: bool,
     ) -> Result<(), Error> {
         let mut keys = HashSet::new();
         for raw_key in raw_keys {
@@ -66,8 +75,10 @@ impl Db {
             }
             if batch.count() > 0 {
                 self.store.write_batch_direct(&batch);
-                self.fulltext_request_refresh(&key)?;
-                self.fulltext_request_json_refresh(&key)?;
+                if refresh_immediately {
+                    self.fulltext_request_refresh(&key)?;
+                    self.fulltext_request_json_refresh(&key)?;
+                }
             }
         }
         Ok(())

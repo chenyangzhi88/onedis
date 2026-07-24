@@ -67,7 +67,7 @@ impl Db {
         if let Some(value) = decode_string_bytes(&raw) {
             Ok(Some(value))
         } else {
-            Err(Error::msg("Type parsing error"))
+            Err(Error::msg(WRONG_TYPE_ERROR))
         }
     }
 
@@ -78,7 +78,7 @@ impl Db {
         if let Some(value) = decode_string_bytes(&raw) {
             Ok(Some(value))
         } else {
-            Err(Error::msg("Type parsing error"))
+            Err(Error::msg(WRONG_TYPE_ERROR))
         }
     }
 }

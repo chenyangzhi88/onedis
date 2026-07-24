@@ -165,7 +165,7 @@ fn parse_fulltext_vector_bytes(raw: &[u8]) -> Result<Vec<f32>, Error> {
     {
         return Ok(vector);
     }
-    if raw.is_empty() || raw.len() % 4 != 0 {
+    if raw.is_empty() || !raw.len().is_multiple_of(4) {
         return Err(Error::msg("ERR invalid vector blob"));
     }
     let mut out = Vec::with_capacity(raw.len() / 4);

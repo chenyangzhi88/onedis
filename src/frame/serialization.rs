@@ -1,62 +1,70 @@
 use super::*;
 
-impl Frame {
-    /**
-     * 将 frame 转化为字符串
-     *
-     * @param self 本身
-     */
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for Frame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Frame::Ok => String::from("OK"),
-            Frame::Integer(i) => i.to_string(),
-            Frame::RDBFile(data) => format!("[RDBFile {} bytes]", data.len()),
-            Frame::SimpleString(s) => s.clone(),
-            Frame::BulkString(s) => String::from_utf8_lossy(s).into_owned(),
-            Frame::Error(e) => e.clone(),
-            Frame::Null => String::new(),
+            Frame::Ok => formatter.write_str("OK"),
+            Frame::Integer(value) => write!(formatter, "{value}"),
+            Frame::SimpleString(value) | Frame::Error(value) => formatter.write_str(value),
+            Frame::BulkString(value) => formatter.write_str(&String::from_utf8_lossy(value)),
+            Frame::Null => Ok(()),
             Frame::Array(arr) => {
                 let mut result = String::new();
                 for item in arr {
-                    result.push_str(&item.to_string());
+                    use std::fmt::Write;
+                    write!(&mut result, "{item}")?;
                     result.push(' ');
                 }
-                result.trim_end().to_string()
+                formatter.write_str(result.trim_end())
             }
         }
     }
+}
 
-    /**
-     * 将 frame 转换为 bytes
-     *
-     * @param self 本身
-     */
+impl Frame {
     pub fn as_bytes(&self) -> Vec<u8> {
-        match self {
-            Frame::Ok => b"+OK\r\n".to_vec(),
-            Frame::Integer(i) => format!(":{}\r\n", i).into_bytes(),
-            Frame::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
-            Frame::Error(e) => format!("-{}\r\n", e).into_bytes(),
-            Frame::Null => b"$-1\r\n".to_vec(),
-            Frame::RDBFile(data) => {
-                let mut bytes = format!("~{}\r\n", data.len()).into_bytes();
-                bytes.extend(data);
-                bytes.extend(b"\r\n");
-                bytes
-            }
-            Frame::Array(arr) => {
-                let mut bytes = format!("*{}\r\n", arr.len()).into_bytes();
-                for item in arr {
-                    bytes.extend(item.as_bytes());
+        let mut bytes = Vec::new();
+        let mut pending = vec![self];
+        while let Some(frame) = pending.pop() {
+            match frame {
+                Frame::Ok => bytes.extend_from_slice(b"+OK\r\n"),
+                Frame::Integer(value) => {
+                    bytes.push(b':');
+                    bytes.extend_from_slice(value.to_string().as_bytes());
+                    bytes.extend_from_slice(b"\r\n");
                 }
-                bytes
-            }
-            Frame::BulkString(s) => {
-                let mut bytes = format!("${}\r\n", s.len()).into_bytes();
-                bytes.extend(s);
-                bytes.extend(b"\r\n");
-                bytes
+                Frame::SimpleString(value) => {
+                    append_sanitized_line(&mut bytes, b'+', value);
+                }
+                Frame::Error(value) => append_sanitized_line(&mut bytes, b'-', value),
+                Frame::Null => bytes.extend_from_slice(b"$-1\r\n"),
+                Frame::Array(array) => {
+                    bytes.push(b'*');
+                    bytes.extend_from_slice(array.len().to_string().as_bytes());
+                    bytes.extend_from_slice(b"\r\n");
+                    pending.extend(array.iter().rev());
+                }
+                Frame::BulkString(value) => {
+                    bytes.push(b'$');
+                    bytes.extend_from_slice(value.len().to_string().as_bytes());
+                    bytes.extend_from_slice(b"\r\n");
+                    bytes.extend_from_slice(value);
+                    bytes.extend_from_slice(b"\r\n");
+                }
             }
         }
+        bytes
     }
+}
+
+fn append_sanitized_line(output: &mut Vec<u8>, prefix: u8, value: &str) {
+    output.push(prefix);
+    output.extend(value.as_bytes().iter().map(|byte| {
+        if matches!(byte, b'\r' | b'\n') {
+            b' '
+        } else {
+            *byte
+        }
+    }));
+    output.extend_from_slice(b"\r\n");
 }

@@ -103,12 +103,6 @@ fn unit_factor(unit: &str) -> Result<f64, Error> {
     }
 }
 
-fn shape_unit(shape: &GeoShape) -> String {
-    match shape {
-        GeoShape::Radius { unit, .. } | GeoShape::Box { unit, .. } => unit.clone(),
-    }
-}
-
 fn bulk_f(value: f64) -> Frame {
     Frame::bulk_string(format!("{:.17}", value))
 }

@@ -56,13 +56,13 @@ fn parse_err(args: &[&str]) -> String {
 
 fn bulk_members(frame: Frame) -> Vec<String> {
     let Frame::Array(values) = frame else {
-        panic!("expected array, got {}", frame.to_string());
+        panic!("expected array, got {}", frame);
     };
     let mut values = values
         .into_iter()
         .map(|value| match value {
             Frame::BulkString(bytes) => String::from_utf8(bytes).unwrap(),
-            other => panic!("expected bulk string, got {}", other.to_string()),
+            other => panic!("expected bulk string, got {}", other),
         })
         .collect::<Vec<_>>();
     values.sort();
@@ -195,7 +195,7 @@ async fn assert_mutating_commands(db: &Db) {
 
 async fn assert_scan_commands(db: &Db) {
     let scan = apply(
-        &db,
+        db,
         &["sscan", "out-union", "0", "match", "t*", "count", "10"],
     );
     assert!(matches!(

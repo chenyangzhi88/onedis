@@ -1,9 +1,25 @@
 impl LuaCommand {
     pub fn apply(self, db: &Db) -> Result<Frame> {
+        self.apply_with_authorizer(db, None)
+    }
+
+    pub(crate) fn apply_authorized(
+        self,
+        db: &Db,
+        authorizer: LuaCommandAuthorizer,
+    ) -> Result<Frame> {
+        self.apply_with_authorizer(db, Some(authorizer))
+    }
+
+    fn apply_with_authorizer(
+        self,
+        db: &Db,
+        authorizer: Option<LuaCommandAuthorizer>,
+    ) -> Result<Frame> {
         match self {
             Self::Eval(eval) => {
                 let started = Instant::now();
-                let result = lua_registry().eval(db, eval);
+                let result = lua_registry().eval_authorized(db, eval, authorizer);
                 global_metrics().record_lua_eval(elapsed_us(started), result.is_err());
                 result
             }
@@ -18,7 +34,7 @@ impl LuaCommand {
                     let script = lua_registry().get(&sha)?.ok_or_else(|| {
                         Error::msg("NOSCRIPT No matching script. Please use EVAL.")
                     })?;
-                    lua_registry().eval(
+                    lua_registry().eval_authorized(
                         db,
                         LuaEval {
                             script,
@@ -26,6 +42,7 @@ impl LuaCommand {
                             args,
                             read_only,
                         },
+                        authorizer,
                     )
                 })();
                 global_metrics().record_lua_eval(elapsed_us(started), result.is_err());

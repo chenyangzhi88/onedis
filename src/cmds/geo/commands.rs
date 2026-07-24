@@ -25,7 +25,7 @@ impl Geoadd {
                 "ERR XX and NX options at the same time are not compatible",
             ));
         }
-        if idx >= frame.arg_len() || (frame.arg_len() - idx) % 3 != 0 {
+        if idx >= frame.arg_len() || !(frame.arg_len() - idx).is_multiple_of(3) {
             return Err(Error::msg("ERR syntax error"));
         }
 
@@ -244,13 +244,16 @@ impl Geosearch {
                 "ERR wrong number of arguments for 'georadius' command",
             ));
         }
+        let read_only_alias = frame
+            .get_arg(0)
+            .is_some_and(|name| name.eq_ignore_ascii_case("GEORADIUS_RO"));
         let key = frame.get_arg(1).unwrap();
         let lon = parse_f(&frame.get_arg(2).unwrap())?;
         let lat = parse_f(&frame.get_arg(3).unwrap())?;
         validate_coord(lon, lat)?;
         let unit = frame.get_arg(5).unwrap();
         let radius = parse_non_negative_f(&frame.get_arg(4).unwrap())? * unit_factor(&unit)?;
-        let (options, store) = parse_search_options(&frame, 6, true, unit.clone())?;
+        let (options, store) = parse_search_options(&frame, 6, !read_only_alias, false)?;
         Ok(Self {
             key,
             center: GeoCenter::Coord(lon, lat),
@@ -260,6 +263,7 @@ impl Geosearch {
             },
             options,
             store,
+            read_only_alias,
         })
     }
 
@@ -269,11 +273,14 @@ impl Geosearch {
                 "ERR wrong number of arguments for 'georadiusbymember' command",
             ));
         }
+        let read_only_alias = frame
+            .get_arg(0)
+            .is_some_and(|name| name.eq_ignore_ascii_case("GEORADIUSBYMEMBER_RO"));
         let key = frame.get_arg(1).unwrap();
         let member = frame.get_arg(2).unwrap();
         let unit = frame.get_arg(4).unwrap();
         let radius = parse_non_negative_f(&frame.get_arg(3).unwrap())? * unit_factor(&unit)?;
-        let (options, store) = parse_search_options(&frame, 5, true, unit.clone())?;
+        let (options, store) = parse_search_options(&frame, 5, !read_only_alias, false)?;
         Ok(Self {
             key,
             center: GeoCenter::Member(member),
@@ -283,6 +290,7 @@ impl Geosearch {
             },
             options,
             store,
+            read_only_alias,
         })
     }
 

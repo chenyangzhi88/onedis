@@ -68,15 +68,15 @@ impl Db {
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
             );
-            if matches!(start, StreamReadGroupStart::New) {
-                if let Some(last) = entries.last().and_then(|entry| parse_stream_id(&entry.id)) {
-                    group_state.last_delivered_id = last;
-                    group_state.entries_read += entries.len() as u64;
-                    batch.put(
-                        &stream_group_key(self.db_index, key, meta.version, group),
-                        &encode_stream_group_state(&group_state),
-                    );
-                }
+            if matches!(start, StreamReadGroupStart::New)
+                && let Some(last) = entries.last().and_then(|entry| parse_stream_id(&entry.id))
+            {
+                group_state.last_delivered_id = last;
+                group_state.entries_read += entries.len() as u64;
+                batch.put(
+                    &stream_group_key(self.db_index, key, meta.version, group),
+                    &encode_stream_group_state(&group_state),
+                );
             }
             if !noack {
                 for entry in &entries {
@@ -114,6 +114,16 @@ impl Db {
         let limit = count.unwrap_or(usize::MAX);
         if limit == 0 {
             return Ok(result);
+        }
+        let mut write_shards = requests
+            .iter()
+            .map(|(key, _)| set_write_lock_shard(self.db_index, key))
+            .collect::<Vec<_>>();
+        write_shards.sort_unstable();
+        write_shards.dedup();
+        let mut _stream_write_guards = Vec::with_capacity(write_shards.len());
+        for shard in write_shards {
+            _stream_write_guards.push(self.set_write_locks[shard].lock().await);
         }
         for (key, start) in requests {
             let Some(meta) = self.stream_meta_async(key).await? else {
@@ -173,15 +183,15 @@ impl Db {
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
             );
-            if matches!(start, StreamReadGroupStart::New) {
-                if let Some(last) = entries.last().and_then(|entry| parse_stream_id(&entry.id)) {
-                    group_state.last_delivered_id = last;
-                    group_state.entries_read += entries.len() as u64;
-                    batch.put(
-                        &stream_group_key(self.db_index, key, meta.version, group),
-                        &encode_stream_group_state(&group_state),
-                    );
-                }
+            if matches!(start, StreamReadGroupStart::New)
+                && let Some(last) = entries.last().and_then(|entry| parse_stream_id(&entry.id))
+            {
+                group_state.last_delivered_id = last;
+                group_state.entries_read += entries.len() as u64;
+                batch.put(
+                    &stream_group_key(self.db_index, key, meta.version, group),
+                    &encode_stream_group_state(&group_state),
+                );
             }
             if !noack {
                 for entry in &entries {

@@ -11,7 +11,7 @@ impl Hstrlen {
         let key = frame.get_arg(1);
         let field = frame.get_arg(2);
 
-        if key.is_none() || field.is_none() {
+        if frame.arg_len() != 3 || key.is_none() || field.is_none() {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'hstrlen' command",
             ));

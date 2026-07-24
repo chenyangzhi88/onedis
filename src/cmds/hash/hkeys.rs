@@ -9,7 +9,7 @@ impl Hkeys {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let key = frame.get_arg(1);
 
-        if key.is_none() {
+        if frame.arg_len() != 2 || key.is_none() {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'hkeys' command",
             ));

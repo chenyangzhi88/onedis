@@ -93,7 +93,7 @@ impl Db {
                 })?;
                 let len = meta.len.saturating_sub(1);
                 if len == 0 {
-                    batch.delete(&self.mk(key));
+                    self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 } else {
                     batch.put(
                         &self.mk(key),
@@ -125,7 +125,7 @@ impl Db {
         if !popped.is_empty() {
             let len = meta.len.saturating_sub(popped.len());
             if len == 0 {
-                batch.delete(&self.mk(key));
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_SET);
             } else {
                 batch.put(
@@ -192,7 +192,7 @@ impl Db {
                 })?;
                 let len = meta.len.saturating_sub(1);
                 if len == 0 {
-                    batch.delete(&self.mk(key));
+                    self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 } else {
                     batch.put(
                         &self.mk(key),
@@ -226,7 +226,7 @@ impl Db {
         if !popped.is_empty() {
             let len = meta.len.saturating_sub(popped.len());
             if len == 0 {
-                batch.delete(&self.mk(key));
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_SET);
             } else {
                 batch.put(

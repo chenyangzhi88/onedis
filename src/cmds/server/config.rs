@@ -22,7 +22,7 @@ impl Config {
             ));
         }
 
-        let subcommand = match args[1].to_uppercase().as_str() {
+        let subcommand = match args[1].to_ascii_uppercase().as_str() {
             "GET" => {
                 if args.len() < 3 {
                     return Err(Error::msg(

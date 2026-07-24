@@ -35,10 +35,7 @@ impl Sdiff {
         };
 
         // 将结果转换为 Frame::Array
-        let members: Vec<Frame> = difference
-            .into_iter()
-            .map(|member| Frame::bulk_string(member))
-            .collect();
+        let members: Vec<Frame> = difference.into_iter().map(Frame::bulk_string).collect();
 
         Ok(Frame::Array(members))
     }
@@ -55,10 +52,7 @@ impl Sdiff {
             Err(err) => return Ok(Frame::Error(err.to_string())),
         };
 
-        let members: Vec<Frame> = difference
-            .into_iter()
-            .map(|member| Frame::bulk_string(member))
-            .collect();
+        let members: Vec<Frame> = difference.into_iter().map(Frame::bulk_string).collect();
 
         Ok(Frame::Array(members))
     }

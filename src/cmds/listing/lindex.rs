@@ -11,7 +11,7 @@ impl Lindex {
         let key = frame.get_arg(1);
         let index = frame.get_arg(2);
 
-        if key.is_none() || index.is_none() {
+        if frame.arg_len() != 3 || key.is_none() || index.is_none() {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'lindex' command",
             ));

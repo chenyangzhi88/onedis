@@ -52,7 +52,7 @@ pub(crate) fn parse_range_command(frame: Frame, command: &str) -> Result<Xrange,
     let mut count = None;
     let mut idx = 4;
     while idx < frame.arg_len() {
-        match frame.get_arg(idx).unwrap().to_uppercase().as_str() {
+        match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
             "COUNT" if idx + 1 < frame.arg_len() => {
                 count = Some(
                     frame

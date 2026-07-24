@@ -29,7 +29,7 @@ impl Xadd {
         };
 
         let arg_len = frame.arg_len();
-        if arg_len < 5 || (arg_len - 3) % 2 != 0 {
+        if arg_len < 5 || !(arg_len - 3).is_multiple_of(2) {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'xadd' command",
             ));

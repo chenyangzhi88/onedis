@@ -62,7 +62,7 @@ fn wait_total(db: &Db, args: &[&str], expected: i64) -> Frame {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("expected total {expected}, got {}", last.to_string());
+    panic!("expected total {expected}, got {}", last);
 }
 
 fn total(frame: &Frame) -> Option<i64> {

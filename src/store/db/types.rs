@@ -35,6 +35,47 @@ pub enum SetCondition {
     Xx,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct DbKeyRef<'a> {
+    pub(crate) db_index: u16,
+    pub(crate) key: &'a str,
+}
+
+impl<'a> DbKeyRef<'a> {
+    pub(crate) fn new(db_index: u16, key: &'a str) -> Self {
+        Self { db_index, key }
+    }
+}
+
+pub(in crate::store::db) struct StructureCopyContext<'a> {
+    pub(in crate::store::db) source_store: &'a KvStore,
+    pub(in crate::store::db) target_store: &'a KvStore,
+    pub(in crate::store::db) source: DbKeyRef<'a>,
+    pub(in crate::store::db) target: DbKeyRef<'a>,
+    pub(in crate::store::db) raw: &'a [u8],
+    pub(in crate::store::db) version_counter: &'a VersionCounter,
+}
+
+impl<'a> StructureCopyContext<'a> {
+    pub(in crate::store::db) fn new(
+        source_store: &'a KvStore,
+        target_store: &'a KvStore,
+        source: DbKeyRef<'a>,
+        target: DbKeyRef<'a>,
+        raw: &'a [u8],
+        version_counter: &'a VersionCounter,
+    ) -> Self {
+        Self {
+            source_store,
+            target_store,
+            source,
+            target,
+            raw,
+            version_counter,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetExpiration {
     Clear,
@@ -178,7 +219,7 @@ pub(in crate::store::db) struct ListMeta {
 pub struct KeyMutationTracker {
     enabled: AtomicBool,
     clock: AtomicU64,
-    key_versions: DashMap<Vec<u8>, u64>,
+    key_versions: DashMap<(u16, Vec<u8>), u64>,
     db_versions: DashMap<u16, u64>,
 }
 
@@ -191,9 +232,9 @@ impl KeyMutationTracker {
         self.enabled.load(Ordering::Acquire)
     }
 
-    pub(in crate::store::db) fn bump_key(&self, key: Vec<u8>) {
+    pub(in crate::store::db) fn bump_key(&self, db_index: u16, key: Vec<u8>) {
         let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
-        self.key_versions.insert(key, version);
+        self.key_versions.insert((db_index, key), version);
     }
 
     pub(in crate::store::db) fn bump_db(&self, db_index: u16) {
@@ -201,8 +242,11 @@ impl KeyMutationTracker {
         self.db_versions.insert(db_index, version);
     }
 
-    pub fn key_version(&self, key: &[u8]) -> u64 {
-        self.key_versions.get(key).map(|entry| *entry).unwrap_or(0)
+    pub fn key_version(&self, db_index: u16, key: &[u8]) -> u64 {
+        self.key_versions
+            .get(&(db_index, key.to_vec()))
+            .map(|entry| *entry)
+            .unwrap_or(0)
     }
 
     pub fn db_version(&self, db_index: u16) -> u64 {
@@ -215,7 +259,7 @@ impl KeyMutationTracker {
 
 #[derive(Default)]
 pub(in crate::store::db) struct PendingMutations {
-    pub(in crate::store::db) keys: Vec<Vec<u8>>,
+    pub(in crate::store::db) keys: Vec<(u16, Vec<u8>)>,
     pub(in crate::store::db) dbs: Vec<u16>,
 }
 

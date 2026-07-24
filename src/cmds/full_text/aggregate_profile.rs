@@ -15,6 +15,7 @@ impl FtAggregate {
             offset: 0,
             limit: 10,
             cursor_count: None,
+            cursor_max_idle_ms: None,
         };
         let mut idx = 3;
         while idx < frame.arg_len() {
@@ -128,14 +129,32 @@ impl FtAggregate {
                 }
                 "WITHCURSOR" => {
                     options.cursor_count = Some(1000);
+                    options.cursor_max_idle_ms = Some(300_000);
                     idx += 1;
-                    if idx < frame.arg_len() && upper_arg(&frame, idx)?.as_str() == "COUNT" {
-                        options.cursor_count = Some(parse_usize_arg(
-                            &frame,
-                            idx + 1,
-                            "ERR invalid cursor COUNT",
-                        )?);
-                        idx += 2;
+                    while idx < frame.arg_len() {
+                        match upper_arg(&frame, idx)?.as_str() {
+                            "COUNT" => {
+                                options.cursor_count = Some(parse_usize_arg(
+                                    &frame,
+                                    idx + 1,
+                                    "ERR invalid cursor COUNT",
+                                )?);
+                                idx += 2;
+                            }
+                            "MAXIDLE" => {
+                                let max_idle_ms = parse_u64_arg(
+                                    &frame,
+                                    idx + 1,
+                                    "ERR invalid cursor MAXIDLE",
+                                )?;
+                                if max_idle_ms == 0 {
+                                    return Err(Error::msg("ERR invalid cursor MAXIDLE"));
+                                }
+                                options.cursor_max_idle_ms = Some(max_idle_ms);
+                                idx += 2;
+                            }
+                            _ => break,
+                        }
                     }
                 }
                 "PARAMS" => {
@@ -326,4 +345,3 @@ impl FtProfile {
         }
     }
 }
-

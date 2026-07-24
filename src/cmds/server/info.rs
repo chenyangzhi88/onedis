@@ -40,29 +40,27 @@ impl Info {
         let ttl = db.ttl_observability_snapshot();
 
         // Default sections to show
-        let show_all =
-            self.section.is_none() || self.section.as_ref().map_or(false, |s| s == "all");
+        let show_all = self.section.is_none() || self.section.as_ref().is_some_and(|s| s == "all");
         let show_default =
-            self.section.is_none() || self.section.as_ref().map_or(true, |s| s == "default");
+            self.section.is_none() || self.section.as_ref().is_none_or(|s| s == "default");
         let show_server =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "server");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "server");
         let show_clients =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "clients");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "clients");
         let show_memory =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "memory");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "memory");
         let show_persistence =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "persistence");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "persistence");
         let show_stats =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "stats");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "stats");
         let show_replication =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "replication");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "replication");
         let show_cpu =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "cpu");
-        let show_commandstats = show_all
-            || show_default
-            || self.section.as_ref().map_or(false, |s| s == "commandstats");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "cpu");
+        let show_commandstats =
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "commandstats");
         let show_keyspace =
-            show_all || show_default || self.section.as_ref().map_or(false, |s| s == "keyspace");
+            show_all || show_default || self.section.as_ref().is_some_and(|s| s == "keyspace");
 
         // Server section
         if show_server {
@@ -319,7 +317,7 @@ mod tests {
     fn bulk_text(frame: Frame) -> String {
         match frame {
             Frame::BulkString(bytes) => String::from_utf8(bytes).unwrap(),
-            other => panic!("expected bulk string, got {}", other.to_string()),
+            other => panic!("expected bulk string, got {}", other),
         }
     }
 

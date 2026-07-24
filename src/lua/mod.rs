@@ -3,7 +3,13 @@ mod registry;
 mod runtime;
 mod value_bridge;
 
+use std::sync::Arc;
+
+#[cfg(test)]
+pub(crate) use registry::LUA_TEST_LOCK;
 pub use registry::{LUA_REGISTRY, LuaEval, LuaRegistry, lua_registry, sha1_hex};
+
+pub type LuaCommandAuthorizer = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 #[cfg(test)]
 use value_bridge::{format_lua_number, lua_error_to_anyhow, lua_value_to_frame};
@@ -151,7 +157,7 @@ mod tests {
                 read_only: true,
             },
         ) {
-            Ok(frame) => panic!("expected read-only lua error, got {}", frame.to_string()),
+            Ok(frame) => panic!("expected read-only lua error, got {}", frame),
             Err(err) => err,
         };
         assert!(readonly_error.to_string().contains("read-only script"));
@@ -184,6 +190,62 @@ mod tests {
                 ])
         ));
         assert!(db.get("pcall-key").is_none());
+    }
+
+    #[test]
+    fn lua_nested_commands_enforce_acl_and_error_replies_roll_back() {
+        let db = test_db();
+        let registry = LuaRegistry::default();
+        let only_reads: super::LuaCommandAuthorizer =
+            Arc::new(|command| command.eq_ignore_ascii_case("GET"));
+
+        let denied = match registry.eval_authorized(
+            &db,
+            LuaEval {
+                script: "return redis.call('SET', KEYS[1], 'blocked')".to_string(),
+                keys: vec!["acl-key".to_string()],
+                args: vec![],
+                read_only: false,
+            },
+            Some(only_reads.clone()),
+        ) {
+            Ok(frame) => panic!("expected ACL error, got {frame}"),
+            Err(error) => error,
+        };
+        assert!(denied.to_string().contains("NOPERM"));
+        assert!(db.get("acl-key").is_none());
+
+        let checks = registry
+            .eval_authorized(
+                &db,
+                LuaEval {
+                    script: "return {redis.acl_check_cmd('GET', KEYS[1]), redis.acl_check_cmd('SET', KEYS[1], 'v')}".to_string(),
+                    keys: vec!["acl-key".to_string()],
+                    args: vec![],
+                    read_only: true,
+                },
+                Some(only_reads),
+            )
+            .unwrap();
+        assert!(matches!(
+            checks,
+            Frame::Array(values)
+                if matches!(values.as_slice(), [Frame::Integer(1), Frame::Null])
+        ));
+
+        let error_reply = registry
+            .eval(
+                &db,
+                LuaEval {
+                    script: "redis.call('SET', KEYS[1], 'temporary'); return redis.error_reply('ERR forced')".to_string(),
+                    keys: vec!["rollback-key".to_string()],
+                    args: vec![],
+                    read_only: false,
+                },
+            )
+            .unwrap();
+        assert!(matches!(error_reply, Frame::Error(message) if message == "ERR forced"));
+        assert!(db.get("rollback-key").is_none());
     }
 
     #[test]

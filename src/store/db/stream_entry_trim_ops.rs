@@ -26,6 +26,7 @@ impl Db {
         key: &str,
         max_len: usize,
     ) -> Result<usize, Error> {
+        let _stream_write_guard = self.set_write_lock(key).lock().await;
         let Some(mut meta) = self.stream_meta_async(key).await? else {
             return Ok(0);
         };

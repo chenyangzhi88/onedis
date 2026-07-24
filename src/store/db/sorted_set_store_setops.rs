@@ -21,17 +21,18 @@ impl Db {
         destination: &str,
         entries: Vec<(String, f64)>,
     ) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(destination).lock().await;
         let len = entries.len();
         if len == 0 {
-            self.delete_key_async(destination).await;
+            self.delete_key_internal_async(destination, true).await;
             return Ok(0);
         }
-        self.delete_key_async(destination).await;
+        self.delete_key_internal_async(destination, true).await;
         let members = entries
             .into_iter()
             .map(|(member, score)| (score, member))
             .collect::<Vec<_>>();
-        self.zset_add_async(destination, &members).await?;
+        self.zset_add_async_unlocked(destination, &members).await?;
         Ok(len)
     }
 

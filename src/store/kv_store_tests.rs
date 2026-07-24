@@ -104,7 +104,7 @@ mod tests {
         store
             .compare_and_write_batch_async(
                 &[CompareCondition::with_expected(
-                    b"a".to_vec(),
+                    b"a",
                     Some(b"1".to_vec()),
                 )],
                 &ok_batch,
@@ -119,7 +119,7 @@ mod tests {
             store
                 .compare_and_write_batch_async(
                     &[CompareCondition::with_expected(
-                        b"a".to_vec(),
+                        b"a",
                         Some(b"wrong".to_vec())
                     )],
                     &failed_batch,
@@ -313,7 +313,7 @@ mod tests {
         compare_batch.put(b"txnscan:compare", b"ok");
         txn.compare_and_write_batch_async(
             &[CompareCondition::with_expected(
-                b"txnscan:0".to_vec(),
+                b"txnscan:0",
                 Some(b"v0".to_vec()),
             )],
             &compare_batch,

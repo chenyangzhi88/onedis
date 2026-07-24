@@ -21,6 +21,9 @@ impl IncrbyFloat {
         let increment = args[2]
             .parse::<f64>()
             .map_err(|_| Error::msg("ERR value is not a valid float"))?;
+        if !increment.is_finite() {
+            return Err(Error::msg("ERR value is not a valid float"));
+        }
         Ok(IncrbyFloat { key, increment })
     }
 
@@ -89,29 +92,31 @@ impl IncrbyFloat {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.get_string_async(&self.key).await? {
-            Some(str_value) => match str_value.parse::<f64>() {
-                Ok(current) => {
-                    let new_value = current + self.increment;
-                    let formatted = Self::format_float(new_value);
-                    db.set_string_bytes_async(
-                        self.key,
-                        formatted.clone().into_bytes(),
-                        crate::store::db::SetExpiration::KeepTtl,
-                        crate::store::db::SetCondition::Always,
-                        false,
-                    )
-                    .await?;
-                    Ok(Frame::bulk_string(formatted))
+        let increment = self.increment;
+        match db
+            .mutate_string_bytes_async(&self.key, |bytes, exists| {
+                let current = if !exists {
+                    0.0
+                } else {
+                    std::str::from_utf8(bytes)
+                        .ok()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| Error::msg("ERR value is not a valid float"))?
+                };
+                let next = current + increment;
+                if !next.is_finite() {
+                    return Err(Error::msg("ERR increment would produce NaN or Infinity"));
                 }
-                Err(_) => Ok(Frame::Error("ERR value is not a valid float".to_string())),
-            },
-            None => {
-                let formatted = Self::format_float(self.increment);
-                db.insert_string_async(self.key, formatted.clone(), None)
-                    .await;
-                Ok(Frame::bulk_string(formatted))
-            }
+                let formatted = Self::format_float(next);
+                bytes.clear();
+                bytes.extend_from_slice(formatted.as_bytes());
+                Ok(formatted)
+            })
+            .await
+        {
+            Ok(formatted) => Ok(Frame::bulk_string(formatted)),
+            Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 }

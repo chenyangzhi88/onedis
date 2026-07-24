@@ -6,6 +6,7 @@ use mlua::{HookTriggers, Lua, Table, Value, VmState};
 use crate::{frame::Frame, store::db::Db};
 
 use super::{
+    LuaCommandAuthorizer,
     redis_api::install_redis_api,
     registry::{LuaEval, lua_registry},
     value_bridge::{lua_error_to_anyhow, lua_value_to_frame},
@@ -14,12 +15,16 @@ use super::{
 const DEFAULT_LUA_INSTRUCTION_BUDGET: u64 = 1_000_000;
 const LUA_HOOK_INTERVAL: u32 = 1_000;
 
-pub(super) fn run_lua_script(db: Arc<Db>, eval: &LuaEval) -> Result<Frame> {
+pub(super) fn run_lua_script(
+    db: Arc<Db>,
+    eval: &LuaEval,
+    authorizer: Option<LuaCommandAuthorizer>,
+) -> Result<Frame> {
     let lua = Lua::new();
     install_instruction_budget(&lua)?;
     install_safe_globals(&lua)?;
     install_keys_and_args(&lua, &eval.keys, &eval.args)?;
-    install_redis_api(&lua, db, eval.read_only)?;
+    install_redis_api(&lua, db, eval.read_only, authorizer)?;
     let value = lua
         .load(&eval.script)
         .eval::<Value>()

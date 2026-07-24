@@ -367,6 +367,8 @@
             "WITHCURSOR",
             "COUNT",
             "7",
+            "MAXIDLE",
+            "123",
             "PARAMS",
             "2",
             "min",
@@ -381,6 +383,7 @@
         assert_eq!(aggregate.options.offset, 2);
         assert_eq!(aggregate.options.limit, 3);
         assert_eq!(aggregate.options.cursor_count, Some(7));
+        assert_eq!(aggregate.options.cursor_max_idle_ms, Some(123));
 
         let load_all =
             FtAggregate::parse_from_frame(frame(&["FT.AGGREGATE", "idx", "*", "LOAD", "*"]))

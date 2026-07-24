@@ -53,8 +53,9 @@ impl Db {
         key: &str,
         fields: &[String],
     ) -> Result<Vec<Option<String>>, Error> {
-        let values = self.hash_multi_get(key, fields)?;
-        self.hash_delete_async(key, fields).await?;
+        let _hash_write_guard = self.set_write_lock(key).lock().await;
+        let values = self.hash_multi_get_async(key, fields).await?;
+        self.hash_delete_async_unlocked(key, fields).await?;
         Ok(values)
     }
 
@@ -89,17 +90,18 @@ impl Db {
         fields: &[String],
         expiration: Option<StringExpireUpdate>,
     ) -> Result<Vec<Option<String>>, Error> {
-        let values = self.hash_multi_get(key, fields)?;
+        let _hash_write_guard = self.set_write_lock(key).lock().await;
+        let values = self.hash_multi_get_async(key, fields).await?;
         let Some(expiration) = expiration else {
             return Ok(values);
         };
         match expiration {
             StringExpireUpdate::Persist => {
-                self.hash_persist_fields_async(key, fields).await?;
+                self.hash_persist_fields_async_unlocked(key, fields).await?;
             }
             StringExpireUpdate::RelativeMs(ttl_ms) => {
                 let expire_ms = now_ms().saturating_add(ttl_ms);
-                self.hash_expire_fields_at_ms_async(
+                self.hash_expire_fields_at_ms_async_unlocked(
                     key,
                     expire_ms,
                     fields,
@@ -108,7 +110,7 @@ impl Db {
                 .await?;
             }
             StringExpireUpdate::AbsoluteMs(expire_ms) => {
-                self.hash_expire_fields_at_ms_async(
+                self.hash_expire_fields_at_ms_async_unlocked(
                     key,
                     expire_ms,
                     fields,
@@ -157,15 +159,17 @@ impl Db {
         };
         let field_ttl_requested = expire_ms.is_some_and(|expire_ms| expire_ms > 0);
         let mut batch = WriteBatch::new();
-        if meta.is_none() {
+        if let Some((hash_expire_ms, _)) = meta {
+            if field_ttl_requested {
+                batch.put(
+                    &self.mk(key),
+                    &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
+                );
+            }
+        } else {
             batch.put(
                 &self.mk(key),
                 &encode_hash_meta_with_field_ttl_flag(0, version, field_ttl_requested),
-            );
-        } else if field_ttl_requested {
-            batch.put(
-                &self.mk(key),
-                &encode_hash_meta_with_field_ttl_flag(meta.unwrap().0, version, true),
             );
         }
         for (field, value) in fields {
@@ -202,10 +206,11 @@ impl Db {
         fnx: bool,
         fxx: bool,
     ) -> Result<bool, Error> {
+        let _hash_write_guard = self.set_write_lock(key).lock().await;
         let meta = self.hash_expire_ms_async(key).await?;
         let version = match meta {
             Some((_, v)) => v,
-            None => self.next_persisted_version(),
+            None => self.next_persisted_version_async().await,
         };
         if fnx || fxx {
             for (field, _) in fields {
@@ -227,15 +232,17 @@ impl Db {
         };
         let field_ttl_requested = expire_ms.is_some_and(|expire_ms| expire_ms > 0);
         let mut batch = WriteBatch::new();
-        if meta.is_none() {
+        if let Some((hash_expire_ms, _)) = meta {
+            if field_ttl_requested {
+                batch.put(
+                    &self.mk(key),
+                    &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
+                );
+            }
+        } else {
             batch.put(
                 &self.mk(key),
                 &encode_hash_meta_with_field_ttl_flag(0, version, field_ttl_requested),
-            );
-        } else if field_ttl_requested {
-            batch.put(
-                &self.mk(key),
-                &encode_hash_meta_with_field_ttl_flag(meta.unwrap().0, version, true),
             );
         }
         for (field, value) in fields {

@@ -63,6 +63,9 @@ impl Bzmpop {
                 .unwrap()
                 .parse::<usize>()
                 .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+            if count == 0 {
+                return Err(Error::msg("ERR count should be greater than 0"));
+            }
         } else if frame.arg_len() != side_idx + 1 {
             return Err(Error::msg("ERR syntax error"));
         }

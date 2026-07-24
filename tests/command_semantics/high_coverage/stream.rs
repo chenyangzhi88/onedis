@@ -67,12 +67,26 @@ async fn stream_commands_cover_groups_pending_ranges_claims_and_error_paths() {
         Frame::Integer(_)
     ));
     assert!(matches!(
-        apply(&db, &["XACKDEL", "events", "g", "1-0"]),
-        Frame::Integer(_)
+        apply(
+            &db,
+            &["XACKDEL", "events", "g", "IDS", "1", "1-0"]
+        ),
+        Frame::Array(values) if matches!(values.as_slice(), [Frame::Integer(1)])
     ));
     assert!(matches!(
-        apply(&db, &["XDELEX", "events", "2-0"]),
-        Frame::Integer(_)
+        apply(&db, &["XDELEX", "events", "IDS", "1", "2-0"]),
+        Frame::Array(values) if matches!(values.as_slice(), [Frame::Integer(1)])
+    ));
+    assert!(matches!(
+        apply(&db, &["XDELEX", "events", "IDS", "1", "2-0"]),
+        Frame::Array(values) if matches!(values.as_slice(), [Frame::Integer(-1)])
+    ));
+    assert!(matches!(
+        apply(
+            &db,
+            &["XACKDEL", "missing-stream", "g", "IDS", "1", "1-0"]
+        ),
+        Frame::Array(values) if matches!(values.as_slice(), [Frame::Integer(-1)])
     ));
 
     assert!(matches!(
@@ -116,5 +130,3 @@ async fn stream_commands_cover_groups_pending_ranges_claims_and_error_paths() {
     assert!(parse_err(&["XREADGROUP", "GROUP", "g"]).contains("syntax"));
     assert!(parse_err(&["XINFO", "BOGUS", "events"]).contains("syntax"));
 }
-
-

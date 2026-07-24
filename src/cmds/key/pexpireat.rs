@@ -39,32 +39,28 @@ impl PexpireAt {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as i64;
-        let ttl = if self.timestamp > now {
-            (self.timestamp - now) as u64
-        } else {
-            0
-        };
+        let ttl = expiration_ttl_ms(self.timestamp)?;
         let changed = db.expire_with_condition(self.key, ttl, self.condition);
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as i64;
-        let ttl = if self.timestamp > now {
-            (self.timestamp - now) as u64
-        } else {
-            0
-        };
+        let ttl = expiration_ttl_ms(self.timestamp)?;
         let changed = db
             .expire_with_condition_async(self.key, ttl, self.condition)
             .await;
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
+}
+
+fn expiration_ttl_ms(timestamp_ms: i64) -> Result<u64, Error> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    if timestamp_ms <= 0 || timestamp_ms as u128 <= now_ms {
+        return Ok(0);
+    }
+    u64::try_from(timestamp_ms as u128 - now_ms)
+        .map_err(|_| Error::msg("ERR invalid expire time in 'pexpireat' command"))
 }

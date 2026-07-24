@@ -105,7 +105,8 @@ impl Handler {
             Command::Auth(auth) => auth.apply(self),
             Command::Client(client) => client.apply_with_handler(self),
             Command::Config(config) => config.apply(self.args.as_ref()),
-            Command::Save(_) | Command::Bgsave(_) => Ok(Frame::Ok),
+            Command::Save(save) => save.apply_sync(&self.db_manager),
+            Command::Bgsave(bgsave) => bgsave.apply_sync(&self.db_manager),
             Command::Flushall(_) => {
                 for db in self.db_manager.get_all_dbs() {
                     db.clear_async().await;

@@ -35,11 +35,13 @@ impl Zscan {
                 if i + 1 >= args.len() {
                     return Err(Error::msg("COUNT option requires an argument"));
                 }
-                count = Some(
-                    args[i + 1]
-                        .parse::<u64>()
-                        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
-                );
+                let parsed = args[i + 1]
+                    .parse::<u64>()
+                    .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+                if parsed == 0 {
+                    return Err(Error::msg("ERR syntax error"));
+                }
+                count = Some(parsed);
                 i += 2;
             } else {
                 return Err(Error::msg(format!("Unknown option: {}", args[i])));
@@ -56,7 +58,8 @@ impl Zscan {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let pattern = self.pattern.unwrap_or_else(|| "*".to_string());
-        let count = self.count.unwrap_or(10) as usize;
+        let count = usize::try_from(self.count.unwrap_or(10))
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
         match db.zset_scan(&self.key, self.cursor, &pattern, count) {
             Ok((next_cursor, entries)) => Ok(Frame::Array(vec![
@@ -69,7 +72,8 @@ impl Zscan {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let pattern = self.pattern.unwrap_or_else(|| "*".to_string());
-        let count = self.count.unwrap_or(10) as usize;
+        let count = usize::try_from(self.count.unwrap_or(10))
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
         match db
             .zset_scan_async(&self.key, self.cursor, &pattern, count)

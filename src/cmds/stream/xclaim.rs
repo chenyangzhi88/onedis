@@ -12,6 +12,7 @@ pub struct Xclaim {
     consumer: String,
     min_idle_ms: u64,
     ids: Vec<StreamId>,
+    just_id: bool,
 }
 
 impl Xclaim {
@@ -27,27 +28,32 @@ impl Xclaim {
             .parse::<u64>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
         let mut ids = Vec::new();
+        let mut just_id = false;
         let mut idx = 5;
         while idx < frame.arg_len() {
             let arg = frame.get_arg(idx).unwrap();
+            if arg.eq_ignore_ascii_case("JUSTID") && !just_id {
+                just_id = true;
+                idx += 1;
+                continue;
+            }
             if arg.eq_ignore_ascii_case("IDLE")
                 || arg.eq_ignore_ascii_case("TIME")
                 || arg.eq_ignore_ascii_case("RETRYCOUNT")
-            {
-                idx += 2;
-                continue;
-            }
-            if arg.eq_ignore_ascii_case("FORCE")
-                || arg.eq_ignore_ascii_case("JUSTID")
+                || arg.eq_ignore_ascii_case("FORCE")
                 || arg.eq_ignore_ascii_case("LASTID")
             {
-                idx += 1;
-                continue;
+                return Err(Error::msg("ERR unsupported XCLAIM option"));
             }
             ids.push(StreamId::parse(&arg).ok_or_else(|| {
                 Error::msg("ERR Invalid stream ID specified as stream command argument")
             })?);
             idx += 1;
+        }
+        if ids.is_empty() {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'xclaim' command",
+            ));
         }
         Ok(Self {
             key: frame.get_arg(1).unwrap(),
@@ -55,6 +61,7 @@ impl Xclaim {
             consumer: frame.get_arg(3).unwrap(),
             min_idle_ms,
             ids,
+            just_id,
         })
     }
 
@@ -66,9 +73,7 @@ impl Xclaim {
             self.min_idle_ms,
             &self.ids,
         ) {
-            Ok(entries) => Ok(Frame::Array(
-                entries.into_iter().map(stream_entry_frame).collect(),
-            )),
+            Ok(entries) => Ok(claimed_entries_frame(entries, self.just_id)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -84,10 +89,21 @@ impl Xclaim {
             )
             .await
         {
-            Ok(entries) => Ok(Frame::Array(
-                entries.into_iter().map(stream_entry_frame).collect(),
-            )),
+            Ok(entries) => Ok(claimed_entries_frame(entries, self.just_id)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
+    }
+}
+
+fn claimed_entries_frame(entries: Vec<crate::store::db::StreamEntry>, just_id: bool) -> Frame {
+    if just_id {
+        Frame::Array(
+            entries
+                .into_iter()
+                .map(|entry| Frame::bulk_string(entry.id))
+                .collect(),
+        )
+    } else {
+        Frame::Array(entries.into_iter().map(stream_entry_frame).collect())
     }
 }

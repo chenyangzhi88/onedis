@@ -18,14 +18,22 @@ impl Sintercard {
         let numkeys = args[1]
             .parse::<usize>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+        if numkeys == 0 {
+            return Err(Error::msg("ERR numkeys should be greater than 0"));
+        }
         if args.len() < 2 + numkeys {
             return Err(Error::msg("ERR syntax error"));
         }
         let mut idx = 2 + numkeys;
         let mut limit = 0usize;
+        let mut limit_seen = false;
         while idx < args.len() {
             match args[idx].to_ascii_uppercase().as_str() {
                 "LIMIT" => {
+                    if limit_seen {
+                        return Err(Error::msg("ERR syntax error"));
+                    }
+                    limit_seen = true;
                     limit = args
                         .get(idx + 1)
                         .ok_or_else(|| Error::msg("ERR syntax error"))?

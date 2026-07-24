@@ -243,4 +243,166 @@ impl Db {
             }
         }
     }
+
+    pub fn set_string_bytes_many(
+        &self,
+        key_vals: Vec<(String, Vec<u8>)>,
+        expiration: SetExpiration,
+        condition: SetCondition,
+    ) -> Result<bool, Error> {
+        let key_vals = deduplicate_string_items(key_vals);
+        if key_vals.is_empty() {
+            return Ok(false);
+        }
+        for (key, _) in &key_vals {
+            self.expire_if_needed(key);
+        }
+        let old_values = key_vals
+            .iter()
+            .map(|(key, _)| self.store.get_raw(&self.mk(key)))
+            .collect::<Vec<_>>();
+        if !batch_condition_matches(condition, &old_values) {
+            return Ok(false);
+        }
+
+        let mut batch = WriteBatch::new();
+        for ((key, value), old_raw) in key_vals.iter().zip(&old_values) {
+            let old_header = old_raw.as_deref().and_then(decode_meta_header);
+            let expire_ms = expiration_ms(expiration, old_header.map(|header| header.expire_ms));
+            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
+                &mut batch,
+                key,
+                old_raw.as_deref(),
+            );
+            if expire_ms > 0 && now_ms() >= expire_ms {
+                batch.delete(&self.mk(key));
+                if let Some(header) = old_header
+                    && header.expire_ms > 0
+                {
+                    self.ttl_manager.remove_known_to_batch(
+                        &mut batch,
+                        header.expire_ms,
+                        self.db_index,
+                        key,
+                    );
+                }
+            } else {
+                self.write_string_to_batch_with_deferred_old_raw(
+                    &mut batch,
+                    key,
+                    value,
+                    expire_ms,
+                    old_raw.as_deref(),
+                );
+            }
+        }
+        self.write_batch_if_not_empty(&batch);
+        self.changes
+            .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
+        Ok(true)
+    }
+
+    pub async fn set_string_bytes_many_async(
+        &self,
+        key_vals: Vec<(String, Vec<u8>)>,
+        expiration: SetExpiration,
+        condition: SetCondition,
+    ) -> Result<bool, Error> {
+        let key_vals = deduplicate_string_items(key_vals);
+        if key_vals.is_empty() {
+            return Ok(false);
+        }
+        for _ in 0..64 {
+            for (key, _) in &key_vals {
+                self.expire_if_needed_async(key).await;
+            }
+            let mut observations = Vec::with_capacity(key_vals.len());
+            for (key, _) in &key_vals {
+                observations.push(self.store.get_raw_observed_async(&self.mk(key)).await);
+            }
+            let old_values = observations
+                .iter()
+                .map(|observed| observed.value().map(|value| value.to_vec()))
+                .collect::<Vec<_>>();
+            if !batch_condition_matches(condition, &old_values) {
+                return Ok(false);
+            }
+
+            let mut batch = WriteBatch::new();
+            for ((key, value), old_raw) in key_vals.iter().zip(&old_values) {
+                let old_header = old_raw.as_deref().and_then(decode_meta_header);
+                let expire_ms =
+                    expiration_ms(expiration, old_header.map(|header| header.expire_ms));
+                self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
+                    &mut batch,
+                    key,
+                    old_raw.as_deref(),
+                );
+                if expire_ms > 0 && now_ms() >= expire_ms {
+                    batch.delete(&self.mk(key));
+                    if let Some(header) = old_header
+                        && header.expire_ms > 0
+                    {
+                        self.ttl_manager.remove_known_to_batch(
+                            &mut batch,
+                            header.expire_ms,
+                            self.db_index,
+                            key,
+                        );
+                    }
+                } else {
+                    self.write_string_to_batch_with_deferred_old_raw(
+                        &mut batch,
+                        key,
+                        value,
+                        expire_ms,
+                        old_raw.as_deref(),
+                    );
+                }
+            }
+            let conditions = observations
+                .iter()
+                .map(CompareCondition::from_observed)
+                .collect::<Vec<_>>();
+            if self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await?
+            {
+                self.changes
+                    .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
+                return Ok(true);
+            }
+        }
+        Err(Error::msg("ERR string batch write conflict"))
+    }
+}
+
+fn deduplicate_string_items(key_vals: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    let mut positions: HashMap<String, usize> = HashMap::with_capacity(key_vals.len());
+    let mut unique: Vec<(String, Vec<u8>)> = Vec::with_capacity(key_vals.len());
+    for (key, value) in key_vals {
+        if let Some(&position) = positions.get(&key) {
+            unique[position].1 = value;
+        } else {
+            positions.insert(key.clone(), unique.len());
+            unique.push((key, value));
+        }
+    }
+    unique
+}
+
+fn batch_condition_matches(condition: SetCondition, old_values: &[Option<Vec<u8>>]) -> bool {
+    match condition {
+        SetCondition::Always => true,
+        SetCondition::Nx => old_values.iter().all(Option::is_none),
+        SetCondition::Xx => old_values.iter().all(Option::is_some),
+    }
+}
+
+fn expiration_ms(expiration: SetExpiration, old_expiration: Option<u64>) -> u64 {
+    match expiration {
+        SetExpiration::Clear => 0,
+        SetExpiration::KeepTtl => old_expiration.unwrap_or(0),
+        SetExpiration::At(expire_ms) => expire_ms,
+    }
 }

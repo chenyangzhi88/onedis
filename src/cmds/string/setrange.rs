@@ -2,7 +2,7 @@ use anyhow::Error;
 
 use crate::{
     frame::Frame,
-    store::db::{Db, Structure},
+    store::db::{Db, SetCondition, SetExpiration},
 };
 
 pub struct SetRange {
@@ -44,54 +44,30 @@ impl SetRange {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        // 获取当前值，如果不存在则创建一个空字符串
-        let current_value = match db.get(&self.key) {
-            Some(Structure::String(s)) => s,
-            Some(_) => {
-                return Err(Error::msg(
-                    "WRONGTYPE Operation against a key holding the wrong kind of value",
-                ));
-            }
-            None => String::new(),
-        };
-
-        // 将字符串转换为字节向量以便操作
-        let mut bytes = current_value.into_bytes();
-        let offset = self.offset as usize;
-        let value_bytes = self.value;
-
-        // 确保字节数组足够长以容纳新数据
-        if bytes.len() < offset + value_bytes.len() {
-            bytes.resize(offset + value_bytes.len(), 0);
+        let mut bytes = db.get_string_bytes(&self.key)?.unwrap_or_default();
+        if self.value.is_empty() {
+            return Ok(Frame::Integer(bytes.len() as i64));
         }
-
-        // 在指定偏移处写入新值
-        for (i, byte) in value_bytes.iter().enumerate() {
-            bytes[offset + i] = *byte;
+        let offset = usize::try_from(self.offset)
+            .map_err(|_| Error::msg("ERR offset is out of range, must be positive"))?;
+        let required_len = offset
+            .checked_add(self.value.len())
+            .ok_or_else(|| Error::msg("ERR string exceeds maximum allowed size"))?;
+        if required_len > bytes.len() {
+            bytes
+                .try_reserve_exact(required_len - bytes.len())
+                .map_err(|_| Error::msg("ERR string exceeds maximum allowed size"))?;
+            bytes.resize(required_len, 0);
         }
-
-        // The legacy synchronous API stores strings as UTF-8.
-        let new_value = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(Error::msg(
-                    "ERR invalid UTF-8 sequence produced by SETRANGE operation",
-                ));
-            }
-        };
-
-        // 保存到数据库
-        db.insert(self.key.clone(), Structure::String(new_value));
-
-        // 返回修改后的字符串长度
-        let length = db.get(&self.key).map_or(0, |s| {
-            if let Structure::String(str) = s {
-                str.len()
-            } else {
-                0
-            }
-        });
-
+        bytes[offset..required_len].copy_from_slice(&self.value);
+        let length = bytes.len();
+        db.set_string_bytes(
+            self.key,
+            bytes,
+            SetExpiration::KeepTtl,
+            SetCondition::Always,
+            false,
+        )?;
         Ok(Frame::Integer(length as i64))
     }
 

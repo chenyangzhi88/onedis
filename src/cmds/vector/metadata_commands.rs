@@ -72,7 +72,10 @@ impl VEmb {
                 "ERR wrong number of arguments for 'vemb' command",
             ));
         }
-        let raw = frame.arg_len() == 4 && upper_arg(&frame, 3)? == "RAW";
+        let raw = frame.arg_len() == 4;
+        if raw && upper_arg(&frame, 3)? != "RAW" {
+            return Err(Error::msg("ERR syntax error"));
+        }
         Ok(Self {
             key: arg(&frame, 1, "ERR invalid vector key")?,
             element: arg(&frame, 2, "ERR invalid vector element")?,
@@ -215,7 +218,10 @@ impl VLinks {
                 "ERR wrong number of arguments for 'vlinks' command",
             ));
         }
-        let with_scores = frame.arg_len() == 4 && upper_arg(&frame, 3)? == "WITHSCORES";
+        let with_scores = frame.arg_len() == 4;
+        if with_scores && upper_arg(&frame, 3)? != "WITHSCORES" {
+            return Err(Error::msg("ERR syntax error"));
+        }
         Ok(Self {
             key: arg(&frame, 1, "ERR invalid vector key")?,
             element: arg(&frame, 2, "ERR invalid vector element")?,

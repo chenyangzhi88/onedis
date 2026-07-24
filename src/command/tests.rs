@@ -257,7 +257,7 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         (&["ZUNIONSTORE", "dst", "1", "z"], "ZUNIONSTORE", true),
         (&["XADD", "s", "*", "f", "v"], "XADD", true),
         (&["XACK", "s", "g", "1-0"], "XACK", true),
-        (&["XACKDEL", "s", "g", "1-0"], "XACKDEL", true),
+        (&["XACKDEL", "s", "g", "IDS", "1", "1-0"], "XACKDEL", true),
         (
             &["XAUTOCLAIM", "s", "g", "c", "0", "0-0"],
             "XAUTOCLAIM",
@@ -266,7 +266,7 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         (&["XCFGSET", "s", "MAX-DELETED-ID", "0-0"], "XCFGSET", false),
         (&["XCLAIM", "s", "g", "c", "0", "1-0"], "XCLAIM", true),
         (&["XDEL", "s", "1-0"], "XDEL", true),
-        (&["XDELEX", "s", "1-0"], "XDELEX", true),
+        (&["XDELEX", "s", "IDS", "1", "1-0"], "XDELEX", true),
         (&["XGROUP", "CREATE", "s", "g", "$"], "XGROUP", true),
         (&["XINFO", "STREAM", "s"], "XINFO", false),
         (&["XLEN", "s"], "XLEN", false),

@@ -44,6 +44,29 @@ async fn concurrent_command_paths_preserve_counts_and_values() {
     }
     assert!(matches!(apply(&db, &["HLEN", "hash"]), Frame::Integer(8)));
     assert!(matches!(apply(&db, &["DBSIZE"]), Frame::Integer(size) if size >= 25));
-}
 
+    let mut bitfield_tasks = Vec::new();
+    for _ in 0..8 {
+        let db = db.clone();
+        bitfield_tasks.push(tokio::spawn(async move {
+            for _ in 0..64 {
+                assert!(matches!(
+                    apply_async(
+                        &db,
+                        &["BITFIELD", "bit-counter", "INCRBY", "i16", "0", "1"],
+                    )
+                    .await,
+                    Frame::Array(_)
+                ));
+            }
+        }));
+    }
+    for task in bitfield_tasks {
+        task.await.unwrap();
+    }
+    assert!(matches!(
+        apply(&db, &["BITFIELD_RO", "bit-counter", "GET", "i16", "0"]),
+        Frame::Array(values) if matches!(values.as_slice(), [Frame::Integer(512)])
+    ));
+}
 

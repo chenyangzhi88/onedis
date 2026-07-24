@@ -230,7 +230,10 @@ fn command_dispatch_names_and_aof_flags_cover_wide_command_surface() {
         (vec!["exists", "key"], "EXISTS"),
         (vec!["strlen", "key"], "STRLEN"),
         (vec!["mset", "a", "1", "b", "2"], "MSET"),
-        (vec!["msetex", "px", "1000", "a", "1", "b", "2"], "MSETEX"),
+        (
+            vec!["msetex", "2", "a", "1", "b", "2", "px", "1000"],
+            "MSETEX",
+        ),
         (vec!["msetnx", "a", "1", "b", "2"], "MSETNX"),
         (vec!["mget", "a", "b"], "MGET"),
         (vec!["append", "key", "value"], "APPEND"),
@@ -350,9 +353,9 @@ fn newly_supported_redis_commands_are_dispatched_to_kv_engine() {
     assert!(matches!(
         apply_command(
             &db,
-            &["msetex", "px", "10000", "s1", "abcdef", "s2", "azced"]
+            &["msetex", "2", "s1", "abcdef", "s2", "azced", "px", "10000"]
         ),
-        Frame::Ok
+        Frame::Integer(1)
     ));
     assert!(matches!(
         apply_command(&db, &["lcs", "s1", "s2", "len"]),
@@ -444,7 +447,8 @@ fn new_stream_commands_are_dispatched_to_kv_engine() {
     );
     assert!(matches!(
         apply_command(&db, &["xackdel", "xs", "g", "ids", "1", &id]),
-        Frame::Integer(1)
+        Frame::Array(values)
+            if matches!(values.as_slice(), [Frame::Integer(1)])
     ));
     assert!(matches!(
         apply_command(&db, &["xadd", "xs", "2-0", "f", "v2"]),
@@ -456,11 +460,12 @@ fn new_stream_commands_are_dispatched_to_kv_engine() {
     ));
     assert!(matches!(
         apply_command(&db, &["xdelex", "xs", "ids", "1", "2-0"]),
-        Frame::Integer(1)
+        Frame::Array(values)
+            if matches!(values.as_slice(), [Frame::Integer(1)])
     ));
     assert!(matches!(
         apply_command(&db, &["xcfgset", "xs", "max-deleted-entry-id", "0-0"]),
-        Frame::Ok
+        Frame::Error(_)
     ));
 }
 

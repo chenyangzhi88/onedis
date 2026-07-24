@@ -202,6 +202,21 @@ impl Db {
     where
         F: Fn(&mut Vec<u8>, bool) -> Result<R, Error>,
     {
+        self.mutate_string_bytes_if_changed_async(key, |value, exists| {
+            mutation(value, exists).map(|result| (result, true))
+        })
+        .await
+    }
+
+    pub(crate) async fn mutate_string_bytes_if_changed_async<R, F>(
+        &self,
+        key: &str,
+        mutation: F,
+    ) -> Result<R, Error>
+    where
+        F: Fn(&mut Vec<u8>, bool) -> Result<(R, bool), Error>,
+    {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let key_bytes = self.mk(key);
         for _ in 0..64 {
             self.expire_if_needed_async(key).await;
@@ -220,7 +235,10 @@ impl Db {
                 }
                 None => (0, Vec::new()),
             };
-            let result = mutation(&mut value, exists)?;
+            let (result, changed) = mutation(&mut value, exists)?;
+            if !changed {
+                return Ok(result);
+            }
             let mut batch = WriteBatch::new();
             self.write_string_to_batch_with_deferred_old_raw(
                 &mut batch,

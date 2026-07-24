@@ -26,6 +26,9 @@ impl Xtrim {
         if threshold_idx >= frame.arg_len() {
             return Err(Error::msg("ERR syntax error"));
         }
+        if frame.arg_len() != threshold_idx + 1 {
+            return Err(Error::msg("ERR syntax error"));
+        }
         let max_len = frame
             .get_arg(threshold_idx)
             .unwrap()

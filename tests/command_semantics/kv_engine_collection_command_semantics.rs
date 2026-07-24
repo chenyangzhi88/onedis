@@ -446,7 +446,7 @@ fn sorted_set_command_smoke_covers_range_rank_count_remove_and_scan() {
     let modern_by_score = apply_command(
         &db,
         &[
-            "zrange", "scores", "1", "3", "byscore", "rev", "limit", "0", "2",
+            "zrange", "scores", "3", "1", "byscore", "rev", "limit", "0", "2",
         ],
     );
     assert!(matches!(
@@ -476,8 +476,8 @@ fn sorted_set_command_smoke_covers_range_rank_count_remove_and_scan() {
                 "zrangestore",
                 "top-by-score",
                 "scores",
-                "1",
                 "3",
+                "1",
                 "byscore",
                 "rev",
                 "limit",
@@ -504,7 +504,7 @@ fn sorted_set_command_smoke_covers_range_rank_count_remove_and_scan() {
     ));
     let lex_limited = apply_command(
         &db,
-        &["zrange", "lex", "-", "+", "bylex", "rev", "limit", "0", "2"],
+        &["zrange", "lex", "+", "-", "bylex", "rev", "limit", "0", "2"],
     );
     assert!(matches!(
         lex_limited,
@@ -851,10 +851,17 @@ async fn bitmap_commands_cover_parser_errors_ranges_ro_signed_and_async_errors()
         readonly,
         Frame::Array(values) if matches!(values.first(), Some(Frame::Integer(128)))
     ));
-    assert!(matches!(
-        apply_command_async(&db, &["bitfield_ro", "async-bits", "set", "u4", "0", "1"]).await,
-        Frame::Error(message) if message.contains("only supports GET")
-    ));
+    assert!(
+        Command::parse_from_frame(frame_args(&[
+            "bitfield_ro",
+            "async-bits",
+            "set",
+            "u4",
+            "0",
+            "1",
+        ]))
+        .is_err()
+    );
 
     let signed = apply_command_async(
         &db,
@@ -882,10 +889,10 @@ async fn bitmap_commands_cover_parser_errors_ranges_ro_signed_and_async_errors()
                 && matches!(values.get(1), Some(Frame::Integer(-1)))
                 && matches!(values.get(2), Some(Frame::Integer(2)))
     ));
-    assert!(matches!(
-        apply_command_async(&db, &["bitfield", "signed-bits", "get", "u64", "0"]).await,
-        Frame::Error(message) if message.contains("unsupported bitfield type")
-    ));
+    assert!(
+        Command::parse_from_frame(frame_args(&["bitfield", "signed-bits", "get", "u64", "0",]))
+            .is_err()
+    );
 
     apply_command_async(&db, &["json.set", "not-string-bits", "$", "{\"a\":1}"]).await;
     for args in [

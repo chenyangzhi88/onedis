@@ -49,11 +49,9 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
         }
         _ => return Err(Error::msg("ERR syntax error")),
     };
-    let (mut options, store_options) = parse_search_options(&frame, idx, false, store)?;
-    if store {
-        options.withcoord = false;
-        options.withdist = false;
-        options.withhash = false;
+    let (options, store_options) = parse_search_options(&frame, idx, false, store)?;
+    if store && (options.withcoord || options.withdist || options.withhash) {
+        return Err(Error::msg("ERR syntax error"));
     }
     Ok((
         dest,
@@ -83,21 +81,26 @@ fn parse_search_options(
 ) -> Result<(SearchOptions, Option<GeoStore>), Error> {
     let mut options = SearchOptions::default();
     let mut store = None;
+    let mut count_seen = false;
     while idx < frame.arg_len() {
         match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
             "WITHDIST" => options.withdist = true,
             "WITHHASH" => options.withhash = true,
             "WITHCOORD" => options.withcoord = true,
-            "ASC" => options.sort = Some(GeoSort::Asc),
-            "DESC" => options.sort = Some(GeoSort::Desc),
-            "COUNT" if idx + 1 < frame.arg_len() => {
-                options.count = Some(
+            "ASC" if options.sort.is_none() => options.sort = Some(GeoSort::Asc),
+            "DESC" if options.sort.is_none() => options.sort = Some(GeoSort::Desc),
+            "COUNT" if !count_seen && idx + 1 < frame.arg_len() => {
+                let count =
                     frame
                         .get_arg(idx + 1)
                         .unwrap()
                         .parse()
-                        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
-                );
+                        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+                if count == 0 {
+                    return Err(Error::msg("ERR COUNT must be > 0"));
+                }
+                options.count = Some(count);
+                count_seen = true;
                 idx += 1;
                 if idx + 1 < frame.arg_len()
                     && frame.get_arg(idx + 1).unwrap().eq_ignore_ascii_case("ANY")
@@ -106,21 +109,23 @@ fn parse_search_options(
                     idx += 1;
                 }
             }
-            "STORE" if allow_store_destination && idx + 1 < frame.arg_len() => {
+            "STORE" if allow_store_destination && store.is_none() && idx + 1 < frame.arg_len() => {
                 store = Some(GeoStore {
                     dest: frame.get_arg(idx + 1).unwrap(),
                     dist: false,
                 });
                 idx += 1;
             }
-            "STOREDIST" if allow_store_destination && idx + 1 < frame.arg_len() => {
+            "STOREDIST"
+                if allow_store_destination && store.is_none() && idx + 1 < frame.arg_len() =>
+            {
                 store = Some(GeoStore {
                     dest: frame.get_arg(idx + 1).unwrap(),
                     dist: true,
                 });
                 idx += 1;
             }
-            "STOREDIST" if allow_storedist_flag => {
+            "STOREDIST" if allow_storedist_flag && store.is_none() => {
                 store = Some(GeoStore {
                     dest: String::new(),
                     dist: true,

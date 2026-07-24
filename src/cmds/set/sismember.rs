@@ -27,8 +27,8 @@ impl Sismember {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.set_members_async(&self.key).await {
-            Ok(members) => Ok(Frame::Integer(members.contains(&self.member) as i64)),
+        match db.set_contains_async(&self.key, &self.member).await {
+            Ok(exists) => Ok(Frame::Integer(exists as i64)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

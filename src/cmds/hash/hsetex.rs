@@ -31,25 +31,32 @@ impl Hsetex {
         while idx < args.len() {
             match args[idx].to_ascii_uppercase().as_str() {
                 "FNX" => {
-                    if fxx {
+                    if fnx || fxx {
                         return Err(Error::msg("ERR syntax error"));
                     }
                     fnx = true;
                     idx += 1;
                 }
                 "FXX" => {
-                    if fnx {
+                    if fnx || fxx {
                         return Err(Error::msg("ERR syntax error"));
                     }
                     fxx = true;
                     idx += 1;
                 }
                 "KEEPTTL" => {
+                    if keep_ttl || expiration.is_some() {
+                        return Err(Error::msg("ERR syntax error"));
+                    }
                     keep_ttl = true;
                     idx += 1;
                 }
+                "PERSIST" => return Err(Error::msg("ERR syntax error")),
                 _ => {
                     expiration = parse_expire_update(&args, &mut idx)?;
+                    if keep_ttl && expiration.is_some() {
+                        return Err(Error::msg("ERR syntax error"));
+                    }
                     break;
                 }
             }

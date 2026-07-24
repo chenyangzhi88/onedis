@@ -27,18 +27,10 @@ impl Hstrlen {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.get(&self.key) {
-            Some(structure) => match structure {
-                crate::store::db::Structure::Hash(hash) => match hash.get(&self.field) {
-                    Some(value) => Ok(Frame::Integer(value.len() as i64)),
-                    None => Ok(Frame::Integer(0)),
-                },
-                _ => {
-                    let f = "ERR Operation against a key holding the wrong kind of value";
-                    Ok(Frame::Error(f.to_string()))
-                }
-            },
-            None => Ok(Frame::Integer(0)),
+        match db.hash_get(&self.key, &self.field) {
+            Ok(Some(value)) => Ok(Frame::Integer(value.len() as i64)),
+            Ok(None) => Ok(Frame::Integer(0)),
+            Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 

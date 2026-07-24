@@ -21,6 +21,44 @@ async fn async_batch_string_overwrite_removes_old_collection_subkeys() {
     assert!(db.store.scan_prefix_raw_async(&prefix).await.is_empty());
 }
 
+#[tokio::test]
+async fn conditional_string_batch_is_atomic_and_preserves_requested_ttl() {
+    let db = test_db();
+    db.insert_string_bytes("existing".to_string(), b"old".to_vec(), Some(60_000));
+    let old_ttl = db.ttl_millis("existing");
+
+    assert!(
+        !db.set_string_bytes_many_async(
+            vec![
+                ("missing".to_string(), b"new".to_vec()),
+                ("existing".to_string(), b"changed".to_vec()),
+            ],
+            SetExpiration::Clear,
+            SetCondition::Nx,
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(db.get_string("missing").unwrap(), None);
+    assert_eq!(db.get_string("existing").unwrap().as_deref(), Some("old"));
+
+    assert!(
+        db.set_string_bytes_many_async(
+            vec![("existing".to_string(), b"changed".to_vec())],
+            SetExpiration::KeepTtl,
+            SetCondition::Xx,
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        db.get_string("existing").unwrap().as_deref(),
+        Some("changed")
+    );
+    assert!(db.ttl_millis("existing") > 0);
+    assert!(db.ttl_millis("existing") <= old_ttl);
+}
+
 #[test]
 fn stream_add_len_and_range_use_ordered_ids() {
     let db = test_db();

@@ -39,36 +39,31 @@ impl ExpireAt {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs() as i64;
-        let ttl = if self.timestamp > now {
-            ((self.timestamp - now) as u64)
-                .checked_mul(1000)
-                .ok_or_else(|| Error::msg("ERR invalid expire time in 'expireat' command"))?
-        } else {
-            0
-        };
+        let ttl = expiration_ttl_ms(self.timestamp)?;
         let changed = db.expire_with_condition(self.key, ttl, self.condition);
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs() as i64;
-        let ttl = if self.timestamp > now {
-            ((self.timestamp - now) as u64)
-                .checked_mul(1000)
-                .ok_or_else(|| Error::msg("ERR invalid expire time in 'expireat' command"))?
-        } else {
-            0
-        };
+        let ttl = expiration_ttl_ms(self.timestamp)?;
         let changed = db
             .expire_with_condition_async(self.key, ttl, self.condition)
             .await;
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
+}
+
+fn expiration_ttl_ms(timestamp_seconds: i64) -> Result<u64, Error> {
+    let target_ms = timestamp_seconds
+        .checked_mul(1000)
+        .ok_or_else(|| Error::msg("ERR invalid expire time in 'expireat' command"))?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    if target_ms <= 0 || target_ms as u128 <= now_ms {
+        return Ok(0);
+    }
+    u64::try_from(target_ms as u128 - now_ms)
+        .map_err(|_| Error::msg("ERR invalid expire time in 'expireat' command"))
 }

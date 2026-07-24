@@ -20,13 +20,14 @@ impl Xackdel {
             ));
         }
         let mut idx = 3;
-        if idx < args.len()
-            && matches!(
-                args[idx].to_ascii_uppercase().as_str(),
-                "DELREF" | "KEEPREF" | "ACKED"
-            )
-        {
-            idx += 1;
+        if idx < args.len() {
+            match args[idx].to_ascii_uppercase().as_str() {
+                "KEEPREF" => idx += 1,
+                "DELREF" | "ACKED" => {
+                    return Err(Error::msg("ERR unsupported stream reference policy"));
+                }
+                _ => {}
+            }
         }
         let ids = parse_ids(&args, idx)?;
         Ok(Self {
@@ -38,7 +39,7 @@ impl Xackdel {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         match db.stream_ack_delete(&self.key, &self.group, &self.ids) {
-            Ok(count) => Ok(Frame::Integer(count as i64)),
+            Ok(statuses) => Ok(status_frame(statuses)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -48,30 +49,32 @@ impl Xackdel {
             .stream_ack_delete_async(&self.key, &self.group, &self.ids)
             .await
         {
-            Ok(count) => Ok(Frame::Integer(count as i64)),
+            Ok(statuses) => Ok(status_frame(statuses)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 }
 
 pub(crate) fn parse_ids(args: &[String], start: usize) -> Result<Vec<StreamId>, Error> {
-    if start >= args.len() {
+    if start >= args.len() || !args[start].eq_ignore_ascii_case("IDS") {
         return Err(Error::msg("ERR syntax error"));
     }
-    let ids = if args[start].eq_ignore_ascii_case("IDS") {
-        let count = args
-            .get(start + 1)
-            .ok_or_else(|| Error::msg("ERR syntax error"))?
-            .parse::<usize>()
-            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
-        let ids_start = start + 2;
-        if args.len() != ids_start + count {
-            return Err(Error::msg("ERR syntax error"));
-        }
-        &args[ids_start..]
-    } else {
-        &args[start..]
-    };
+    let count = args
+        .get(start + 1)
+        .ok_or_else(|| Error::msg("ERR syntax error"))?
+        .parse::<usize>()
+        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+    if count == 0 {
+        return Err(Error::msg("ERR numids should be greater than 0"));
+    }
+    let ids_start = start + 2;
+    let ids_end = ids_start
+        .checked_add(count)
+        .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?;
+    if args.len() != ids_end {
+        return Err(Error::msg("ERR syntax error"));
+    }
+    let ids = &args[ids_start..];
     ids.iter()
         .map(|id| {
             StreamId::parse(id).ok_or_else(|| {
@@ -79,4 +82,8 @@ pub(crate) fn parse_ids(args: &[String], start: usize) -> Result<Vec<StreamId>, 
             })
         })
         .collect()
+}
+
+pub(crate) fn status_frame(statuses: Vec<i64>) -> Frame {
+    Frame::Array(statuses.into_iter().map(Frame::Integer).collect())
 }

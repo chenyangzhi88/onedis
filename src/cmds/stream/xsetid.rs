@@ -13,7 +13,7 @@ pub struct Xsetid {
 impl Xsetid {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let args = frame.get_args();
-        if args.len() < 3 {
+        if args.len() != 3 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'xsetid' command",
             ));

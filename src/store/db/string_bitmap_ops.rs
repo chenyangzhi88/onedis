@@ -87,6 +87,34 @@ impl Db {
         Ok(slice.iter().map(|byte| byte.count_ones() as u64).sum())
     }
 
+    pub fn string_bitcount_with_unit(
+        &self,
+        key: &str,
+        start: Option<i64>,
+        end: Option<i64>,
+        bit_unit: bool,
+    ) -> Result<u64, Error> {
+        if !bit_unit {
+            return self.string_bitcount(key, start, end);
+        }
+        let bytes = self.get_string_bytes(key)?.unwrap_or_default();
+        Ok(bitcount_range(&bytes, start, end))
+    }
+
+    pub async fn string_bitcount_with_unit_async(
+        &self,
+        key: &str,
+        start: Option<i64>,
+        end: Option<i64>,
+        bit_unit: bool,
+    ) -> Result<u64, Error> {
+        if !bit_unit {
+            return self.string_bitcount_async(key, start, end).await;
+        }
+        let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
+        Ok(bitcount_range(&bytes, start, end))
+    }
+
     pub fn string_bitpos(
         &self,
         key: &str,
@@ -153,6 +181,42 @@ impl Db {
         } else {
             -1
         })
+    }
+
+    pub fn string_bitpos_with_unit(
+        &self,
+        key: &str,
+        bit: u8,
+        start: Option<i64>,
+        end: Option<i64>,
+        bit_unit: bool,
+    ) -> Result<i64, Error> {
+        if !bit_unit {
+            return self.string_bitpos(key, bit, start, end);
+        }
+        if bit > 1 {
+            return Err(Error::msg("ERR bit is not an integer or out of range"));
+        }
+        let bytes = self.get_string_bytes(key)?.unwrap_or_default();
+        Ok(bitpos_range(&bytes, bit, start, end))
+    }
+
+    pub async fn string_bitpos_with_unit_async(
+        &self,
+        key: &str,
+        bit: u8,
+        start: Option<i64>,
+        end: Option<i64>,
+        bit_unit: bool,
+    ) -> Result<i64, Error> {
+        if !bit_unit {
+            return self.string_bitpos_async(key, bit, start, end).await;
+        }
+        if bit > 1 {
+            return Err(Error::msg("ERR bit is not an integer or out of range"));
+        }
+        let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
+        Ok(bitpos_range(&bytes, bit, start, end))
     }
 
     pub fn string_bitop(&self, op: &str, dest: &str, keys: &[String]) -> Result<usize, Error> {
@@ -268,7 +332,7 @@ impl Db {
         width: usize,
         signed: bool,
     ) -> Result<i64, Error> {
-        if width == 0 || width > 63 {
+        if width == 0 || width > 64 || (!signed && width == 64) {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
         let bytes = self.get_string_bytes(key)?.unwrap_or_default();
@@ -282,7 +346,7 @@ impl Db {
         width: usize,
         signed: bool,
     ) -> Result<i64, Error> {
-        if width == 0 || width > 63 {
+        if width == 0 || width > 64 || (!signed && width == 64) {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
         let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
@@ -296,7 +360,7 @@ impl Db {
         width: usize,
         value: i64,
     ) -> Result<(), Error> {
-        if width == 0 || width > 63 {
+        if width == 0 || width > 64 {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
         let mut bytes = self.get_string_bytes(key)?.unwrap_or_default();
@@ -318,7 +382,7 @@ impl Db {
         width: usize,
         value: i64,
     ) -> Result<(), Error> {
-        if width == 0 || width > 63 {
+        if width == 0 || width > 64 {
             return Err(Error::msg("ERR unsupported bitfield type"));
         }
         self.mutate_string_bytes_async(key, |bytes, _| write_bits_into(bytes, offset, width, value))
@@ -326,7 +390,56 @@ impl Db {
     }
 }
 
-fn read_bits_from(bytes: &[u8], offset: usize, width: usize, signed: bool) -> Result<i64, Error> {
+fn bitcount_range(bytes: &[u8], start: Option<i64>, end: Option<i64>) -> u64 {
+    bit_range(bytes.len().saturating_mul(8), start, end).map_or(0, |(start, end)| {
+        (start..=end)
+            .map(|offset| {
+                let byte = bytes[offset / 8];
+                u64::from((byte >> (7 - (offset % 8))) & 1)
+            })
+            .sum()
+    })
+}
+
+fn bitpos_range(bytes: &[u8], bit: u8, start: Option<i64>, end: Option<i64>) -> i64 {
+    let Some((start, end)) = bit_range(bytes.len().saturating_mul(8), start, end) else {
+        return -1;
+    };
+    for offset in start..=end {
+        let byte = bytes[offset / 8];
+        if ((byte >> (7 - (offset % 8))) & 1) == bit {
+            return offset as i64;
+        }
+    }
+    -1
+}
+
+fn bit_range(len: usize, start: Option<i64>, end: Option<i64>) -> Option<(usize, usize)> {
+    if len == 0 {
+        return None;
+    }
+    let normalize = |index: i64| -> i128 {
+        if index < 0 {
+            len as i128 + index as i128
+        } else {
+            index as i128
+        }
+    };
+    let start = normalize(start.unwrap_or(0)).max(0);
+    let end = normalize(end.unwrap_or(-1)).min(len as i128 - 1);
+    if start > end || start >= len as i128 || end < 0 {
+        None
+    } else {
+        Some((start as usize, end as usize))
+    }
+}
+
+pub(crate) fn read_bits_from(
+    bytes: &[u8],
+    offset: usize,
+    width: usize,
+    signed: bool,
+) -> Result<i64, Error> {
     offset
         .checked_add(width)
         .ok_or_else(|| Error::msg("ERR bit offset is not an integer or out of range"))?;
@@ -336,14 +449,16 @@ fn read_bits_from(bytes: &[u8], offset: usize, width: usize, signed: bool) -> Re
         let byte = bytes.get(absolute_bit / 8).copied().unwrap_or(0);
         value = (value << 1) | ((byte >> (7 - (absolute_bit % 8))) & 1) as u64;
     }
-    if signed && (value & (1u64 << (width - 1))) != 0 {
+    if signed && width == 64 {
+        Ok(value as i64)
+    } else if signed && (value & (1u64 << (width - 1))) != 0 {
         Ok((value as i64) - (1i64 << width))
     } else {
         Ok(value as i64)
     }
 }
 
-fn write_bits_into(
+pub(crate) fn write_bits_into(
     bytes: &mut Vec<u8>,
     offset: usize,
     width: usize,
@@ -354,8 +469,8 @@ fn write_bits_into(
         .ok_or_else(|| Error::msg("ERR bit offset is not an integer or out of range"))?;
     let required_bytes = required_bits.saturating_add(7) / 8;
     resize_bitmap(bytes, required_bytes)?;
-    let mask = if width == 63 {
-        u64::MAX >> 1
+    let mask = if width == 64 {
+        u64::MAX
     } else {
         (1u64 << width) - 1
     };

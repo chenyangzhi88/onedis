@@ -5,7 +5,12 @@ use crate::{frame::Frame, store::db::Db};
 pub struct Dbsize {}
 
 impl Dbsize {
-    pub fn parse_from_frame(_frame: Frame) -> Result<Self, Error> {
+    pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
+        if frame.arg_len() != 1 {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'dbsize' command",
+            ));
+        }
         Ok(Dbsize {})
     }
 

@@ -1,6 +1,6 @@
 use crate::{
     frame::Frame,
-    store::db::{Db, Structure},
+    store::db::{Db, SetCondition, SetExpiration},
 };
 use anyhow::Error;
 
@@ -64,31 +64,34 @@ impl IncrbyFloat {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.get(&self.key) {
-            Some(structure) => match structure {
-                Structure::String(str_value) => match str_value.parse::<f64>() {
-                    Ok(current) => {
-                        let new_value = current + self.increment;
-                        let formatted = Self::format_float(new_value);
-                        db.update(self.key, Structure::String(formatted.clone()));
-                        Ok(Frame::bulk_string(formatted))
-                    }
-                    Err(_) => {
-                        let e = "ERR value is not a valid float";
-                        Ok(Frame::Error(e.to_string()))
-                    }
-                },
-                _ => {
-                    let e = "WRONGTYPE Operation against a key holding the wrong kind of value";
-                    Ok(Frame::Error(e.to_string()))
-                }
-            },
-            None => {
-                let formatted = Self::format_float(self.increment);
-                db.insert(self.key.clone(), Structure::String(formatted.clone()));
-                Ok(Frame::bulk_string(formatted))
-            }
+        let current = match db.get_string_bytes(&self.key) {
+            Ok(Some(value)) => std::str::from_utf8(&value)
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| Error::msg("ERR value is not a valid float")),
+            Ok(None) => Ok(0.0),
+            Err(err) => Err(err),
+        };
+        let current = match current {
+            Ok(current) => current,
+            Err(err) => return Ok(Frame::Error(err.to_string())),
+        };
+        let next = current + self.increment;
+        if !next.is_finite() {
+            return Ok(Frame::Error(
+                "ERR increment would produce NaN or Infinity".to_string(),
+            ));
         }
+        let formatted = Self::format_float(next);
+        db.set_string_bytes(
+            self.key,
+            formatted.as_bytes().to_vec(),
+            SetExpiration::KeepTtl,
+            SetCondition::Always,
+            false,
+        )?;
+        Ok(Frame::bulk_string(formatted))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {

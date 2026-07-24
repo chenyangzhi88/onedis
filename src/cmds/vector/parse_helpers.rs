@@ -58,7 +58,7 @@ fn parse_redis_vector_arg(frame: &Frame, idx: &mut usize) -> Result<Vec<f32>, Er
 }
 
 fn parse_vector_blob(bytes: &[u8]) -> Result<Vec<f32>, Error> {
-    if !bytes.len().is_multiple_of(4) {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return Err(Error::msg("ERR invalid vector blob length"));
     }
     Ok(bytes

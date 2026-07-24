@@ -13,6 +13,7 @@ pub struct Xautoclaim {
     min_idle_ms: u64,
     start: StreamId,
     count: usize,
+    just_id: bool,
 }
 
 impl Xautoclaim {
@@ -23,19 +24,28 @@ impl Xautoclaim {
             ));
         }
         let mut count = 100usize;
+        let mut count_seen = false;
+        let mut just_id = false;
         let mut idx = 6;
         while idx < frame.arg_len() {
-            if frame.get_arg(idx).unwrap().eq_ignore_ascii_case("COUNT")
-                && idx + 1 < frame.arg_len()
-            {
-                count = frame
-                    .get_arg(idx + 1)
-                    .unwrap()
-                    .parse::<usize>()
-                    .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
-                idx += 2;
-            } else {
-                idx += 1;
+            match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+                "COUNT" if !count_seen && idx + 1 < frame.arg_len() => {
+                    count = frame
+                        .get_arg(idx + 1)
+                        .unwrap()
+                        .parse::<usize>()
+                        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+                    if count == 0 {
+                        return Err(Error::msg("ERR COUNT must be > 0"));
+                    }
+                    count_seen = true;
+                    idx += 2;
+                }
+                "JUSTID" if !just_id => {
+                    just_id = true;
+                    idx += 1;
+                }
+                _ => return Err(Error::msg("ERR syntax error")),
             }
         }
         Ok(Self {
@@ -51,6 +61,7 @@ impl Xautoclaim {
                 Error::msg("ERR Invalid stream ID specified as stream command argument")
             })?,
             count,
+            just_id,
         })
     }
 
@@ -63,17 +74,7 @@ impl Xautoclaim {
             self.start,
             self.count,
         ) {
-            Ok(claimed) => Ok(Frame::Array(vec![
-                Frame::bulk_string(claimed.next_id),
-                Frame::Array(
-                    claimed
-                        .entries
-                        .into_iter()
-                        .map(stream_entry_frame)
-                        .collect(),
-                ),
-                Frame::Array(Vec::new()),
-            ])),
+            Ok(claimed) => Ok(claimed_frame(claimed, self.just_id)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -90,18 +91,29 @@ impl Xautoclaim {
             )
             .await
         {
-            Ok(claimed) => Ok(Frame::Array(vec![
-                Frame::bulk_string(claimed.next_id),
-                Frame::Array(
-                    claimed
-                        .entries
-                        .into_iter()
-                        .map(stream_entry_frame)
-                        .collect(),
-                ),
-                Frame::Array(Vec::new()),
-            ])),
+            Ok(claimed) => Ok(claimed_frame(claimed, self.just_id)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
+}
+
+fn claimed_frame(claimed: crate::store::db::StreamClaimedEntries, just_id: bool) -> Frame {
+    let entries = if just_id {
+        claimed
+            .entries
+            .into_iter()
+            .map(|entry| Frame::bulk_string(entry.id))
+            .collect()
+    } else {
+        claimed
+            .entries
+            .into_iter()
+            .map(stream_entry_frame)
+            .collect()
+    };
+    Frame::Array(vec![
+        Frame::bulk_string(claimed.next_id),
+        Frame::Array(entries),
+        Frame::Array(Vec::new()),
+    ])
 }

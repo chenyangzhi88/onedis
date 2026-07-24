@@ -50,8 +50,9 @@ impl Xgroup {
                 let id = parse_id_or_latest(&frame.get_arg(4).unwrap())?;
                 let mut mkstream = false;
                 for idx in 5..frame.arg_len() {
-                    if frame.get_arg(idx).unwrap().eq_ignore_ascii_case("MKSTREAM") {
-                        mkstream = true;
+                    match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+                        "MKSTREAM" if !mkstream => mkstream = true,
+                        _ => return Err(Error::msg("ERR syntax error")),
                     }
                 }
                 Ok(Self::Create {
@@ -62,7 +63,7 @@ impl Xgroup {
                 })
             }
             "SETID" => {
-                if frame.arg_len() < 5 {
+                if frame.arg_len() != 5 {
                     return Err(Error::msg(
                         "ERR wrong number of arguments for 'xgroup setid' command",
                     ));

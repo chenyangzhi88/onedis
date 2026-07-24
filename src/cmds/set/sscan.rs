@@ -34,7 +34,11 @@ impl Sscan {
                 if i + 1 >= args.len() {
                     return Err(Error::msg("COUNT option requires an argument"));
                 }
-                count = Some(args[i + 1].parse::<u64>()?);
+                let parsed = args[i + 1].parse::<u64>()?;
+                if parsed == 0 {
+                    return Err(Error::msg("ERR syntax error"));
+                }
+                count = Some(parsed);
                 i += 2;
             } else {
                 return Err(Error::msg(format!("Unknown option: {}", args[i])));
@@ -51,7 +55,8 @@ impl Sscan {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let pattern = self.pattern.unwrap_or_else(|| "*".to_string());
-        let count = self.count.unwrap_or(10) as usize;
+        let count = usize::try_from(self.count.unwrap_or(10))
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
         match db.set_scan(&self.key, self.cursor, &pattern, count) {
             Ok((next_cursor, members)) => Ok(Frame::Array(vec![
@@ -64,7 +69,8 @@ impl Sscan {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let pattern = self.pattern.unwrap_or_else(|| "*".to_string());
-        let count = self.count.unwrap_or(10) as usize;
+        let count = usize::try_from(self.count.unwrap_or(10))
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
         match db
             .set_scan_async(&self.key, self.cursor, &pattern, count)

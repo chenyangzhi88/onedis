@@ -96,6 +96,23 @@ pub enum SetOutcome {
     NotSet,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ZsetAddOptions {
+    pub nx: bool,
+    pub xx: bool,
+    pub gt: bool,
+    pub lt: bool,
+    pub increment: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ZsetAddOutcome {
+    pub added: usize,
+    pub changed: usize,
+    pub score: Option<f64>,
+    pub applied: bool,
+}
+
 #[derive(Clone, Copy)]
 pub(in crate::store::db) struct CounterCacheEntry {
     pub(in crate::store::db) value: i64,

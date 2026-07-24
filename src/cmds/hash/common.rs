@@ -3,48 +3,53 @@ use anyhow::Error;
 use crate::store::db::{ExpireCondition, StringExpireUpdate};
 
 pub(crate) fn parse_hash_fields(args: &[String], start: usize) -> Result<Vec<String>, Error> {
-    if start >= args.len() {
-        return Err(Error::msg("ERR wrong number of arguments for hash command"));
+    if start >= args.len() || !args[start].eq_ignore_ascii_case("FIELDS") {
+        return Err(Error::msg("ERR syntax error"));
     }
-    if args[start].eq_ignore_ascii_case("FIELDS") {
-        let count = args
-            .get(start + 1)
-            .ok_or_else(|| Error::msg("ERR syntax error"))?
-            .parse::<usize>()
-            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
-        let fields_start = start + 2;
-        if args.len() != fields_start + count {
-            return Err(Error::msg("ERR syntax error"));
-        }
-        return Ok(args[fields_start..].to_vec());
+    let count = args
+        .get(start + 1)
+        .ok_or_else(|| Error::msg("ERR syntax error"))?
+        .parse::<usize>()
+        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+    if count == 0 {
+        return Err(Error::msg("ERR numfields should be greater than 0"));
     }
-    Ok(args[start..].to_vec())
+    let fields_start = start + 2;
+    let fields_end = fields_start
+        .checked_add(count)
+        .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?;
+    if args.len() != fields_end {
+        return Err(Error::msg("ERR syntax error"));
+    }
+    Ok(args[fields_start..].to_vec())
 }
 
 pub(crate) fn parse_hash_field_values(
     args: &[String],
     start: usize,
 ) -> Result<Vec<(String, String)>, Error> {
-    if start >= args.len() {
-        return Err(Error::msg("ERR wrong number of arguments for hash command"));
+    if start >= args.len() || !args[start].eq_ignore_ascii_case("FIELDS") {
+        return Err(Error::msg("ERR syntax error"));
     }
-    let values = if args[start].eq_ignore_ascii_case("FIELDS") {
-        let count = args
-            .get(start + 1)
-            .ok_or_else(|| Error::msg("ERR syntax error"))?
-            .parse::<usize>()
-            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
-        let fields_start = start + 2;
-        if args.len() != fields_start + count.saturating_mul(2) {
-            return Err(Error::msg("ERR syntax error"));
-        }
-        &args[fields_start..]
-    } else {
-        &args[start..]
-    };
-    if values.len() % 2 != 0 {
-        return Err(Error::msg("ERR wrong number of arguments for hash command"));
+    let count = args
+        .get(start + 1)
+        .ok_or_else(|| Error::msg("ERR syntax error"))?
+        .parse::<usize>()
+        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+    if count == 0 {
+        return Err(Error::msg("ERR numfields should be greater than 0"));
     }
+    let fields_start = start + 2;
+    let value_count = count
+        .checked_mul(2)
+        .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?;
+    let values_end = fields_start
+        .checked_add(value_count)
+        .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?;
+    if args.len() != values_end {
+        return Err(Error::msg("ERR syntax error"));
+    }
+    let values = &args[fields_start..];
     Ok(values
         .chunks_exact(2)
         .map(|pair| (pair[0].clone(), pair[1].clone()))

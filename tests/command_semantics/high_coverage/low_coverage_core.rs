@@ -73,7 +73,10 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
     assert!(parse_err(&["SCAN"]).contains("requires"));
     assert!(parse_err(&["SCAN", "bad"]).contains("invalid digit"));
     assert!(parse_err(&["SCAN", "0", "COUNT", "bad"]).contains("invalid digit"));
-    assert!(parse_err(&["SCAN", "0", "TYPE", "string"]).contains("Unknown option"));
+    assert!(matches!(
+        apply(&db, &["SCAN", "0", "TYPE", "string"]),
+        Frame::Array(values) if values.len() == 2
+    ));
 
     assert!(matches!(
         apply(&db, &["COPY", "scan:0", "scan:copy"]),

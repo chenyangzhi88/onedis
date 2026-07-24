@@ -38,8 +38,8 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
         Frame::Integer(0)
     ));
     assert!(matches!(
-        apply(&db, &["MSETEX", "EX", "2", "m4", "v4", "m5", "v5"]),
-        Frame::Ok
+        apply(&db, &["MSETEX", "2", "m4", "v4", "m5", "v5", "EX", "2"]),
+        Frame::Integer(1)
     ));
     assert_eq!(array(apply(&db, &["MGET", "m1", "m2", "missing"])).len(), 3);
     assert_eq!(bulk(apply_async(&db, &["GETDEL", "m2"]).await), "v2");
@@ -125,7 +125,10 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
         apply_async(&db, &["HDEL", "h", "b"]).await,
         Frame::Integer(1)
     ));
-    assert!(contains_bulk(&apply(&db, &["HGETDEL", "h", "a"]), "1"));
+    assert!(contains_bulk(
+        &apply(&db, &["HGETDEL", "h", "FIELDS", "1", "a"]),
+        "1"
+    ));
 
     assert!(matches!(
         apply(&db, &["RPUSH", "list", "a", "b", "c", "b", "d"]),
@@ -192,6 +195,22 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
         apply(&db, &["RPOP", "list3"]),
         Frame::BulkString(_)
     ));
+    assert!(matches!(
+        apply(&db, &["RPUSH", "list4", "a", "b", "c", "d"]),
+        Frame::Integer(4)
+    ));
+    assert!(matches!(
+        apply(&db, &["LPOP", "list4", "2"]),
+        Frame::Array(values) if values.len() == 2
+    ));
+    assert!(matches!(
+        apply_async(&db, &["RPOP", "list4", "2"]).await,
+        Frame::Array(values) if values.len() == 2
+    ));
+    assert!(matches!(
+        apply(&db, &["LPOP", "missing-list", "2"]),
+        Frame::Array(values) if values.is_empty()
+    ));
 
     db.insert("wrong".to_string(), Structure::String("value".to_string()));
     assert!(matches!(
@@ -204,8 +223,9 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
     ));
     assert!(parse_err(&["LPOS", "list", "a", "RANK", "0"]).contains("RANK"));
     assert!(parse_err(&["SCAN", "0", "MATCH"]).contains("MATCH"));
+    assert!(parse_err(&["SCAN", "0", "COUNT", "0"]).contains("syntax"));
     assert!(parse_err(&["HSCAN", "h", "0", "COUNT"]).contains("COUNT"));
+    assert!(parse_err(&["HSCAN", "h", "0", "COUNT", "0"]).contains("syntax"));
     assert!(parse_err(&["BLMPOP", "-1", "1", "list", "LEFT"]).contains("negative"));
     assert!(parse_err(&["MSET", "only-key"]).contains("wrong"));
 }
-

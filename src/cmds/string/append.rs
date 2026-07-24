@@ -1,6 +1,6 @@
 use crate::{
     frame::Frame,
-    store::db::{Db, Structure},
+    store::db::{Db, SetCondition, SetExpiration},
 };
 use anyhow::Error;
 
@@ -28,16 +28,19 @@ impl Append {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let existing_value = match db.get(&self.key) {
-            Some(Structure::String(s)) => s,
-            Some(_) => return Err(Error::msg("ERR wrong type for 'append' command")),
-            None => String::new(),
-        };
-        let suffix =
-            String::from_utf8(self.val).map_err(|_| Error::msg("ERR value is not valid UTF-8"))?;
-        let new_value = format!("{existing_value}{suffix}");
-        let len = new_value.len();
-        db.insert(self.key, Structure::String(new_value));
+        let mut value = db.get_string_bytes(&self.key)?.unwrap_or_default();
+        value
+            .try_reserve(self.val.len())
+            .map_err(|_| Error::msg("ERR string exceeds maximum allowed size"))?;
+        value.extend_from_slice(&self.val);
+        let len = value.len();
+        db.set_string_bytes(
+            self.key,
+            value,
+            SetExpiration::KeepTtl,
+            SetCondition::Always,
+            false,
+        )?;
         Ok(Frame::Integer(len as i64))
     }
 

@@ -12,8 +12,14 @@ pub struct Zrange {
 
 enum ZrangeBounds {
     Rank(i64, i64),
-    Score(f64, f64),
+    Score(ScoreBound, ScoreBound),
     Lex(LexBound, LexBound),
+}
+
+#[derive(Clone, Copy)]
+struct ScoreBound {
+    value: f64,
+    inclusive: bool,
 }
 
 #[derive(Clone)]
@@ -56,10 +62,16 @@ impl Zrange {
                     idx += 1;
                 }
                 "REV" => {
+                    if reverse {
+                        return Err(Error::msg("ERR syntax error"));
+                    }
                     reverse = true;
                     idx += 1;
                 }
                 "WITHSCORES" => {
+                    if withscores {
+                        return Err(Error::msg("ERR syntax error"));
+                    }
                     withscores = true;
                     idx += 1;
                 }
@@ -85,16 +97,21 @@ impl Zrange {
         }
 
         let range = if by_score {
-            ZrangeBounds::Score(
-                args[2]
-                    .parse::<f64>()
-                    .map_err(|_| Error::msg("ERR min is not a valid float"))?,
-                args[3]
-                    .parse::<f64>()
-                    .map_err(|_| Error::msg("ERR max is not a valid float"))?,
-            )
+            let first = parse_score_bound(&args[2])?;
+            let second = parse_score_bound(&args[3])?;
+            if reverse {
+                ZrangeBounds::Score(second, first)
+            } else {
+                ZrangeBounds::Score(first, second)
+            }
         } else if by_lex {
-            ZrangeBounds::Lex(parse_lex_bound(&args[2])?, parse_lex_bound(&args[3])?)
+            let first = parse_lex_bound(&args[2])?;
+            let second = parse_lex_bound(&args[3])?;
+            if reverse {
+                ZrangeBounds::Lex(second, first)
+            } else {
+                ZrangeBounds::Lex(first, second)
+            }
         } else {
             ZrangeBounds::Rank(
                 args[2]
@@ -118,18 +135,18 @@ impl Zrange {
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let result = match self.range {
             ZrangeBounds::Rank(start, stop) => db.zset_range(&self.key, start, stop, self.reverse),
-            ZrangeBounds::Score(min, max) => {
-                db.zset_range_by_score(&self.key, min, max)
-                    .map(|mut entries| {
-                        if self.reverse {
-                            entries.reverse();
-                        }
-                        if let Some((offset, count)) = self.limit {
-                            entries = entries.into_iter().skip(offset).take(count).collect();
-                        }
-                        entries
-                    })
-            }
+            ZrangeBounds::Score(min, max) => db
+                .zset_range_by_score(&self.key, min.value, max.value)
+                .map(|mut entries| {
+                    entries.retain(|(_, score)| score_in_range(*score, min, max));
+                    if self.reverse {
+                        entries.reverse();
+                    }
+                    if let Some((offset, count)) = self.limit {
+                        entries = entries.into_iter().skip(offset).take(count).collect();
+                    }
+                    entries
+                }),
             ZrangeBounds::Lex(min, max) => {
                 db.zset_range_by_lex(&self.key, &min, &max)
                     .map(|mut entries| {
@@ -156,9 +173,10 @@ impl Zrange {
                     .await
             }
             ZrangeBounds::Score(min, max) => db
-                .zset_range_by_score_async(&self.key, min, max)
+                .zset_range_by_score_async(&self.key, min.value, max.value)
                 .await
                 .map(|mut entries| {
+                    entries.retain(|(_, score)| score_in_range(*score, min, max));
                     if self.reverse {
                         entries.reverse();
                     }
@@ -185,6 +203,26 @@ impl Zrange {
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
+}
+
+fn parse_score_bound(input: &str) -> Result<ScoreBound, Error> {
+    let (value, inclusive) = if let Some(value) = input.strip_prefix('(') {
+        (value, false)
+    } else {
+        (input, true)
+    };
+    let value = value
+        .parse::<f64>()
+        .map_err(|_| Error::msg("ERR min or max is not a float"))?;
+    if value.is_nan() {
+        return Err(Error::msg("ERR min or max is not a float"));
+    }
+    Ok(ScoreBound { value, inclusive })
+}
+
+fn score_in_range(score: f64, min: ScoreBound, max: ScoreBound) -> bool {
+    (score > min.value || (min.inclusive && score == min.value))
+        && (score < max.value || (max.inclusive && score == max.value))
 }
 
 pub(crate) fn flatten_entries(entries: Vec<(String, f64)>, withscores: bool) -> Vec<Frame> {

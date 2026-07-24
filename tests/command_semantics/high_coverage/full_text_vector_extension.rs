@@ -113,6 +113,8 @@ async fn async_full_text_vector_and_extension_dispatch_paths_are_covered_inner()
         apply_async(&db, &["VREM", "points", "b"]).await,
         Frame::Integer(1)
     ));
+    assert!(parse_err(&["VEMB", "points", "a", "IGNORED"]).contains("syntax"));
+    assert!(parse_err(&["VLINKS", "points", "a", "IGNORED"]).contains("syntax"));
 
     assert!(matches!(
         apply_async(
@@ -313,4 +315,3 @@ async fn async_full_text_vector_and_extension_dispatch_paths_are_covered_inner()
         Frame::Ok
     ));
 }
-

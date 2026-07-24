@@ -47,10 +47,14 @@ impl Geoadd {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
+        let mut unique = std::collections::HashMap::new();
+        for (lon, lat, member) in self.items {
+            unique.insert(member, (lon, lat));
+        }
         let mut writes = Vec::new();
         let mut changed = 0usize;
         let mut added = 0usize;
-        for (lon, lat, member) in self.items {
+        for (member, (lon, lat)) in unique {
             let score = encode_score(lon, lat);
             let previous = db.zset_score(&self.key, &member)?;
             if self.nx && previous.is_some() {
@@ -75,10 +79,14 @@ impl Geoadd {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
+        let mut unique = std::collections::HashMap::new();
+        for (lon, lat, member) in self.items {
+            unique.insert(member, (lon, lat));
+        }
         let mut writes = Vec::new();
         let mut changed = 0usize;
         let mut added = 0usize;
-        for (lon, lat, member) in self.items {
+        for (member, (lon, lat)) in unique {
             let score = encode_score(lon, lat);
             let previous = db.zset_score_async(&self.key, &member).await?;
             if self.nx && previous.is_some() {
@@ -119,18 +127,18 @@ impl Geopos {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        Ok(Frame::Array(
-            self.members
-                .into_iter()
-                .map(|member| match db.zset_score(&self.key, &member) {
-                    Ok(Some(score)) => {
-                        let (lon, lat) = decode_score(score as u64);
-                        Frame::Array(vec![bulk_f(lon), bulk_f(lat)])
-                    }
-                    _ => Frame::Null,
-                })
-                .collect(),
-        ))
+        let mut frames = Vec::with_capacity(self.members.len());
+        for member in self.members {
+            match db.zset_score(&self.key, &member) {
+                Ok(Some(score)) => {
+                    let (lon, lat) = decode_score(score as u64);
+                    frames.push(Frame::Array(vec![bulk_f(lon), bulk_f(lat)]));
+                }
+                Ok(None) => frames.push(Frame::Null),
+                Err(err) => return Ok(Frame::Error(err.to_string())),
+            }
+        }
+        Ok(Frame::Array(frames))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
@@ -141,7 +149,8 @@ impl Geopos {
                     let (lon, lat) = decode_score(score as u64);
                     frames.push(Frame::Array(vec![bulk_f(lon), bulk_f(lat)]));
                 }
-                _ => frames.push(Frame::Null),
+                Ok(None) => frames.push(Frame::Null),
+                Err(err) => return Ok(Frame::Error(err.to_string())),
             }
         }
         Ok(Frame::Array(frames))
@@ -155,11 +164,13 @@ impl Geodist {
                 "ERR wrong number of arguments for 'geodist' command",
             ));
         }
+        let unit = frame.get_arg(4).unwrap_or_else(|| "m".to_string());
+        unit_factor(&unit)?;
         Ok(Self {
             key: frame.get_arg(1).unwrap(),
             a: frame.get_arg(2).unwrap(),
             b: frame.get_arg(3).unwrap(),
-            unit: frame.get_arg(4).unwrap_or_else(|| "m".to_string()),
+            unit,
         })
     }
 
@@ -204,18 +215,18 @@ impl Geohash {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        Ok(Frame::Array(
-            self.members
-                .into_iter()
-                .map(|member| match db.zset_score(&self.key, &member) {
-                    Ok(Some(score)) => {
-                        let (lon, lat) = decode_score(score as u64);
-                        Frame::bulk_string(redis_geohash(lon, lat))
-                    }
-                    _ => Frame::Null,
-                })
-                .collect(),
-        ))
+        let mut frames = Vec::with_capacity(self.members.len());
+        for member in self.members {
+            match db.zset_score(&self.key, &member) {
+                Ok(Some(score)) => {
+                    let (lon, lat) = decode_score(score as u64);
+                    frames.push(Frame::bulk_string(redis_geohash(lon, lat)));
+                }
+                Ok(None) => frames.push(Frame::Null),
+                Err(err) => return Ok(Frame::Error(err.to_string())),
+            }
+        }
+        Ok(Frame::Array(frames))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
@@ -226,7 +237,8 @@ impl Geohash {
                     let (lon, lat) = decode_score(score as u64);
                     frames.push(Frame::bulk_string(redis_geohash(lon, lat)));
                 }
-                _ => frames.push(Frame::Null),
+                Ok(None) => frames.push(Frame::Null),
+                Err(err) => return Ok(Frame::Error(err.to_string())),
             }
         }
         Ok(Frame::Array(frames))

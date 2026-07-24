@@ -16,6 +16,9 @@ impl Zintercard {
             if frame.get_arg(idx).unwrap().eq_ignore_ascii_case("LIMIT")
                 && idx + 1 < frame.arg_len()
             {
+                if limit.is_some() {
+                    return Err(Error::msg("ERR syntax error"));
+                }
                 limit = Some(
                     frame
                         .get_arg(idx + 1)

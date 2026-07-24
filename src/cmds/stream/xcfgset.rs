@@ -20,10 +20,10 @@ impl Xcfgset {
     }
 
     pub fn apply(self, _db: &Db) -> Result<Frame, Error> {
-        Ok(Frame::Ok)
+        Ok(Frame::Error("ERR XCFGSET is not supported".to_string()))
     }
 
     pub async fn apply_async(self, _db: &Db) -> Result<Frame, Error> {
-        Ok(Frame::Ok)
+        Ok(Frame::Error("ERR XCFGSET is not supported".to_string()))
     }
 }

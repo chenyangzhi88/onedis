@@ -28,8 +28,8 @@ impl Scard {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.set_members_async(&self.key).await {
-            Ok(members) => Ok(Frame::Integer(members.len() as i64)),
+        match db.set_len_async(&self.key).await {
+            Ok(len) => Ok(Frame::Integer(len as i64)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

@@ -29,12 +29,17 @@ impl Setnx {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        if db.exists(&self.key) {
-            return Ok(Frame::Integer(0));
-        }
-
-        db.insert_string_bytes(self.key, self.value, None);
-        Ok(Frame::Integer(1))
+        let outcome = db.set_string_bytes(
+            self.key,
+            self.value,
+            SetExpiration::Clear,
+            SetCondition::Nx,
+            false,
+        )?;
+        Ok(Frame::Integer(i64::from(matches!(
+            outcome,
+            SetOutcome::Set { .. }
+        ))))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {

@@ -1,5 +1,5 @@
 use anyhow::Error;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{sync::OnceLock, time::Instant};
 
 use crate::{
     frame::Frame,
@@ -14,6 +14,11 @@ pub struct Info {
 impl Info {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let args = frame.get_args();
+        if args.len() > 2 {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'info' command",
+            ));
+        }
 
         let section = if args.len() > 1 {
             Some(args[1].to_lowercase())
@@ -76,12 +81,9 @@ impl Info {
             info.push_str("gcc_version:0.0.0\r\n");
             info.push_str("process_id:0\r\n");
 
-            // Calculate uptime
-            if let Ok(startup_time) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                let uptime = startup_time.as_secs();
-                info.push_str(&format!("uptime_in_seconds:{}\r\n", uptime));
-                info.push_str(&format!("uptime_in_days:{}\r\n", uptime / 86400));
-            }
+            let uptime = process_uptime_seconds();
+            info.push_str(&format!("uptime_in_seconds:{}\r\n", uptime));
+            info.push_str(&format!("uptime_in_days:{}\r\n", uptime / 86400));
 
             info.push_str("hz:10\r\n");
             info.push_str("configured_hz:10\r\n");
@@ -253,6 +255,11 @@ impl Info {
 
         info
     }
+}
+
+fn process_uptime_seconds() -> u64 {
+    static STARTED_AT: OnceLock<Instant> = OnceLock::new();
+    STARTED_AT.get_or_init(Instant::now).elapsed().as_secs()
 }
 
 fn push_command_stat(info: &mut String, command: &CommandStatsSnapshot) {

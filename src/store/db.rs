@@ -110,6 +110,7 @@ mod stream_key_codec;
 mod stream_pending_ops;
 mod string_batch_write_ops;
 mod string_bitmap_ops;
+pub(crate) use string_bitmap_ops::{read_bits_from, write_bits_into};
 mod string_integer_ops;
 mod string_key_readonly;
 mod string_keyspace_flush;

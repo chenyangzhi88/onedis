@@ -30,6 +30,10 @@ impl Db {
         Ok(self.set_meta(key)?.map_or(0, |meta| meta.len))
     }
 
+    pub async fn set_len_async(&self, key: &str) -> Result<usize, Error> {
+        Ok(self.set_meta_async(key).await?.map_or(0, |meta| meta.len))
+    }
+
     /// 返回 set 所有成员。
     pub fn set_members(&self, key: &str) -> Result<Vec<String>, Error> {
         let meta = self.set_meta(key)?;

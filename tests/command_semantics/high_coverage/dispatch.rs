@@ -10,7 +10,7 @@ async fn async_db_dispatch_matrix_covers_remaining_command_families() {
         &["MSET", "m1", "1", "m2", "2"],
         &["MGET", "m1", "m2", "missing"],
         &["MSETNX", "m3", "3", "m4", "4"],
-        &["MSETEX", "EX", "20", "m5", "5", "m6", "6"],
+        &["MSETEX", "2", "m5", "5", "m6", "6", "EX", "20"],
         &["APPEND", "s1", "g"],
         &["SETRANGE", "s1", "2", "ZZ"],
         &["SETBIT", "bits", "7", "1"],
@@ -228,5 +228,4 @@ async fn async_db_dispatch_matrix_covers_remaining_command_families() {
         Frame::Ok
     ));
 }
-
 

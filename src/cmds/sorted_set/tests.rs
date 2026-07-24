@@ -104,7 +104,7 @@ async fn assert_basic_read_and_range_commands(db: &Db) {
         Frame::Array(values) if values.len() == 4
     ));
     assert!(matches!(
-        apply_async(db, &["zrange", "z", "1", "3", "byscore", "rev", "limit", "0", "2"]).await,
+        apply_async(db, &["zrange", "z", "3", "1", "byscore", "rev", "limit", "0", "2"]).await,
         Frame::Array(values) if values.len() == 2
     ));
     assert!(matches!(
@@ -142,7 +142,7 @@ async fn assert_lex_range_commands(db: &Db) {
         Frame::Array(values) if values.len() == 2
     ));
     assert!(matches!(
-        apply_async(db, &["zrange", "lex", "[alpha", "+", "bylex", "rev", "limit", "0", "2"]).await,
+        apply_async(db, &["zrange", "lex", "+", "[alpha", "bylex", "rev", "limit", "0", "2"]).await,
         Frame::Array(values) if values.len() == 2
     ));
     assert!(matches!(
@@ -208,8 +208,8 @@ async fn assert_setops_store_scan_and_random_commands(db: &Db) {
                 "zrangestore",
                 "zr-rev",
                 "z",
-                "1",
                 "3",
+                "1",
                 "byscore",
                 "rev",
                 "limit",

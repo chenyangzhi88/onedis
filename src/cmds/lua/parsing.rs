@@ -32,7 +32,7 @@ impl LuaCommand {
 fn parse_eval_args(
     frame: &Frame,
     command: &'static str,
-) -> Result<(String, Vec<String>, Vec<String>)> {
+) -> Result<(String, Vec<String>, Vec<Vec<u8>>)> {
     if frame.arg_len() < 3 {
         return Err(Error::msg(format!(
             "ERR wrong number of arguments for '{command}' command"
@@ -46,7 +46,10 @@ fn parse_eval_args(
         .ok_or_else(|| Error::msg("ERR invalid numkeys"))?
         .parse::<usize>()
         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
-    if frame.arg_len() < 3 + numkeys {
+    let values_start = 3usize
+        .checked_add(numkeys)
+        .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?;
+    if frame.arg_len() < values_start {
         return Err(Error::msg(
             "ERR Number of keys can't be greater than number of args",
         ));
@@ -59,10 +62,10 @@ fn parse_eval_args(
                 .ok_or_else(|| Error::msg("ERR invalid key"))?,
         );
     }
-    let args = (3 + numkeys..frame.arg_len())
+    let args = (values_start..frame.arg_len())
         .map(|idx| {
             frame
-                .get_arg(idx)
+                .get_arg_bytes(idx)
                 .ok_or_else(|| Error::msg("ERR invalid argument"))
         })
         .collect::<Result<Vec<_>>>()?;

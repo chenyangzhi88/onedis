@@ -1,4 +1,4 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::set::set_array, frame::Frame, store::db::Db};
 use anyhow::Error;
 
 pub struct Sdiff {
@@ -35,9 +35,7 @@ impl Sdiff {
         };
 
         // 将结果转换为 Frame::Array
-        let members: Vec<Frame> = difference.into_iter().map(Frame::bulk_string).collect();
-
-        Ok(Frame::Array(members))
+        set_array(difference)
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
@@ -52,8 +50,6 @@ impl Sdiff {
             Err(err) => return Ok(Frame::Error(err.to_string())),
         };
 
-        let members: Vec<Frame> = difference.into_iter().map(Frame::bulk_string).collect();
-
-        Ok(Frame::Array(members))
+        set_array(difference)
     }
 }

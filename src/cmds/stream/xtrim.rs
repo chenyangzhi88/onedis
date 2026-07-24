@@ -1,6 +1,6 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::stream::text_arg, frame::Frame, store::db::Db};
 
 pub struct Xtrim {
     key: String,
@@ -14,11 +14,11 @@ impl Xtrim {
                 "ERR wrong number of arguments for 'xtrim' command",
             ));
         }
-        if !frame.get_arg(2).unwrap().eq_ignore_ascii_case("MAXLEN") {
+        if !text_arg(&frame, 2)?.eq_ignore_ascii_case("MAXLEN") {
             return Err(Error::msg("ERR syntax error"));
         }
-        let threshold_idx = if frame.get_arg(3).unwrap() == "=" || frame.get_arg(3).unwrap() == "~"
-        {
+        let modifier = text_arg(&frame, 3)?;
+        let threshold_idx = if modifier == "=" || modifier == "~" {
             4
         } else {
             3
@@ -29,13 +29,11 @@ impl Xtrim {
         if frame.arg_len() != threshold_idx + 1 {
             return Err(Error::msg("ERR syntax error"));
         }
-        let max_len = frame
-            .get_arg(threshold_idx)
-            .unwrap()
+        let max_len = text_arg(&frame, threshold_idx)?
             .parse::<usize>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
+            key: text_arg(&frame, 1)?,
             max_len,
         })
     }

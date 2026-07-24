@@ -15,7 +15,11 @@ impl FtSug {
                             idx += 1;
                         }
                         "PAYLOAD" => {
-                            payload = Some(arg(&frame, idx + 1, "ERR invalid suggestion payload")?);
+                            payload = Some(
+                                frame
+                                    .get_arg_bytes(idx + 1)
+                                    .ok_or_else(|| Error::msg("ERR invalid suggestion payload"))?,
+                            );
                             idx += 2;
                         }
                         _ => return Err(Error::msg("ERR syntax error")),

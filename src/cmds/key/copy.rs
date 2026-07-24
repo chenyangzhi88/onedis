@@ -68,6 +68,11 @@ impl Copy {
         if handler.get_args().databases <= target_db {
             return Ok(Frame::Error("ERR DB index is out of range".to_string()));
         }
+        if target_db == source_db as usize && self.source == self.destination {
+            return Err(Error::msg(
+                "ERR source and destination objects are the same",
+            ));
+        }
         let dm = handler.get_db_manager();
         let copied = dm.get_db(source_db as usize).copy_key_to_db(
             target_db as u16,

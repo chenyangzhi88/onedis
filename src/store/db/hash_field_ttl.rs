@@ -20,44 +20,59 @@ impl Db {
             0
         };
         let mut deleted_fields = HashSet::new();
+        let mut staged = HashMap::<String, (bool, u64)>::new();
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
             let field_key = hash_field_key(self.db_index, key, version, field);
-            if self.hash_live_field_value(key, version, field).is_none() {
+            let (exists, current) = if let Some(state) = staged.get(field) {
+                *state
+            } else {
+                let exists = self.hash_live_field_value(key, version, field).is_some();
+                let current = if exists {
+                    self.store
+                        .get_raw(&hash_field_expire_key(self.db_index, key, version, field))
+                        .and_then(|raw| decode_u64_be(&raw))
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                staged.insert(field.clone(), (exists, current));
+                (exists, current)
+            };
+            if !exists {
                 result.push(-2);
                 continue;
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-            let current = self
-                .store
-                .get_raw(&expire_key)
-                .and_then(|raw| decode_u64_be(&raw))
-                .unwrap_or(0);
-            if expire_ms <= now {
-                batch.delete(&field_key);
-                batch.delete(&expire_key);
-                deleted_fields.insert(field);
-                result.push(2);
-                continue;
-            }
             let matches = match condition {
                 ExpireCondition::Always => true,
                 ExpireCondition::Nx => current == 0,
                 ExpireCondition::Xx => current > 0,
                 ExpireCondition::Gt => current > 0 && expire_ms > current,
                 ExpireCondition::Lt => current == 0 || expire_ms < current,
+                ExpireCondition::XxGt => current > 0 && expire_ms > current,
+                ExpireCondition::XxLt => current > 0 && expire_ms < current,
             };
-            if matches {
-                batch.put(
-                    &self.mk(key),
-                    &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
-                );
-                batch.put(&expire_key, &expire_ms.to_be_bytes());
-                result.push(1);
-            } else {
+            if !matches {
                 result.push(0);
+                continue;
             }
+            if delete_immediately {
+                batch.delete(&field_key);
+                batch.delete(&expire_key);
+                deleted_fields.insert(field.clone());
+                staged.insert(field.clone(), (false, 0));
+                result.push(2);
+                continue;
+            }
+            batch.put(
+                &self.mk(key),
+                &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
+            );
+            batch.put(&expire_key, &expire_ms.to_be_bytes());
+            staged.insert(field.clone(), (true, expire_ms));
+            result.push(1);
         }
         if batch.count() > 0 {
             let delete_hash = live_field_count > 0 && deleted_fields.len() == live_field_count;
@@ -114,49 +129,63 @@ impl Db {
             0
         };
         let mut deleted_fields = HashSet::new();
+        let mut staged = HashMap::<String, (bool, u64)>::new();
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
             let field_key = hash_field_key(self.db_index, key, version, field);
-            if self
-                .hash_live_field_value_async(key, version, field)
-                .await
-                .is_none()
-            {
+            let (exists, current) = if let Some(state) = staged.get(field) {
+                *state
+            } else {
+                let exists = self
+                    .hash_live_field_value_async(key, version, field)
+                    .await
+                    .is_some();
+                let current = if exists {
+                    self.store
+                        .get_raw_async(&hash_field_expire_key(self.db_index, key, version, field))
+                        .await
+                        .and_then(|raw| decode_u64_be(&raw))
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                staged.insert(field.clone(), (exists, current));
+                (exists, current)
+            };
+            if !exists {
                 result.push(-2);
                 continue;
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-            let current = self
-                .store
-                .get_raw_async(&expire_key)
-                .await
-                .and_then(|raw| decode_u64_be(&raw))
-                .unwrap_or(0);
-            if expire_ms <= now {
-                batch.delete(&field_key);
-                batch.delete(&expire_key);
-                deleted_fields.insert(field);
-                result.push(2);
-                continue;
-            }
             let matches = match condition {
                 ExpireCondition::Always => true,
                 ExpireCondition::Nx => current == 0,
                 ExpireCondition::Xx => current > 0,
                 ExpireCondition::Gt => current > 0 && expire_ms > current,
                 ExpireCondition::Lt => current == 0 || expire_ms < current,
+                ExpireCondition::XxGt => current > 0 && expire_ms > current,
+                ExpireCondition::XxLt => current > 0 && expire_ms < current,
             };
-            if matches {
-                batch.put(
-                    &self.mk(key),
-                    &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
-                );
-                batch.put(&expire_key, &expire_ms.to_be_bytes());
-                result.push(1);
-            } else {
+            if !matches {
                 result.push(0);
+                continue;
             }
+            if delete_immediately {
+                batch.delete(&field_key);
+                batch.delete(&expire_key);
+                deleted_fields.insert(field.clone());
+                staged.insert(field.clone(), (false, 0));
+                result.push(2);
+                continue;
+            }
+            batch.put(
+                &self.mk(key),
+                &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
+            );
+            batch.put(&expire_key, &expire_ms.to_be_bytes());
+            staged.insert(field.clone(), (true, expire_ms));
+            result.push(1);
         }
         if batch.count() > 0 {
             let delete_hash = live_field_count > 0 && deleted_fields.len() == live_field_count;
@@ -187,16 +216,32 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(vec![-2; fields.len()]);
         };
+        let mut staged = HashMap::<String, (bool, bool)>::new();
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
-            if self.hash_live_field_value(key, version, field).is_none() {
+            let (exists, has_ttl) = if let Some(state) = staged.get(field) {
+                *state
+            } else {
+                let exists = self.hash_live_field_value(key, version, field).is_some();
+                let has_ttl = exists
+                    && self.store.contains_key(&hash_field_expire_key(
+                        self.db_index,
+                        key,
+                        version,
+                        field,
+                    ));
+                staged.insert(field.clone(), (exists, has_ttl));
+                (exists, has_ttl)
+            };
+            if !exists {
                 result.push(-2);
                 continue;
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-            if self.store.contains_key(&expire_key) {
+            if has_ttl {
                 batch.delete(&expire_key);
+                staged.insert(field.clone(), (true, false));
                 result.push(1);
             } else {
                 result.push(-1);
@@ -229,20 +274,38 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(vec![-2; fields.len()]);
         };
+        let mut staged = HashMap::<String, (bool, bool)>::new();
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
-            if self
-                .hash_live_field_value_async(key, version, field)
-                .await
-                .is_none()
-            {
+            let (exists, has_ttl) = if let Some(state) = staged.get(field) {
+                *state
+            } else {
+                let exists = self
+                    .hash_live_field_value_async(key, version, field)
+                    .await
+                    .is_some();
+                let has_ttl = exists
+                    && self
+                        .store
+                        .contains_key_async(&hash_field_expire_key(
+                            self.db_index,
+                            key,
+                            version,
+                            field,
+                        ))
+                        .await;
+                staged.insert(field.clone(), (exists, has_ttl));
+                (exists, has_ttl)
+            };
+            if !exists {
                 result.push(-2);
                 continue;
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-            if self.store.contains_key_async(&expire_key).await {
+            if has_ttl {
                 batch.delete(&expire_key);
+                staged.insert(field.clone(), (true, false));
                 result.push(1);
             } else {
                 result.push(-1);

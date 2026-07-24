@@ -1,6 +1,5 @@
-use std::collections::HashSet;
-
 use crate::{
+    cmds::set::set_array,
     frame::Frame,
     store::db::{Db, Structure},
 };
@@ -28,7 +27,7 @@ impl Sunion {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let mut result_set = HashSet::new();
+        let mut result_set = std::collections::HashSet::new();
         for key in self.keys {
             if let Some(structure) = db.get(&key) {
                 match structure {
@@ -45,17 +44,12 @@ impl Sunion {
             }
         }
 
-        // 将结果转换为 Frame::Array
-        let members: Vec<Frame> = result_set.into_iter().map(Frame::bulk_string).collect();
-
-        Ok(Frame::Array(members))
+        set_array(result_set)
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db.set_union_async(&self.keys).await {
-            Ok(result_set) => Ok(Frame::Array(
-                result_set.into_iter().map(Frame::bulk_string).collect(),
-            )),
+            Ok(result_set) => set_array(result_set),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

@@ -21,10 +21,13 @@ impl Sintercard {
         if numkeys == 0 {
             return Err(Error::msg("ERR numkeys should be greater than 0"));
         }
-        if args.len() < 2 + numkeys {
+        let keys_end = 2usize
+            .checked_add(numkeys)
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?;
+        if args.len() < keys_end {
             return Err(Error::msg("ERR syntax error"));
         }
-        let mut idx = 2 + numkeys;
+        let mut idx = keys_end;
         let mut limit = 0usize;
         let mut limit_seen = false;
         while idx < args.len() {
@@ -45,7 +48,7 @@ impl Sintercard {
             }
         }
         Ok(Self {
-            keys: args[2..2 + numkeys].to_vec(),
+            keys: args[2..keys_end].to_vec(),
             limit,
         })
     }
@@ -58,15 +61,8 @@ impl Sintercard {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.set_intersection_async(&self.keys).await {
-            Ok(intersection) => {
-                let count = if self.limit > 0 {
-                    intersection.len().min(self.limit)
-                } else {
-                    intersection.len()
-                };
-                Ok(Frame::Integer(count as i64))
-            }
+        match db.set_intersection_card_async(&self.keys, self.limit).await {
+            Ok(count) => Ok(Frame::Integer(count as i64)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

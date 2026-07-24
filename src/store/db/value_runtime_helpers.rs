@@ -27,27 +27,3 @@ pub(in crate::store::db) fn set_write_lock_shard(db_index: u16, key: &str) -> us
     }
     hash as usize & (SET_WRITE_LOCK_SHARDS - 1)
 }
-
-pub(in crate::store::db) fn normalize_byte_index(len: usize, index: i64) -> Option<usize> {
-    let len = len as i64;
-    let normalized = if index < 0 { len + index } else { index };
-    (normalized >= 0).then_some(normalized as usize)
-}
-
-pub(in crate::store::db) fn byte_range_slice(
-    bytes: &[u8],
-    start: Option<i64>,
-    end: Option<i64>,
-) -> &[u8] {
-    if bytes.is_empty() {
-        return bytes;
-    }
-    let start = normalize_byte_index(bytes.len(), start.unwrap_or(0)).unwrap_or(0);
-    let end = end
-        .and_then(|idx| normalize_byte_index(bytes.len(), idx))
-        .unwrap_or(bytes.len() - 1);
-    if start > end || start >= bytes.len() {
-        return &bytes[0..0];
-    }
-    &bytes[start..=end.min(bytes.len() - 1)]
-}

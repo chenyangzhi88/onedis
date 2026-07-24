@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::set::{set_array, validate_count},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Srandmember {
     key: String,
@@ -24,6 +28,9 @@ impl Srandmember {
         } else {
             None
         };
+        if let Some(count) = count {
+            validate_count(count.unsigned_abs())?;
+        }
         Ok(Srandmember {
             key: args[1].to_string(),
             count,
@@ -35,9 +42,7 @@ impl Srandmember {
             Ok(Some(members)) if self.count.is_none() => Ok(Frame::bulk_string(
                 members.into_iter().next().unwrap_or_default(),
             )),
-            Ok(Some(members)) => Ok(Frame::Array(
-                members.into_iter().map(Frame::bulk_string).collect(),
-            )),
+            Ok(Some(members)) => set_array(members),
             Ok(None) if self.count.is_none() => Ok(Frame::Null),
             Ok(None) => Ok(Frame::Array(Vec::new())),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -49,9 +54,7 @@ impl Srandmember {
             Ok(Some(members)) if self.count.is_none() => Ok(Frame::bulk_string(
                 members.into_iter().next().unwrap_or_default(),
             )),
-            Ok(Some(members)) => Ok(Frame::Array(
-                members.into_iter().map(Frame::bulk_string).collect(),
-            )),
+            Ok(Some(members)) => set_array(members),
             Ok(None) if self.count.is_none() => Ok(Frame::Null),
             Ok(None) => Ok(Frame::Array(Vec::new())),
             Err(err) => Ok(Frame::Error(err.to_string())),

@@ -8,14 +8,15 @@ pub struct Type {
 
 impl Type {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let key = frame.get_arg(1);
-        if frame.arg_len() != 2 || key.is_none() {
+        if frame.arg_len() != 2 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'type' command",
             ));
         }
-        let final_key = key.unwrap().to_string();
-        Ok(Type { key: final_key })
+        let key = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'type' command"))?;
+        Ok(Type { key })
     }
 
     pub fn new(key: String) -> Self {

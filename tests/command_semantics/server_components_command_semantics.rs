@@ -105,7 +105,7 @@ fn handler_public_accessors_login_acl_and_client_name_state() {
     let _guard = rt.enter();
     let args = test_args_with_config(2, Some("secret"));
     let db_manager = Arc::new(rt.block_on(DatabaseManager::new_async(args.clone())));
-    let session_manager = Arc::new(SessionManager::new());
+    let session_manager = Arc::new(SessionManager::with_default_password(Some("secret")));
     let command_executor = Arc::new(CommandExecutor::new(1, 8).unwrap());
     let wasm_registry = Arc::new(WasmRegistry::new());
     let (server_stream, _client_stream) = rt.block_on(connected_streams());
@@ -172,6 +172,11 @@ async fn session_manager_tracks_sessions_acl_and_pubsub_lifecycle() {
     assert!(clients.contains("name=client-a"));
     assert!(clients.contains("db=2"));
     assert!(clients.contains("cmd=get"));
+    assert!(
+        manager
+            .try_client_list_filtered(&ClientListFilter::default(), 1)
+            .is_err()
+    );
 
     session.set_current_db(3);
     session.set_user("limited".to_string());
@@ -344,7 +349,7 @@ fn auth_command_authenticates_handler_session() {
     let _guard = rt.enter();
     let args = test_args_with_requirepass("secret");
     let db_manager = Arc::new(rt.block_on(DatabaseManager::new_async(args.clone())));
-    let session_manager = Arc::new(SessionManager::new());
+    let session_manager = Arc::new(SessionManager::with_default_password(Some("secret")));
     let command_executor = Arc::new(CommandExecutor::new(1, 8).unwrap());
     let wasm_registry = Arc::new(WasmRegistry::new());
     let (server_stream, _client_stream) = rt.block_on(connected_streams());
@@ -421,6 +426,63 @@ fn connect_commands_cover_reply_and_client_name_semantics() {
         other => panic!("expected CLIENT command, got {}", other.name()),
     };
     assert!(matches!(frame, Frame::BulkString(value) if value == b"worker-1"));
+
+    for args in [
+        ["client", "setinfo", "LIB-NAME", "redis-rs"],
+        ["client", "setinfo", "LIB-VER", "1.0.0"],
+        ["client", "no-evict", "on", ""],
+        ["client", "no-touch", "on", ""],
+    ] {
+        let args = args
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let command = Command::parse_from_frame(frame_args(&args)).unwrap();
+        let frame = match command {
+            Command::Client(command) => command.apply_with_handler(&mut handler).unwrap(),
+            other => panic!("expected CLIENT command, got {}", other.name()),
+        };
+        assert!(matches!(frame, Frame::Ok));
+    }
+
+    let client_id = handler.get_session().get_id();
+    let info = Command::parse_from_frame(frame_args(&["client", "info"])).unwrap();
+    let frame = match info {
+        Command::Client(command) => command.apply_with_handler(&mut handler).unwrap(),
+        other => panic!("expected CLIENT command, got {}", other.name()),
+    };
+    let Frame::BulkString(info) = frame else {
+        panic!("expected CLIENT INFO bulk response");
+    };
+    let info = String::from_utf8(info).unwrap();
+    assert!(info.contains("lib-name=redis-rs"));
+    assert!(info.contains("lib-ver=1.0.0"));
+    assert!(info.contains("flags=eT"));
+
+    let id = client_id.to_string();
+    let list = Command::parse_from_frame(frame_args(&["client", "list", "id", &id])).unwrap();
+    let frame = match list {
+        Command::Client(command) => command.apply_with_handler(&mut handler).unwrap(),
+        other => panic!("expected CLIENT command, got {}", other.name()),
+    };
+    assert!(
+        matches!(frame, Frame::BulkString(value) if String::from_utf8_lossy(&value).contains(&format!("id={client_id}")))
+    );
+
+    for args in [
+        vec!["client", "id", "extra"],
+        vec!["client", "info", "extra"],
+        vec!["client", "list", "type", "invalid"],
+        vec!["client", "setinfo", "invalid", "value"],
+        vec!["client", "setname", "contains space"],
+    ] {
+        let command = Command::parse_from_frame(frame_args(&args)).unwrap();
+        let frame = match command {
+            Command::Client(command) => command.apply_with_handler(&mut handler).unwrap(),
+            other => panic!("expected CLIENT command, got {}", other.name()),
+        };
+        assert!(matches!(frame, Frame::Error(_)), "{args:?}");
+    }
 
     let select = Command::parse_from_frame(frame_args(&["select", "1"])).unwrap();
     let frame = match select {

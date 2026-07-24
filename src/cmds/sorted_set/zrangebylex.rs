@@ -1,12 +1,19 @@
 use anyhow::Error;
 
-use crate::{cmds::sorted_set::zrange::parse_lex_bound, frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::{
+        common::{text_arg, validate_entry_count},
+        zrange::{apply_limit, flatten_entries, parse_lex_bound},
+    },
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Zrangebylex {
     key: String,
     min: crate::cmds::sorted_set::zrange::LexBound,
     max: crate::cmds::sorted_set::zrange::LexBound,
-    limit: Option<(usize, usize)>,
+    limit: Option<(i64, i64)>,
     reverse: bool,
 }
 
@@ -21,15 +28,8 @@ impl Zrangebylex {
                 if self.reverse {
                     entries.reverse();
                 }
-                if let Some((offset, count)) = self.limit {
-                    entries = entries.into_iter().skip(offset).take(count).collect();
-                }
-                Ok(Frame::Array(
-                    entries
-                        .into_iter()
-                        .map(|(m, _)| Frame::bulk_string(m))
-                        .collect(),
-                ))
+                entries = apply_limit(entries, self.limit);
+                Ok(Frame::Array(flatten_entries(entries, false)?))
             }
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
@@ -44,15 +44,8 @@ impl Zrangebylex {
                 if self.reverse {
                     entries.reverse();
                 }
-                if let Some((offset, count)) = self.limit {
-                    entries = entries.into_iter().skip(offset).take(count).collect();
-                }
-                Ok(Frame::Array(
-                    entries
-                        .into_iter()
-                        .map(|(m, _)| Frame::bulk_string(m))
-                        .collect(),
-                ))
+                entries = apply_limit(entries, self.limit);
+                Ok(Frame::Array(flatten_entries(entries, false)?))
             }
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
@@ -72,26 +65,24 @@ pub(crate) fn parse_range_lex(
     }
     let mut limit = None;
     if frame.arg_len() == 7 {
-        if !frame.get_arg(4).unwrap().eq_ignore_ascii_case("LIMIT") {
+        if !text_arg(&frame, 4)?.eq_ignore_ascii_case("LIMIT") {
             return Err(Error::msg("ERR syntax error"));
         }
-        limit = Some((
-            frame
-                .get_arg(5)
-                .unwrap()
-                .parse::<usize>()
-                .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
-            frame
-                .get_arg(6)
-                .unwrap()
-                .parse::<usize>()
-                .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
-        ));
+        let offset = text_arg(&frame, 5)?
+            .parse::<i64>()
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+        let count = text_arg(&frame, 6)?
+            .parse::<i64>()
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+        if count >= 0 {
+            validate_entry_count(count as u64, false)?;
+        }
+        limit = Some((offset, count));
     }
     Ok(Zrangebylex {
-        key: frame.get_arg(1).unwrap(),
-        min: parse_lex_bound(&frame.get_arg(if reverse { 3 } else { 2 }).unwrap())?,
-        max: parse_lex_bound(&frame.get_arg(if reverse { 2 } else { 3 }).unwrap())?,
+        key: text_arg(&frame, 1)?,
+        min: parse_lex_bound(&text_arg(&frame, if reverse { 3 } else { 2 })?)?,
+        max: parse_lex_bound(&text_arg(&frame, if reverse { 2 } else { 3 })?)?,
         limit,
         reverse,
     })

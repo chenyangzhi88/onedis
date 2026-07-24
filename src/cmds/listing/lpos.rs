@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::listing::{text_arg, validate_response_count},
+    frame::{Frame, MAX_ARRAY_ELEMENTS},
+    store::db::Db,
+};
 
 pub struct Lpos {
     key: String,
@@ -18,8 +22,8 @@ impl Lpos {
             ));
         }
 
-        let key = frame.get_arg(1).unwrap();
-        let element = frame.get_arg(2).unwrap();
+        let key = text_arg(&frame, 1)?;
+        let element = text_arg(&frame, 2)?;
         let mut rank = 1;
         let mut count = None;
         let mut maxlen = None;
@@ -31,9 +35,7 @@ impl Lpos {
                 .to_ascii_uppercase();
             match option.as_str() {
                 "RANK" if idx + 1 < frame.arg_len() => {
-                    rank = frame
-                        .get_arg(idx + 1)
-                        .unwrap()
+                    rank = text_arg(&frame, idx + 1)?
                         .parse::<i64>()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
                     if rank == 0 {
@@ -42,27 +44,20 @@ impl Lpos {
                     idx += 2;
                 }
                 "COUNT" if idx + 1 < frame.arg_len() => {
-                    count = Some(
-                        frame
-                            .get_arg(idx + 1)
-                            .unwrap()
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                Error::msg("ERR value is not an integer or out of range")
-                            })?,
-                    );
+                    count =
+                        Some(text_arg(&frame, idx + 1)?.parse::<usize>().map_err(|_| {
+                            Error::msg("ERR value is not an integer or out of range")
+                        })?);
+                    if count.is_some_and(|count| count > MAX_ARRAY_ELEMENTS) {
+                        return Err(Error::msg("ERR count exceeds configured response limit"));
+                    }
                     idx += 2;
                 }
                 "MAXLEN" if idx + 1 < frame.arg_len() => {
-                    maxlen = Some(
-                        frame
-                            .get_arg(idx + 1)
-                            .unwrap()
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                Error::msg("ERR value is not an integer or out of range")
-                            })?,
-                    );
+                    maxlen =
+                        Some(text_arg(&frame, idx + 1)?.parse::<usize>().map_err(|_| {
+                            Error::msg("ERR value is not an integer or out of range")
+                        })?);
                     idx += 2;
                 }
                 _ => return Err(Error::msg("ERR syntax error")),
@@ -79,13 +74,28 @@ impl Lpos {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.list_positions(&self.key, &self.element, self.rank, self.count, self.maxlen) {
-            Ok(positions) if self.count.is_some() => Ok(Frame::Array(
+        let requested_count = self.count;
+        let bounded_count = requested_count.map(|count| {
+            if count == 0 {
+                MAX_ARRAY_ELEMENTS.saturating_add(1)
+            } else {
+                count
+            }
+        });
+        match db.list_positions(
+            &self.key,
+            &self.element,
+            self.rank,
+            bounded_count,
+            self.maxlen,
+        ) {
+            Ok(positions) if self.count.is_some() => Ok(Frame::Array({
+                validate_response_count(positions.len())?;
                 positions
                     .into_iter()
                     .map(|position| Frame::Integer(position as i64))
-                    .collect(),
-            )),
+                    .collect()
+            })),
             Ok(mut positions) => match positions.pop() {
                 Some(position) => Ok(Frame::Integer(position as i64)),
                 None => Ok(Frame::Null),
@@ -95,16 +105,31 @@ impl Lpos {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
+        let requested_count = self.count;
+        let bounded_count = requested_count.map(|count| {
+            if count == 0 {
+                MAX_ARRAY_ELEMENTS.saturating_add(1)
+            } else {
+                count
+            }
+        });
         match db
-            .list_positions_async(&self.key, &self.element, self.rank, self.count, self.maxlen)
+            .list_positions_async(
+                &self.key,
+                &self.element,
+                self.rank,
+                bounded_count,
+                self.maxlen,
+            )
             .await
         {
-            Ok(positions) if self.count.is_some() => Ok(Frame::Array(
+            Ok(positions) if self.count.is_some() => Ok(Frame::Array({
+                validate_response_count(positions.len())?;
                 positions
                     .into_iter()
                     .map(|position| Frame::Integer(position as i64))
-                    .collect(),
-            )),
+                    .collect()
+            })),
             Ok(mut positions) => match positions.pop() {
                 Some(position) => Ok(Frame::Integer(position as i64)),
                 None => Ok(Frame::Null),

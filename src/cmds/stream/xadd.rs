@@ -1,6 +1,7 @@
 use anyhow::Error;
 
 use crate::{
+    cmds::stream::text_arg,
     frame::Frame,
     store::db::{Db, StreamId},
 };
@@ -13,13 +14,8 @@ pub struct Xadd {
 
 impl Xadd {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let key = frame
-            .get_arg(1)
-            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'xadd' command"))?
-            .to_string();
-        let id_arg = frame
-            .get_arg(2)
-            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'xadd' command"))?;
+        let key = text_arg(&frame, 1)?;
+        let id_arg = text_arg(&frame, 2)?;
         let id = if id_arg == "*" {
             None
         } else {
@@ -38,8 +34,8 @@ impl Xadd {
         let mut fields = Vec::with_capacity((arg_len - 3) / 2);
         let mut idx = 3;
         while idx < arg_len {
-            let field = frame.get_arg(idx).unwrap().to_string();
-            let value = frame.get_arg(idx + 1).unwrap().to_string();
+            let field = text_arg(&frame, idx)?;
+            let value = text_arg(&frame, idx + 1)?;
             fields.push((field, value));
             idx += 2;
         }

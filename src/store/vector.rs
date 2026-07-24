@@ -1,8 +1,12 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, RwLock},
-    time::Instant,
+    hash::{BuildHasher, Hash, Hasher},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Error;
@@ -18,7 +22,7 @@ use serde_json::Value as JsonValue;
 use super::{
     Db, Structure, TYPE_VECTOR, VECTOR_DOC_NAMESPACE, VECTOR_GRAPH_NAMESPACE,
     VECTOR_META_NAMESPACE, VECTOR_NUMERIC_NAMESPACE, VECTOR_SEGMENT_NAMESPACE,
-    VECTOR_TAG_NAMESPACE, Vector, VectorObservabilitySnapshot, WRONG_TYPE_ERROR,
+    VECTOR_TAG_NAMESPACE, Vector, VectorLinkLayers, VectorObservabilitySnapshot, WRONG_TYPE_ERROR,
     decode_meta_header, encode_entry, main_key, sub_key_range_start_bytes,
 };
 use crate::observability::metrics::{elapsed_us, global_metrics};

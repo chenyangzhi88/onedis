@@ -8,17 +8,17 @@ pub struct Rename {
 
 impl Rename {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let old_key = frame.get_arg(1);
-        let new_key = frame.get_arg(2);
-
-        if frame.arg_len() != 3 || old_key.is_none() || new_key.is_none() {
+        if frame.arg_len() != 3 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'rename' command",
             ));
         }
-
-        let old_key_str = old_key.unwrap().to_string(); // 旧键
-        let new_key_str = new_key.unwrap().to_string(); // 新键
+        let old_key_str = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'rename' command"))?;
+        let new_key_str = frame
+            .get_arg(2)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'rename' command"))?;
 
         Ok(Rename {
             old_key: old_key_str,
@@ -27,14 +27,7 @@ impl Rename {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        if !db.exists(&self.old_key) {
-            return Err(Error::msg("ERR no such key"));
-        }
-
-        if let Some(value) = db.remove(&self.old_key) {
-            db.insert(self.new_key.clone(), value);
-        }
-
+        db.rename_key(&self.old_key, &self.new_key, true)?;
         Ok(Frame::Ok)
     }
 

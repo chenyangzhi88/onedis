@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::listing::{list_array, text_arg, validate_response_count},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Blmpop {
     pub(crate) timeout_secs: f64,
@@ -16,9 +20,7 @@ impl Blmpop {
                 "ERR wrong number of arguments for 'blmpop' command",
             ));
         }
-        let timeout_secs = frame
-            .get_arg(1)
-            .unwrap()
+        let timeout_secs = text_arg(&frame, 1)?
             .parse::<f64>()
             .map_err(|_| Error::msg("ERR timeout is not a float or out of range"))?;
         if !timeout_secs.is_finite() {
@@ -27,24 +29,22 @@ impl Blmpop {
         if timeout_secs < 0.0 {
             return Err(Error::msg("ERR timeout is negative"));
         }
-        let num_keys = frame
-            .get_arg(2)
-            .unwrap()
+        let num_keys = text_arg(&frame, 2)?
             .parse::<usize>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
         if num_keys == 0 {
             return Err(Error::msg("ERR numkeys should be greater than 0"));
         }
-        let direction_idx = 3 + num_keys;
+        let direction_idx = 3usize
+            .checked_add(num_keys)
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?;
         if frame.arg_len() != direction_idx + 1 && frame.arg_len() != direction_idx + 3 {
             return Err(Error::msg("ERR syntax error"));
         }
         let keys = (0..num_keys)
-            .map(|idx| frame.get_arg(3 + idx).unwrap())
-            .collect();
-        let left = match frame
-            .get_arg(direction_idx)
-            .unwrap()
+            .map(|idx| text_arg(&frame, 3 + idx))
+            .collect::<Result<Vec<_>, _>>()?;
+        let left = match text_arg(&frame, direction_idx)?
             .to_ascii_uppercase()
             .as_str()
         {
@@ -54,22 +54,17 @@ impl Blmpop {
         };
         let mut count = 1;
         if frame.arg_len() == direction_idx + 3 {
-            if !frame
-                .get_arg(direction_idx + 1)
-                .unwrap()
-                .eq_ignore_ascii_case("COUNT")
-            {
+            if !text_arg(&frame, direction_idx + 1)?.eq_ignore_ascii_case("COUNT") {
                 return Err(Error::msg("ERR syntax error"));
             }
-            count = frame
-                .get_arg(direction_idx + 2)
-                .unwrap()
+            count = text_arg(&frame, direction_idx + 2)?
                 .parse::<usize>()
                 .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
             if count == 0 {
                 return Err(Error::msg("ERR count should be greater than 0"));
             }
         }
+        validate_response_count(count)?;
         Ok(Self {
             timeout_secs,
             keys,
@@ -82,7 +77,7 @@ impl Blmpop {
         match db.list_multi_pop(&self.keys, self.left, self.count) {
             Ok(Some((key, values))) => Ok(Frame::Array(vec![
                 Frame::bulk_string(key),
-                Frame::Array(values.into_iter().map(Frame::bulk_string).collect()),
+                list_array(values)?,
             ])),
             Ok(None) => Ok(Frame::Null),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -96,7 +91,7 @@ impl Blmpop {
         {
             Ok(Some((key, values))) => Ok(Frame::Array(vec![
                 Frame::bulk_string(key),
-                Frame::Array(values.into_iter().map(Frame::bulk_string).collect()),
+                list_array(values)?,
             ])),
             Ok(None) => Ok(Frame::Null),
             Err(err) => Ok(Frame::Error(err.to_string())),

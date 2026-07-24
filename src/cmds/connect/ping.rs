@@ -8,7 +8,7 @@ pub struct Ping {
 
 impl Ping {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        if frame.arg_len() > 2 {
+        if !(1..=2).contains(&frame.arg_len()) {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'ping' command",
             ));

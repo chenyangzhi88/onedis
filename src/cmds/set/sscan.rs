@@ -1,4 +1,8 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::set::{set_array, validate_count},
+    frame::Frame,
+    store::db::Db,
+};
 use anyhow::Error;
 
 pub struct Sscan {
@@ -38,6 +42,7 @@ impl Sscan {
                 if parsed == 0 {
                     return Err(Error::msg("ERR syntax error"));
                 }
+                validate_count(parsed)?;
                 count = Some(parsed);
                 i += 2;
             } else {
@@ -61,7 +66,7 @@ impl Sscan {
         match db.set_scan(&self.key, self.cursor, &pattern, count) {
             Ok((next_cursor, members)) => Ok(Frame::Array(vec![
                 Frame::bulk_string(next_cursor.to_string()),
-                Frame::Array(members.into_iter().map(Frame::bulk_string).collect()),
+                set_array(members)?,
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
@@ -78,7 +83,7 @@ impl Sscan {
         {
             Ok((next_cursor, members)) => Ok(Frame::Array(vec![
                 Frame::bulk_string(next_cursor.to_string()),
-                Frame::Array(members.into_iter().map(Frame::bulk_string).collect()),
+                set_array(members)?,
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }

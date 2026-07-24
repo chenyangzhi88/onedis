@@ -1,7 +1,7 @@
 use anyhow::Error;
 
 use crate::{
-    cmds::stream::{stream_entry_frame, xrange::parse_range_bound},
+    cmds::stream::{stream_entries_frame, text_arg, validate_count, xrange::parse_range_bound},
     frame::Frame,
     store::db::{Db, StreamId},
 };
@@ -20,23 +20,19 @@ impl Xrevrange {
                 "ERR wrong number of arguments for 'xrevrange' command",
             ));
         }
-        let key = frame.get_arg(1).unwrap().to_string();
-        let end = parse_range_bound(frame.get_arg(2).unwrap().as_str(), false)?;
-        let start = parse_range_bound(frame.get_arg(3).unwrap().as_str(), true)?;
+        let key = text_arg(&frame, 1)?;
+        let end = parse_range_bound(&text_arg(&frame, 2)?, false)?;
+        let start = parse_range_bound(&text_arg(&frame, 3)?, true)?;
         let mut count = None;
         let mut idx = 4;
         while idx < frame.arg_len() {
-            match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+            match text_arg(&frame, idx)?.to_ascii_uppercase().as_str() {
                 "COUNT" if idx + 1 < frame.arg_len() => {
-                    count = Some(
-                        frame
-                            .get_arg(idx + 1)
-                            .unwrap()
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                Error::msg("ERR value is not an integer or out of range")
-                            })?,
-                    );
+                    let parsed = text_arg(&frame, idx + 1)?
+                        .parse::<usize>()
+                        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+                    validate_count(parsed)?;
+                    count = Some(parsed);
                     idx += 2;
                 }
                 _ => return Err(Error::msg("ERR syntax error")),
@@ -52,9 +48,7 @@ impl Xrevrange {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         match db.stream_range(&self.key, self.start, self.end, self.count, true) {
-            Ok(entries) => Ok(Frame::Array(
-                entries.into_iter().map(stream_entry_frame).collect(),
-            )),
+            Ok(entries) => stream_entries_frame(entries),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -64,9 +58,7 @@ impl Xrevrange {
             .stream_range_async(&self.key, self.start, self.end, self.count, true)
             .await
         {
-            Ok(entries) => Ok(Frame::Array(
-                entries.into_iter().map(stream_entry_frame).collect(),
-            )),
+            Ok(entries) => stream_entries_frame(entries),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

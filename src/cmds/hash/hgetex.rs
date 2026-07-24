@@ -1,7 +1,7 @@
 use anyhow::Error;
 
 use crate::{
-    cmds::hash::common::{parse_expire_update, parse_hash_fields},
+    cmds::hash::common::{checked_bulk_array, parse_expire_update, parse_hash_fields},
     frame::Frame,
     store::{db::Db, db::StringExpireUpdate},
 };
@@ -31,28 +31,18 @@ impl Hgetex {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get_ex(&self.key, &self.fields, self.expiration) {
-            Ok(values) => Ok(Frame::Array(
-                values
-                    .into_iter()
-                    .map(|value| value.map(Frame::bulk_string).unwrap_or(Frame::Null))
-                    .collect(),
-            )),
+        match db.hash_get_ex_bytes(&self.key, &self.fields, self.expiration) {
+            Ok(values) => checked_bulk_array(values),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db
-            .hash_get_ex_async(&self.key, &self.fields, self.expiration)
+            .hash_get_ex_bytes_async(&self.key, &self.fields, self.expiration)
             .await
         {
-            Ok(values) => Ok(Frame::Array(
-                values
-                    .into_iter()
-                    .map(|value| value.map(Frame::bulk_string).unwrap_or(Frame::Null))
-                    .collect(),
-            )),
+            Ok(values) => checked_bulk_array(values),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

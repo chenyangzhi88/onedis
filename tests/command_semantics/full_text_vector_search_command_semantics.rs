@@ -277,22 +277,54 @@ fn ft_search_vector_clause_can_be_nested_in_conjunctions() {
 #[test]
 fn ft_hybrid_vector_reuses_search_vector_execution() {
     let (_dir, db) = seed_vector_index();
-    let ids = search_ids(apply(
+    let result = array(apply(
         &db,
         &[
             "FT.HYBRID",
             "idx",
-            "*=>[KNN 1 @embedding $vec]",
+            "SEARCH",
+            "blue",
+            "YIELD_SCORE_AS",
+            "text_score",
+            "VSIM",
+            "@embedding",
+            "$vec",
+            "KNN",
+            "4",
+            "K",
+            "1",
+            "YIELD_DISTANCE_AS",
+            "distance",
+            "COMBINE",
+            "RRF",
+            "6",
+            "WINDOW",
+            "5",
+            "CONSTANT",
+            "10",
+            "YIELD_SCORE_AS",
+            "hybrid_score",
             "PARAMS",
             "2",
             "vec",
             "[0,1]",
-            "NOCONTENT",
+            "LOAD",
+            "3",
+            "text_score",
+            "distance",
+            "hybrid_score",
+            "WITHSCORES",
             "DIALECT",
             "2",
         ],
     ));
-    assert_eq!(ids, vec!["doc:2"]);
+    assert_eq!(integer(&result[0]), 1);
+    assert_eq!(bulk_text(&result[1]), "doc:2");
+    let score = bulk_text(&result[2]).parse::<f32>().unwrap();
+    assert!(score > 0.0);
+    assert!(field_value(&result[3], "text_score").is_some());
+    assert!(field_value(&result[3], "distance").is_some());
+    assert!(field_value(&result[3], "hybrid_score").is_some());
 }
 
 #[test]

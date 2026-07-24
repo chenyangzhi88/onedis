@@ -1,6 +1,6 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::sorted_set::common::text_arg, frame::Frame, store::db::Db};
 
 pub struct Bzpopmin {
     pub(crate) keys: Vec<String>,
@@ -55,9 +55,7 @@ pub(crate) fn parse_bzpop(frame: Frame, min: bool, command: &str) -> Result<Bzpo
             command
         )));
     }
-    let timeout_secs = frame
-        .get_arg(frame.arg_len() - 1)
-        .unwrap()
+    let timeout_secs = text_arg(&frame, frame.arg_len() - 1)?
         .parse::<f64>()
         .map_err(|_| Error::msg("ERR timeout is not a float or out of range"))?;
     if !timeout_secs.is_finite() {
@@ -67,8 +65,8 @@ pub(crate) fn parse_bzpop(frame: Frame, min: bool, command: &str) -> Result<Bzpo
         return Err(Error::msg("ERR timeout is negative"));
     }
     let keys = (1..frame.arg_len() - 1)
-        .map(|idx| frame.get_arg(idx).unwrap())
-        .collect();
+        .map(|idx| text_arg(&frame, idx))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Bzpopmin {
         keys,
         timeout_secs,

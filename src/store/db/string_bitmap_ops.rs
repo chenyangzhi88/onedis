@@ -72,8 +72,7 @@ impl Db {
         end: Option<i64>,
     ) -> Result<u64, Error> {
         let bytes = self.get_string_bytes(key)?.unwrap_or_default();
-        let slice = byte_range_slice(&bytes, start, end);
-        Ok(slice.iter().map(|byte| byte.count_ones() as u64).sum())
+        Ok(byte_bitcount_range(&bytes, start, end))
     }
 
     pub async fn string_bitcount_async(
@@ -83,8 +82,7 @@ impl Db {
         end: Option<i64>,
     ) -> Result<u64, Error> {
         let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
-        let slice = byte_range_slice(&bytes, start, end);
-        Ok(slice.iter().map(|byte| byte.count_ones() as u64).sum())
+        Ok(byte_bitcount_range(&bytes, start, end))
     }
 
     pub fn string_bitcount_with_unit(
@@ -125,28 +123,10 @@ impl Db {
         if bit > 1 {
             return Err(Error::msg("ERR bit is not an integer or out of range"));
         }
-        let bytes = self.get_string_bytes(key)?.unwrap_or_default();
-        let start_byte = normalize_byte_index(bytes.len(), start.unwrap_or(0)).unwrap_or(0);
-        let end_byte = end
-            .and_then(|idx| normalize_byte_index(bytes.len(), idx))
-            .unwrap_or(bytes.len().saturating_sub(1));
-        if start_byte > end_byte || start_byte >= bytes.len() {
-            return Ok(if bit == 0 && bytes.is_empty() { 0 } else { -1 });
-        }
-        for (offset, &byte) in bytes[start_byte..=end_byte].iter().enumerate() {
-            let byte_idx = start_byte + offset;
-            for bit_idx in 0..8 {
-                let current = (byte >> (7 - bit_idx)) & 1;
-                if current == bit {
-                    return Ok((byte_idx * 8 + bit_idx) as i64);
-                }
-            }
-        }
-        Ok(if bit == 0 && end.is_none() {
-            (bytes.len() * 8) as i64
-        } else {
-            -1
-        })
+        let Some(bytes) = self.get_string_bytes(key)? else {
+            return Ok(if bit == 0 { 0 } else { -1 });
+        };
+        Ok(byte_bitpos_range(&bytes, bit, start, end))
     }
 
     pub async fn string_bitpos_async(
@@ -159,28 +139,10 @@ impl Db {
         if bit > 1 {
             return Err(Error::msg("ERR bit is not an integer or out of range"));
         }
-        let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
-        let start_byte = normalize_byte_index(bytes.len(), start.unwrap_or(0)).unwrap_or(0);
-        let end_byte = end
-            .and_then(|idx| normalize_byte_index(bytes.len(), idx))
-            .unwrap_or(bytes.len().saturating_sub(1));
-        if start_byte > end_byte || start_byte >= bytes.len() {
-            return Ok(if bit == 0 && bytes.is_empty() { 0 } else { -1 });
-        }
-        for (offset, &byte) in bytes[start_byte..=end_byte].iter().enumerate() {
-            let byte_idx = start_byte + offset;
-            for bit_idx in 0..8 {
-                let current = (byte >> (7 - bit_idx)) & 1;
-                if current == bit {
-                    return Ok((byte_idx * 8 + bit_idx) as i64);
-                }
-            }
-        }
-        Ok(if bit == 0 && end.is_none() {
-            (bytes.len() * 8) as i64
-        } else {
-            -1
-        })
+        let Some(bytes) = self.get_string_bytes_async(key).await? else {
+            return Ok(if bit == 0 { 0 } else { -1 });
+        };
+        Ok(byte_bitpos_range(&bytes, bit, start, end))
     }
 
     pub fn string_bitpos_with_unit(
@@ -197,7 +159,9 @@ impl Db {
         if bit > 1 {
             return Err(Error::msg("ERR bit is not an integer or out of range"));
         }
-        let bytes = self.get_string_bytes(key)?.unwrap_or_default();
+        let Some(bytes) = self.get_string_bytes(key)? else {
+            return Ok(if bit == 0 { 0 } else { -1 });
+        };
         Ok(bitpos_range(&bytes, bit, start, end))
     }
 
@@ -215,57 +179,28 @@ impl Db {
         if bit > 1 {
             return Err(Error::msg("ERR bit is not an integer or out of range"));
         }
-        let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
+        let Some(bytes) = self.get_string_bytes_async(key).await? else {
+            return Ok(if bit == 0 { 0 } else { -1 });
+        };
         Ok(bitpos_range(&bytes, bit, start, end))
     }
 
     pub fn string_bitop(&self, op: &str, dest: &str, keys: &[String]) -> Result<usize, Error> {
-        let values = keys
-            .iter()
-            .map(|key| self.get_string_bytes(key))
-            .collect::<Result<Vec<_>, _>>()?;
-        let max_len = values
-            .iter()
-            .filter_map(|value| value.as_ref().map(Vec::len))
-            .max()
-            .unwrap_or(0);
-        let mut out = vec![0u8; max_len];
-        match op.to_ascii_uppercase().as_str() {
-            "NOT" => {
-                if values.len() != 1 {
-                    return Err(Error::msg(
-                        "ERR BITOP NOT must be called with a single source key",
-                    ));
-                }
-                let source = values[0].clone().unwrap_or_default();
-                out = source.into_iter().map(|byte| !byte).collect();
-            }
-            "AND" | "OR" | "XOR" => {
-                for (idx, output) in out.iter_mut().enumerate() {
-                    let mut acc = match op.to_ascii_uppercase().as_str() {
-                        "AND" => 0xFF,
-                        _ => 0,
-                    };
-                    for value in &values {
-                        let byte = value
-                            .as_ref()
-                            .and_then(|v| v.get(idx))
-                            .copied()
-                            .unwrap_or(0);
-                        match op.to_ascii_uppercase().as_str() {
-                            "AND" => acc &= byte,
-                            "OR" => acc |= byte,
-                            "XOR" => acc ^= byte,
-                            _ => unreachable!(),
-                        }
-                    }
-                    *output = acc;
-                }
-            }
-            _ => return Err(Error::msg("ERR syntax error")),
+        let op = validate_bitop(op, keys.len())?;
+        let mut out = Vec::new();
+        for (source_index, key) in keys.iter().enumerate() {
+            let source = self.get_string_bytes(key)?.unwrap_or_default();
+            combine_bitop(&mut out, &source, op, source_index)?;
+        }
+        if op == BitOperation::Not {
+            out.iter_mut().for_each(|byte| *byte = !*byte);
         }
         let len = out.len();
-        self.insert_string_bytes(dest.to_string(), out, None);
+        if len == 0 {
+            self.delete_key(dest);
+        } else {
+            self.insert_string_bytes(dest.to_string(), out, None);
+        }
         Ok(len)
     }
 
@@ -275,53 +210,22 @@ impl Db {
         dest: &str,
         keys: &[String],
     ) -> Result<usize, Error> {
-        let mut values = Vec::with_capacity(keys.len());
-        for key in keys {
-            values.push(self.get_string_bytes_async(key).await?);
+        let op = validate_bitop(op, keys.len())?;
+        let mut out = Vec::new();
+        for (source_index, key) in keys.iter().enumerate() {
+            let source = self.get_string_bytes_async(key).await?.unwrap_or_default();
+            combine_bitop(&mut out, &source, op, source_index)?;
         }
-        let max_len = values
-            .iter()
-            .filter_map(|value| value.as_ref().map(Vec::len))
-            .max()
-            .unwrap_or(0);
-        let mut out = vec![0u8; max_len];
-        match op.to_ascii_uppercase().as_str() {
-            "NOT" => {
-                if values.len() != 1 {
-                    return Err(Error::msg(
-                        "ERR BITOP NOT must be called with a single source key",
-                    ));
-                }
-                let source = values[0].clone().unwrap_or_default();
-                out = source.into_iter().map(|byte| !byte).collect();
-            }
-            "AND" | "OR" | "XOR" => {
-                for (idx, output) in out.iter_mut().enumerate() {
-                    let mut acc = match op.to_ascii_uppercase().as_str() {
-                        "AND" => 0xFF,
-                        _ => 0,
-                    };
-                    for value in &values {
-                        let byte = value
-                            .as_ref()
-                            .and_then(|v| v.get(idx))
-                            .copied()
-                            .unwrap_or(0);
-                        match op.to_ascii_uppercase().as_str() {
-                            "AND" => acc &= byte,
-                            "OR" => acc |= byte,
-                            "XOR" => acc ^= byte,
-                            _ => unreachable!(),
-                        }
-                    }
-                    *output = acc;
-                }
-            }
-            _ => return Err(Error::msg("ERR syntax error")),
+        if op == BitOperation::Not {
+            out.iter_mut().for_each(|byte| *byte = !*byte);
         }
         let len = out.len();
-        self.insert_string_bytes_async(dest.to_string(), out, None)
-            .await?;
+        if len == 0 {
+            self.delete_key_async(dest).await;
+        } else {
+            self.insert_string_bytes_async(dest.to_string(), out, None)
+                .await?;
+        }
         Ok(len)
     }
 
@@ -390,48 +294,158 @@ impl Db {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BitOperation {
+    And,
+    Or,
+    Xor,
+    Not,
+}
+
+fn validate_bitop(op: &str, source_count: usize) -> Result<BitOperation, Error> {
+    let op = match op.to_ascii_uppercase().as_str() {
+        "AND" => BitOperation::And,
+        "OR" => BitOperation::Or,
+        "XOR" => BitOperation::Xor,
+        "NOT" if source_count == 1 => BitOperation::Not,
+        "NOT" => {
+            return Err(Error::msg(
+                "ERR BITOP NOT must be called with a single source key",
+            ));
+        }
+        _ => return Err(Error::msg("ERR syntax error")),
+    };
+    if source_count == 0 {
+        return Err(Error::msg(
+            "ERR wrong number of arguments for 'bitop' command",
+        ));
+    }
+    Ok(op)
+}
+
+fn combine_bitop(
+    out: &mut Vec<u8>,
+    source: &[u8],
+    op: BitOperation,
+    source_index: usize,
+) -> Result<(), Error> {
+    if source_index == 0 {
+        resize_bitmap(out, source.len())?;
+        out.copy_from_slice(source);
+        return Ok(());
+    }
+    resize_bitmap(out, out.len().max(source.len()))?;
+    for (index, output) in out.iter_mut().enumerate() {
+        let byte = source.get(index).copied().unwrap_or(0);
+        match op {
+            BitOperation::And => *output &= byte,
+            BitOperation::Or => *output |= byte,
+            BitOperation::Xor => *output ^= byte,
+            BitOperation::Not => unreachable!("NOT has exactly one source"),
+        }
+    }
+    Ok(())
+}
+
+fn byte_bitcount_range(bytes: &[u8], start: Option<i64>, end: Option<i64>) -> u64 {
+    redis_range(bytes.len(), start, end).map_or(0, |(start, end)| {
+        bytes[start..=end]
+            .iter()
+            .map(|byte| u64::from(byte.count_ones()))
+            .sum()
+    })
+}
+
+fn byte_bitpos_range(bytes: &[u8], bit: u8, start: Option<i64>, end: Option<i64>) -> i64 {
+    let Some((start, end_index)) = redis_range(bytes.len(), start, end) else {
+        return -1;
+    };
+    for (relative_index, byte) in bytes[start..=end_index].iter().copied().enumerate() {
+        let candidate = if bit == 1 { byte } else { !byte };
+        if candidate != 0 {
+            return ((start + relative_index) * 8) as i64 + i64::from(candidate.leading_zeros());
+        }
+    }
+    if bit == 0 && end.is_none() {
+        (bytes.len() * 8) as i64
+    } else {
+        -1
+    }
+}
+
 fn bitcount_range(bytes: &[u8], start: Option<i64>, end: Option<i64>) -> u64 {
     bit_range(bytes.len().saturating_mul(8), start, end).map_or(0, |(start, end)| {
-        (start..=end)
-            .map(|offset| {
-                let byte = bytes[offset / 8];
-                u64::from((byte >> (7 - (offset % 8))) & 1)
+        let first_byte = start / 8;
+        let last_byte = end / 8;
+        (first_byte..=last_byte)
+            .map(|byte_index| {
+                u64::from((bytes[byte_index] & bit_range_mask(byte_index, start, end)).count_ones())
             })
             .sum()
     })
 }
 
 fn bitpos_range(bytes: &[u8], bit: u8, start: Option<i64>, end: Option<i64>) -> i64 {
-    let Some((start, end)) = bit_range(bytes.len().saturating_mul(8), start, end) else {
+    let Some((start, end_index)) = bit_range(bytes.len().saturating_mul(8), start, end) else {
         return -1;
     };
-    for offset in start..=end {
-        let byte = bytes[offset / 8];
-        if ((byte >> (7 - (offset % 8))) & 1) == bit {
-            return offset as i64;
+    for (byte_index, byte) in bytes
+        .iter()
+        .enumerate()
+        .take(end_index / 8 + 1)
+        .skip(start / 8)
+    {
+        let range_mask = bit_range_mask(byte_index, start, end_index);
+        let candidate = if bit == 1 {
+            *byte & range_mask
+        } else {
+            !*byte & range_mask
+        };
+        if candidate != 0 {
+            return (byte_index * 8) as i64 + i64::from(candidate.leading_zeros());
         }
     }
-    -1
+    if bit == 0 && end.is_none() {
+        (bytes.len() * 8) as i64
+    } else {
+        -1
+    }
 }
 
 fn bit_range(len: usize, start: Option<i64>, end: Option<i64>) -> Option<(usize, usize)> {
+    redis_range(len, start, end)
+}
+
+fn redis_range(len: usize, start: Option<i64>, end: Option<i64>) -> Option<(usize, usize)> {
     if len == 0 {
         return None;
     }
-    let normalize = |index: i64| -> i128 {
+    let raw_start = start.unwrap_or(0);
+    let raw_end = end.map_or(len as i128 - 1, i128::from);
+    if raw_start < 0 && raw_end < 0 && i128::from(raw_start) > raw_end {
+        return None;
+    }
+    let normalize = |index: i128| {
         if index < 0 {
-            len as i128 + index as i128
+            len as i128 + index
         } else {
-            index as i128
+            index
         }
     };
-    let start = normalize(start.unwrap_or(0)).max(0);
-    let end = normalize(end.unwrap_or(-1)).min(len as i128 - 1);
-    if start > end || start >= len as i128 || end < 0 {
+    let start = normalize(i128::from(raw_start)).max(0);
+    let end = normalize(raw_end).max(0).min(len as i128 - 1);
+    if start > end || start >= len as i128 {
         None
     } else {
         Some((start as usize, end as usize))
     }
+}
+
+fn bit_range_mask(byte_index: usize, start: usize, end: usize) -> u8 {
+    let byte_start = byte_index * 8;
+    let first_bit = start.saturating_sub(byte_start).min(7);
+    let last_bit = end.saturating_sub(byte_start).min(7);
+    (u8::MAX >> first_bit) & (u8::MAX << (7 - last_bit))
 }
 
 pub(crate) fn read_bits_from(
@@ -492,6 +506,9 @@ pub(crate) fn write_bits_into(
 fn resize_bitmap(bytes: &mut Vec<u8>, required_bytes: usize) -> Result<(), Error> {
     if required_bytes <= bytes.len() {
         return Ok(());
+    }
+    if required_bytes > crate::frame::MAX_BULK_STRING_BYTES {
+        return Err(Error::msg("ERR string exceeds maximum allowed size"));
     }
     bytes
         .try_reserve_exact(required_bytes - bytes.len())

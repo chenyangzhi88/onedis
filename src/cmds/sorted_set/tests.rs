@@ -119,6 +119,47 @@ async fn assert_basic_read_and_range_commands(db: &Db) {
         apply(db, &["zrevrangebyscore", "z", "3", "1", "withscores"]),
         Frame::Array(values) if values.len() >= 4
     ));
+    assert!(matches!(
+        apply(
+            db,
+            &[
+                "zrangebyscore",
+                "z",
+                "(1",
+                "+inf",
+                "limit",
+                "0",
+                "1",
+                "withscores"
+            ]
+        ),
+        Frame::Array(values)
+            if matches!(values.first(), Some(Frame::BulkString(member)) if member == b"b")
+                && values.len() == 2
+    ));
+    assert!(matches!(
+        apply_async(
+            db,
+            &[
+                "zrevrangebyscore",
+                "z",
+                "+inf",
+                "(1",
+                "withscores",
+                "limit",
+                "0",
+                "1"
+            ]
+        )
+        .await,
+        Frame::Array(values)
+            if matches!(values.first(), Some(Frame::BulkString(member)) if member == b"c")
+                && values.len() == 2
+    ));
+    assert!(matches!(
+        apply(db, &["zrange", "z", "-inf", "+inf", "byscore", "limit", "1", "-1"]),
+        Frame::Array(values) if values.len() == 2
+    ));
 }
 
 async fn assert_lex_range_commands(db: &Db) {
@@ -325,6 +366,7 @@ fn sorted_set_parsers_cover_error_edges() {
         &["zrange", "z", "bad", "-1"][..],
         &["zrange", "z", "0", "bad"][..],
         &["zrange", "z", "bad", "1", "byscore"][..],
+        &["zrange", "z", "nan", "1", "byscore"][..],
         &["zrange", "z", "1", "bad", "byscore"][..],
         &["zrange", "z", "bad", "+", "bylex"][..],
         &["zrange", "z", "[a", "bad", "bylex"][..],
@@ -364,6 +406,16 @@ fn sorted_set_parsers_cover_error_edges() {
         &["zrangestore", "dst", "z", "0", "-1", "unknown"][..],
         &["zrevrange", "z", "0", "-1", "bad"][..],
         &["zrevrangebyscore", "z", "bad", "1"][..],
+        &["zrangebyscore", "z", "nan", "+inf"][..],
+        &["zrangebyscore", "z", "-inf", "+inf", "limit", "0"][..],
+        &[
+            "zrangebyscore",
+            "z",
+            "-inf",
+            "+inf",
+            "withscores",
+            "withscores",
+        ][..],
         &["zremrangebyrank", "z", "bad", "1"][..],
         &["zremrangebyscore", "z", "bad", "1"][..],
     ] {

@@ -3,12 +3,12 @@ impl LuaCommand {
         self.apply_with_authorizer(db, None)
     }
 
-    pub(crate) fn apply_authorized(
+    pub(crate) async fn apply_authorized_async(
         self,
         db: &Db,
         authorizer: LuaCommandAuthorizer,
     ) -> Result<Frame> {
-        self.apply_with_authorizer(db, Some(authorizer))
+        self.apply_with_authorizer_async(db, Some(authorizer)).await
     }
 
     fn apply_with_authorizer(
@@ -76,6 +76,17 @@ impl LuaCommand {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame> {
-        self.apply(db)
+        self.apply_with_authorizer_async(db, None).await
+    }
+
+    async fn apply_with_authorizer_async(
+        self,
+        db: &Db,
+        authorizer: Option<LuaCommandAuthorizer>,
+    ) -> Result<Frame> {
+        let db = db.shared_task_view();
+        tokio::task::spawn_blocking(move || self.apply_with_authorizer(&db, authorizer))
+            .await
+            .map_err(|error| Error::msg(format!("lua worker task failed: {error}")))?
     }
 }

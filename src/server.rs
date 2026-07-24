@@ -12,7 +12,9 @@ use crate::command::Command;
 use crate::frame::Frame;
 use crate::network::connection::Connection;
 use crate::network::session::{Session, WatchedKey};
-use crate::network::session_manager::{SessionManager, SubscriptionKind};
+use crate::network::session_manager::{
+    ClientUnblockMode, SessionControl, SessionManager, SubscriptionKind,
+};
 use crate::observability::metrics::{OnedisMetrics, global_metrics};
 use crate::observability::prometheus::spawn_prometheus_endpoint;
 use crate::store::db::decode_string_bytes_slice;
@@ -216,6 +218,7 @@ async fn shutdown_signal() {
 
 pub struct Handler {
     session: Session,
+    client_control: Arc<SessionControl>,
     connection: Connection,
     session_manager: Arc<SessionManager>,
     db_manager: Arc<DatabaseManager>,
@@ -250,6 +253,36 @@ impl Handler {
 
     pub fn client_name(&self) -> Option<String> {
         self.session.name().map(ToString::to_string)
+    }
+
+    pub fn set_client_library_name(&mut self, name: Option<String>) {
+        self.session.set_library_name(name);
+        self.session_manager.update_session(&self.session);
+    }
+
+    pub fn set_client_library_version(&mut self, version: Option<String>) {
+        self.session.set_library_version(version);
+        self.session_manager.update_session(&self.session);
+    }
+
+    pub fn set_client_no_evict(&mut self, enabled: bool) {
+        self.session.set_no_evict(enabled);
+        self.session_manager.update_session(&self.session);
+    }
+
+    pub fn set_client_no_touch(&mut self, enabled: bool) {
+        self.session.set_no_touch(enabled);
+        self.session_manager.update_session(&self.session);
+    }
+
+    fn client_unblock_response(mode: ClientUnblockMode) -> Vec<u8> {
+        match mode {
+            ClientUnblockMode::Timeout => Frame::Null,
+            ClientUnblockMode::Error => {
+                Frame::Error("UNBLOCKED client unblocked via CLIENT UNBLOCK".to_string())
+            }
+        }
+        .as_bytes()
     }
 }
 

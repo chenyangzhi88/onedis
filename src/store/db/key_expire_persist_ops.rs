@@ -19,16 +19,16 @@ impl Db {
     pub fn expire_with_condition(&self, key: String, ttl: u64, condition: ExpireCondition) -> bool {
         self.expire_if_needed(&key);
         let key_bytes = self.mk(&key);
+        let expire_ms = now_ms().saturating_add(ttl);
         if let Some(raw) = self.store.get_raw(&key_bytes)
             && let Some(header) = decode_meta_header(&raw)
         {
-            if !Self::expire_condition_matches(header.expire_ms, ttl, condition) {
+            if !Self::expire_condition_matches(header.expire_ms, expire_ms, condition) {
                 return false;
             }
             if ttl == 0 {
                 return self.remove_internal(&key, false).is_some();
             }
-            let expire_ms = now_ms().saturating_add(ttl);
             if let Some(patched) = patch_meta_expire_ms(&raw, expire_ms) {
                 let mut batch = WriteBatch::new();
                 batch.put(&key_bytes, &patched);
@@ -67,6 +67,7 @@ impl Db {
         condition: ExpireCondition,
     ) -> bool {
         let key_bytes = self.mk(&key);
+        let expire_ms = now_ms().saturating_add(ttl);
         for _ in 0..64 {
             self.expire_if_needed_async(&key).await;
             let observed = self.store.get_raw_observed_async(&key_bytes).await;
@@ -76,7 +77,7 @@ impl Db {
             let Some(header) = decode_meta_header(raw) else {
                 return false;
             };
-            if !Self::expire_condition_matches(header.expire_ms, ttl, condition) {
+            if !Self::expire_condition_matches(header.expire_ms, expire_ms, condition) {
                 return false;
             }
             if ttl == 0 {
@@ -155,7 +156,6 @@ impl Db {
                     }
                 }
             }
-            let expire_ms = now_ms().saturating_add(ttl);
             let Some(patched) = patch_meta_expire_ms(raw, expire_ms) else {
                 return false;
             };
@@ -192,19 +192,17 @@ impl Db {
 
     pub(in crate::store::db) fn expire_condition_matches(
         current_expire_ms: u64,
-        ttl: u64,
+        expire_ms: u64,
         condition: ExpireCondition,
     ) -> bool {
         match condition {
             ExpireCondition::Always => true,
             ExpireCondition::Nx => current_expire_ms == 0,
             ExpireCondition::Xx => current_expire_ms > 0,
-            ExpireCondition::Gt => {
-                current_expire_ms > 0 && now_ms().saturating_add(ttl) > current_expire_ms
-            }
-            ExpireCondition::Lt => {
-                current_expire_ms == 0 || now_ms().saturating_add(ttl) < current_expire_ms
-            }
+            ExpireCondition::Gt => current_expire_ms > 0 && expire_ms > current_expire_ms,
+            ExpireCondition::Lt => current_expire_ms == 0 || expire_ms < current_expire_ms,
+            ExpireCondition::XxGt => current_expire_ms > 0 && expire_ms > current_expire_ms,
+            ExpireCondition::XxLt => current_expire_ms > 0 && expire_ms < current_expire_ms,
         }
     }
 

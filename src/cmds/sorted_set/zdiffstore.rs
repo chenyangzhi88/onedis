@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{cmds::sorted_set::common::parse_numkeys_command, frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::common::{parse_numkeys_command, text_arg},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Zdiffstore {
     destination: String,
@@ -14,15 +18,16 @@ impl Zdiffstore {
                 "ERR wrong number of arguments for 'zdiffstore' command",
             ));
         }
+        let shifted_args = (2..frame.arg_len())
+            .map(|idx| text_arg(&frame, idx).map(Frame::bulk_string))
+            .collect::<Result<Vec<_>, _>>()?;
         let shifted = Frame::Array(
             std::iter::once(Frame::bulk_string("zdiff"))
-                .chain(
-                    (2..frame.arg_len()).map(|idx| Frame::bulk_string(frame.get_arg(idx).unwrap())),
-                )
+                .chain(shifted_args)
                 .collect(),
         );
         Ok(Self {
-            destination: frame.get_arg(1).unwrap(),
+            destination: text_arg(&frame, 1)?,
             keys: parse_numkeys_command(&shifted, "zdiffstore")?,
         })
     }

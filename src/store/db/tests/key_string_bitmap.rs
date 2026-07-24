@@ -362,6 +362,25 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
             .unwrap(),
         -1
     );
+    db.insert_string_bytes("range-bits".to_string(), vec![0xff, 0x01], None);
+    assert_eq!(
+        db.string_bitcount("range-bits", Some(0), Some(-99))
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        db.string_bitcount_with_unit("range-bits", Some(4), Some(8), true)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        db.string_bitpos_with_unit("range-bits", 0, Some(4), Some(12), true)
+            .unwrap(),
+        8
+    );
+    assert_eq!(db.string_bitpos("missing-bits", 0, None, None).unwrap(), 0);
+    db.insert_string_bytes("empty-bits".to_string(), Vec::new(), None);
+    assert_eq!(db.string_bitpos("empty-bits", 0, None, None).unwrap(), -1);
 
     assert_eq!(
         db.string_bitop("AND", "and-out", &["a".to_string(), "b".to_string()])
@@ -393,4 +412,19 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
             .is_err()
     );
     assert!(db.string_bitop("BAD", "bad", &["a".to_string()]).is_err());
+    db.insert_string_bytes("empty-out".to_string(), b"stale".to_vec(), None);
+    assert_eq!(
+        db.string_bitop("OR", "empty-out", &["missing-a".to_string()])
+            .unwrap(),
+        0
+    );
+    assert!(!db.exists_readonly("empty-out"));
+    db.insert_string_bytes("empty-out-async".to_string(), b"stale".to_vec(), None);
+    assert_eq!(
+        db.string_bitop_async("NOT", "empty-out-async", &["missing-b".to_string()])
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!db.exists_readonly("empty-out-async"));
 }

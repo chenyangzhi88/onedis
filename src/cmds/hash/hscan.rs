@@ -1,55 +1,74 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::hash::common::checked_hash_entries,
+    frame::{Frame, MAX_ARRAY_ELEMENTS},
+    store::db::Db,
+};
 
 pub struct Hscan {
     key: String,
     cursor: u64,
     pattern: Option<String>,
     count: Option<u64>,
+    no_values: bool,
 }
 
 impl Hscan {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let args = frame.get_args_from_index(1);
         if args.len() < 2 {
-            return Err(Error::msg("HSCAN command requires at least two arguments"));
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'hscan' command",
+            ));
         }
 
         let key = args[0].clone();
-        let cursor = args[1].parse::<u64>()?;
+        let cursor = args[1]
+            .parse::<u64>()
+            .map_err(|_| Error::msg("ERR invalid cursor"))?;
 
         let mut pattern = None;
         let mut count = None;
+        let mut no_values = false;
         let mut i = 2;
         while i < args.len() {
-            let arg = &args[i].to_ascii_uppercase();
-            if arg == "MATCH" {
+            if args[i].eq_ignore_ascii_case("MATCH") {
                 if i + 1 >= args.len() {
-                    return Err(Error::msg("MATCH option requires an argument"));
+                    return Err(Error::msg("ERR syntax error"));
                 }
                 pattern = Some(args[i + 1].clone());
                 i += 2;
-            } else if arg == "COUNT" {
+            } else if args[i].eq_ignore_ascii_case("COUNT") {
                 if i + 1 >= args.len() {
-                    return Err(Error::msg("COUNT option requires an argument"));
+                    return Err(Error::msg("ERR syntax error"));
                 }
-                let parsed = args[i + 1].parse::<u64>()?;
+                let parsed = args[i + 1]
+                    .parse::<u64>()
+                    .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
                 if parsed == 0 {
                     return Err(Error::msg("ERR syntax error"));
                 }
                 count = Some(parsed);
                 i += 2;
+            } else if args[i].eq_ignore_ascii_case("NOVALUES") {
+                if no_values {
+                    return Err(Error::msg("ERR syntax error"));
+                }
+                no_values = true;
+                i += 1;
             } else {
-                return Err(Error::msg(format!("Unknown option: {}", args[i])));
+                return Err(Error::msg("ERR syntax error"));
             }
         }
+        validate_count(count, no_values)?;
 
         Ok(Hscan {
             key,
             cursor,
             pattern,
             count,
+            no_values,
         })
     }
 
@@ -58,16 +77,12 @@ impl Hscan {
         let count = usize::try_from(self.count.unwrap_or(10))
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
-        match db.hash_scan(&self.key, self.cursor, &pattern, count) {
+        match db.hash_scan_bytes(&self.key, self.cursor, &pattern, count) {
             Ok((next_cursor, entries)) => {
-                let mut items = Vec::with_capacity(entries.len() * 2);
-                for (field, value) in entries {
-                    items.push(Frame::bulk_string(field));
-                    items.push(Frame::bulk_string(value));
-                }
+                let items = checked_hash_entries(entries, !self.no_values)?;
                 Ok(Frame::Array(vec![
                     Frame::bulk_string(next_cursor.to_string()),
-                    Frame::Array(items),
+                    items,
                 ]))
             }
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -80,23 +95,31 @@ impl Hscan {
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
         match db
-            .hash_scan_async(&self.key, self.cursor, &pattern, count)
+            .hash_scan_bytes_async(&self.key, self.cursor, &pattern, count)
             .await
         {
             Ok((next_cursor, entries)) => {
-                let mut items = Vec::with_capacity(entries.len() * 2);
-                for (field, value) in entries {
-                    items.push(Frame::bulk_string(field));
-                    items.push(Frame::bulk_string(value));
-                }
+                let items = checked_hash_entries(entries, !self.no_values)?;
                 Ok(Frame::Array(vec![
                     Frame::bulk_string(next_cursor.to_string()),
-                    Frame::Array(items),
+                    items,
                 ]))
             }
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
+}
+
+fn validate_count(count: Option<u64>, no_values: bool) -> Result<(), Error> {
+    let max_count = if no_values {
+        MAX_ARRAY_ELEMENTS
+    } else {
+        MAX_ARRAY_ELEMENTS / 2
+    };
+    if count.is_some_and(|count| count > max_count as u64) {
+        return Err(Error::msg("ERR COUNT exceeds configured response limit"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -150,6 +173,7 @@ mod tests {
             cursor: 0,
             pattern: Some("*".to_string()),
             count: Some(10),
+            no_values: false,
         }
         .apply(&db)
         .unwrap();

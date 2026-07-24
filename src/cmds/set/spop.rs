@@ -1,4 +1,8 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::set::{set_array, validate_count},
+    frame::Frame,
+    store::db::Db,
+};
 use anyhow::Error;
 
 pub struct Spop {
@@ -25,6 +29,9 @@ impl Spop {
         } else {
             None
         };
+        if let Some(count) = count {
+            validate_count(count as u64)?;
+        }
 
         Ok(Spop { key, count })
     }
@@ -36,9 +43,7 @@ impl Spop {
                 if self.count.is_none() {
                     Ok(popped.pop().map(Frame::bulk_string).unwrap_or(Frame::Null))
                 } else {
-                    Ok(Frame::Array(
-                        popped.into_iter().map(Frame::bulk_string).collect(),
-                    ))
+                    set_array(popped)
                 }
             }
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -52,9 +57,7 @@ impl Spop {
                 if self.count.is_none() {
                     Ok(popped.pop().map(Frame::bulk_string).unwrap_or(Frame::Null))
                 } else {
-                    Ok(Frame::Array(
-                        popped.into_iter().map(Frame::bulk_string).collect(),
-                    ))
+                    set_array(popped)
                 }
             }
             Err(err) => Ok(Frame::Error(err.to_string())),

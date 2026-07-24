@@ -1,7 +1,8 @@
 use anyhow::Error;
 
 use crate::{
-    cmds::sorted_set::zrange::{LexBound, parse_lex_bound},
+    cmds::sorted_set::common::validate_entry_count,
+    cmds::sorted_set::zrange::{LexBound, apply_limit, parse_lex_bound},
     frame::Frame,
     store::db::Db,
 };
@@ -11,7 +12,7 @@ pub struct Zrangestore {
     source: String,
     range: ZrangestoreBounds,
     reverse: bool,
-    limit: Option<(usize, usize)>,
+    limit: Option<(i64, i64)>,
 }
 
 enum ZrangestoreBounds {
@@ -69,10 +70,10 @@ impl Zrangestore {
                         return Err(Error::msg("ERR syntax error"));
                     }
                     let offset = args[idx + 1]
-                        .parse::<usize>()
+                        .parse::<i64>()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
                     let count = args[idx + 2]
-                        .parse::<usize>()
+                        .parse::<i64>()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
                     limit = Some((offset, count));
                     idx += 3;
@@ -82,6 +83,11 @@ impl Zrangestore {
         }
         if limit.is_some() && !(by_score || by_lex) {
             return Err(Error::msg("ERR syntax error"));
+        }
+        if let Some((_, count)) = limit
+            && count >= 0
+        {
+            validate_entry_count(count as u64, true)?;
         }
 
         let range = if by_score {
@@ -132,10 +138,7 @@ impl Zrangestore {
                     if self.reverse {
                         entries.reverse();
                     }
-                    if let Some((offset, count)) = self.limit {
-                        entries = entries.into_iter().skip(offset).take(count).collect();
-                    }
-                    entries
+                    apply_limit(entries, self.limit)
                 }),
             ZrangestoreBounds::Lex(min, max) => {
                 db.zset_range_by_lex(&self.source, &min, &max)
@@ -143,10 +146,7 @@ impl Zrangestore {
                         if self.reverse {
                             entries.reverse();
                         }
-                        if let Some((offset, count)) = self.limit {
-                            entries = entries.into_iter().skip(offset).take(count).collect();
-                        }
-                        entries
+                        apply_limit(entries, self.limit)
                     })
             }
         };
@@ -171,10 +171,7 @@ impl Zrangestore {
                     if self.reverse {
                         entries.reverse();
                     }
-                    if let Some((offset, count)) = self.limit {
-                        entries = entries.into_iter().skip(offset).take(count).collect();
-                    }
-                    entries
+                    apply_limit(entries, self.limit)
                 }),
             ZrangestoreBounds::Lex(min, max) => db
                 .zset_range_by_lex_async(&self.source, &min, &max)
@@ -183,10 +180,7 @@ impl Zrangestore {
                     if self.reverse {
                         entries.reverse();
                     }
-                    if let Some((offset, count)) = self.limit {
-                        entries = entries.into_iter().skip(offset).take(count).collect();
-                    }
-                    entries
+                    apply_limit(entries, self.limit)
                 }),
         };
 

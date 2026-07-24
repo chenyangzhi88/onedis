@@ -4,19 +4,19 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
         return Err(Error::msg("ERR syntax error"));
     }
     let dest = if store {
-        frame.get_arg(1).unwrap()
+        text_arg(&frame, 1)?
     } else {
         String::new()
     };
-    let key = frame.get_arg(if store { 2 } else { 1 }).unwrap();
-    let center = match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+    let key = text_arg(&frame, if store { 2 } else { 1 })?;
+    let center = match text_arg(&frame, idx)?.to_ascii_uppercase().as_str() {
         "FROMMEMBER" if idx + 1 < frame.arg_len() => {
             idx += 2;
-            GeoCenter::Member(frame.get_arg(idx - 1).unwrap())
+            GeoCenter::Member(text_arg(&frame, idx - 1)?)
         }
         "FROMLONLAT" if idx + 2 < frame.arg_len() => {
-            let lon = parse_f(&frame.get_arg(idx + 1).unwrap())?;
-            let lat = parse_f(&frame.get_arg(idx + 2).unwrap())?;
+            let lon = parse_f(&text_arg(&frame, idx + 1)?)?;
+            let lat = parse_f(&text_arg(&frame, idx + 2)?)?;
             validate_coord(lon, lat)?;
             idx += 3;
             GeoCenter::Coord(lon, lat)
@@ -27,19 +27,17 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
     if idx >= frame.arg_len() {
         return Err(Error::msg("ERR syntax error"));
     }
-    let shape = match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+    let shape = match text_arg(&frame, idx)?.to_ascii_uppercase().as_str() {
         "BYRADIUS" if idx + 2 < frame.arg_len() => {
-            let unit = frame.get_arg(idx + 2).unwrap();
-            let meters =
-                parse_non_negative_f(&frame.get_arg(idx + 1).unwrap())? * unit_factor(&unit)?;
+            let unit = text_arg(&frame, idx + 2)?;
+            let meters = parse_distance(&text_arg(&frame, idx + 1)?, &unit)?;
             idx += 3;
             GeoShape::Radius { meters, unit }
         }
         "BYBOX" if idx + 3 < frame.arg_len() => {
-            let unit = frame.get_arg(idx + 3).unwrap();
-            let factor = unit_factor(&unit)?;
-            let width_m = parse_non_negative_f(&frame.get_arg(idx + 1).unwrap())? * factor;
-            let height_m = parse_non_negative_f(&frame.get_arg(idx + 2).unwrap())? * factor;
+            let unit = text_arg(&frame, idx + 3)?;
+            let width_m = parse_distance(&text_arg(&frame, idx + 1)?, &unit)?;
+            let height_m = parse_distance(&text_arg(&frame, idx + 2)?, &unit)?;
             idx += 4;
             GeoShape::Box {
                 width_m,
@@ -53,6 +51,7 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
     if store && (options.withcoord || options.withdist || options.withhash) {
         return Err(Error::msg("ERR syntax error"));
     }
+    validate_search_response_count(&options, store)?;
     Ok((
         dest,
         Geosearch {
@@ -73,6 +72,20 @@ fn parse_search(frame: Frame, store: bool) -> Result<(String, Geosearch), Error>
     ))
 }
 
+fn validate_search_response_count(
+    options: &SearchOptions,
+    stores_result: bool,
+) -> Result<(), Error> {
+    if !stores_result
+        && options
+            .count
+            .is_some_and(|count| count > max_geo_result_count(options))
+    {
+        return Err(Error::msg("ERR COUNT exceeds configured response limit"));
+    }
+    Ok(())
+}
+
 fn parse_search_options(
     frame: &Frame,
     mut idx: usize,
@@ -81,51 +94,39 @@ fn parse_search_options(
 ) -> Result<(SearchOptions, Option<GeoStore>), Error> {
     let mut options = SearchOptions::default();
     let mut store = None;
-    let mut count_seen = false;
     while idx < frame.arg_len() {
-        match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+        match text_arg(frame, idx)?.to_ascii_uppercase().as_str() {
             "WITHDIST" => options.withdist = true,
             "WITHHASH" => options.withhash = true,
             "WITHCOORD" => options.withcoord = true,
-            "ASC" if options.sort.is_none() => options.sort = Some(GeoSort::Asc),
-            "DESC" if options.sort.is_none() => options.sort = Some(GeoSort::Desc),
-            "COUNT" if !count_seen && idx + 1 < frame.arg_len() => {
-                let count =
-                    frame
-                        .get_arg(idx + 1)
-                        .unwrap()
-                        .parse()
-                        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+            "ASC" => options.sort = Some(GeoSort::Asc),
+            "DESC" => options.sort = Some(GeoSort::Desc),
+            "COUNT" if idx + 1 < frame.arg_len() => {
+                let count = text_arg(frame, idx + 1)?
+                    .parse()
+                    .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
                 if count == 0 {
                     return Err(Error::msg("ERR COUNT must be > 0"));
                 }
                 options.count = Some(count);
-                count_seen = true;
                 idx += 1;
-                if idx + 1 < frame.arg_len()
-                    && frame.get_arg(idx + 1).unwrap().eq_ignore_ascii_case("ANY")
-                {
-                    options.count_any = true;
-                    idx += 1;
-                }
             }
-            "STORE" if allow_store_destination && store.is_none() && idx + 1 < frame.arg_len() => {
+            "ANY" => options.count_any = true,
+            "STORE" if allow_store_destination && idx + 1 < frame.arg_len() => {
                 store = Some(GeoStore {
-                    dest: frame.get_arg(idx + 1).unwrap(),
+                    dest: text_arg(frame, idx + 1)?,
                     dist: false,
                 });
                 idx += 1;
             }
-            "STOREDIST"
-                if allow_store_destination && store.is_none() && idx + 1 < frame.arg_len() =>
-            {
+            "STOREDIST" if allow_store_destination && idx + 1 < frame.arg_len() => {
                 store = Some(GeoStore {
-                    dest: frame.get_arg(idx + 1).unwrap(),
+                    dest: text_arg(frame, idx + 1)?,
                     dist: true,
                 });
                 idx += 1;
             }
-            "STOREDIST" if allow_storedist_flag && store.is_none() => {
+            "STOREDIST" if allow_storedist_flag => {
                 store = Some(GeoStore {
                     dest: String::new(),
                     dist: true,
@@ -134,6 +135,9 @@ fn parse_search_options(
             _ => return Err(Error::msg("ERR syntax error")),
         }
         idx += 1;
+    }
+    if options.count_any && options.count.is_none() {
+        return Err(Error::msg("ERR the ANY argument requires COUNT argument"));
     }
     Ok((options, store))
 }
@@ -157,6 +161,25 @@ fn parse_non_negative_f(value: &str) -> Result<f64, Error> {
         Err(Error::msg("ERR value is out of range, must be positive"))
     } else {
         Ok(value)
+    }
+}
+
+fn parse_distance(value: &str, unit: &str) -> Result<f64, Error> {
+    let meters = parse_non_negative_f(value)? * unit_factor(unit)?;
+    if meters.is_finite() {
+        Ok(meters)
+    } else {
+        Err(Error::msg("ERR value is not a valid float"))
+    }
+}
+
+fn validate_store_options(options: &SearchOptions, store: &Option<GeoStore>) -> Result<(), Error> {
+    if store.is_some() && (options.withcoord || options.withdist || options.withhash) {
+        Err(Error::msg(
+            "ERR STORE option is not compatible with WITHDIST, WITHHASH and WITHCOORD options",
+        ))
+    } else {
+        Ok(())
     }
 }
 

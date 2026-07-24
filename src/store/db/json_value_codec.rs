@@ -6,13 +6,24 @@ pub(in crate::store::db) enum JsonPathToken {
     Index(usize),
 }
 
+const MAX_JSON_PATH_BYTES: usize = 4 * 1024;
+const MAX_JSON_PATH_DEPTH: usize = 128;
+
 pub(in crate::store::db) fn parse_json_path(path: &str) -> Result<Vec<JsonPathToken>, Error> {
+    if path.is_empty() || path.len() > MAX_JSON_PATH_BYTES {
+        return Err(Error::msg("ERR invalid JSON path"));
+    }
     if path == "$" || path == "." {
         return Ok(Vec::new());
     }
 
     let bytes = path.as_bytes();
-    let mut idx = if bytes.first() == Some(&b'$') { 1 } else { 0 };
+    let mut idx = match bytes.first() {
+        Some(b'$') => 1,
+        Some(b'.') if bytes.get(1) == Some(&b'[') => 1,
+        Some(b'.') => 0,
+        _ => return Err(Error::msg("ERR invalid JSON path")),
+    };
     let mut tokens = Vec::new();
 
     while idx < bytes.len() {
@@ -44,6 +55,9 @@ pub(in crate::store::db) fn parse_json_path(path: &str) -> Result<Vec<JsonPathTo
                 tokens.push(JsonPathToken::Index(index));
             }
             _ => return Err(Error::msg("ERR invalid JSON path")),
+        }
+        if tokens.len() > MAX_JSON_PATH_DEPTH {
+            return Err(Error::msg("ERR invalid JSON path"));
         }
     }
 

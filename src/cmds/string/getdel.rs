@@ -21,21 +21,15 @@ impl GetDel {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.get_string_bytes(&self.key)? {
-            Some(value) => {
-                db.delete_key(&self.key);
-                Ok(Frame::bulk_string(value))
-            }
+        match db.getdel_string_bytes(&self.key)? {
+            Some(value) => Ok(Frame::bulk_string(value)),
             None => Ok(Frame::Null),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.get_string_bytes_async(&self.key).await? {
-            Some(value) => {
-                db.delete_key_async(&self.key).await;
-                Ok(Frame::bulk_string(value))
-            }
+        match db.getdel_string_bytes_async(&self.key).await? {
+            Some(value) => Ok(Frame::bulk_string(value)),
             None => Ok(Frame::Null),
         }
     }

@@ -5,13 +5,16 @@ impl FtSyn {
                 let index = arg(&frame, 1, "ERR invalid fulltext index")?;
                 let group = arg(&frame, 2, "ERR invalid synonym group")?;
                 let mut idx = 3;
-                if upper_arg(&frame, idx).unwrap_or_default().as_str() == "SKIPINITIALSCAN" {
+                let skip_initial_scan =
+                    upper_arg(&frame, idx).unwrap_or_default().as_str() == "SKIPINITIALSCAN";
+                if skip_initial_scan {
                     idx += 1;
                 }
                 Ok(Self::Update {
                     index,
                     group,
                     terms: collect_args(&frame, idx, "ERR invalid synonym term")?,
+                    skip_initial_scan,
                 })
             }
             "FT.SYNDUMP" if frame.arg_len() == 2 => Ok(Self::Dump {
@@ -27,7 +30,8 @@ impl FtSyn {
                 index,
                 group,
                 terms,
-            } => db.fulltext_synupdate(&index, &group, terms),
+                skip_initial_scan,
+            } => db.fulltext_synupdate(&index, &group, terms, skip_initial_scan),
             Self::Dump { index } => db.fulltext_syndump(&index),
         }
     }
@@ -38,7 +42,11 @@ impl FtSyn {
                 index,
                 group,
                 terms,
-            } => db.fulltext_synupdate_async(&index, &group, terms).await,
+                skip_initial_scan,
+            } => {
+                db.fulltext_synupdate_async(&index, &group, terms, skip_initial_scan)
+                    .await
+            }
             Self::Dump { index } => db.fulltext_syndump_async(&index).await,
         }
     }

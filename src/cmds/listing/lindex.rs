@@ -8,18 +8,17 @@ pub struct Lindex {
 
 impl Lindex {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let key = frame.get_arg(1);
-        let index = frame.get_arg(2);
-
-        if frame.arg_len() != 3 || key.is_none() || index.is_none() {
+        if frame.arg_len() != 3 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'lindex' command",
             ));
         }
-
-        let final_key = key.unwrap().to_string(); // 键
-        let final_index = index
-            .unwrap()
+        let final_key = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'lindex' command"))?;
+        let final_index = frame
+            .get_arg(2)
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?
             .parse::<i64>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 

@@ -175,6 +175,11 @@ mod concurrency {
     include!("high_coverage/concurrency.rs");
 }
 
+mod hll {
+    use super::*;
+    include!("high_coverage/hll.rs");
+}
+
 mod low_coverage_core {
     use super::*;
     include!("high_coverage/low_coverage_core.rs");

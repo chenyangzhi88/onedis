@@ -627,3 +627,78 @@ async fn hash_async_conditionals_ttls_and_concurrent_increments_cover_edges() {
         Some("16".to_string())
     );
 }
+
+#[tokio::test]
+async fn hash_duplicate_fields_immediate_expiry_and_resource_limits_match_redis() {
+    let db = test_db();
+    let duplicate = vec!["field".to_string(), "field".to_string()];
+
+    db.hash_set("sync", "field", "value").unwrap();
+    assert_eq!(
+        db.hash_expire_fields_at_ms("sync", now_ms() + 60_000, &duplicate, ExpireCondition::Nx,)
+            .unwrap(),
+        vec![1, 0]
+    );
+    assert_eq!(
+        db.hash_persist_fields("sync", &duplicate).unwrap(),
+        vec![1, -1]
+    );
+    assert_eq!(
+        db.hash_get_del("sync", &duplicate).unwrap(),
+        vec![Some("value".to_string()), None]
+    );
+
+    db.hash_set_async("async", "field", "value").await.unwrap();
+    assert_eq!(
+        db.hash_expire_fields_at_ms_async(
+            "async",
+            now_ms() + 60_000,
+            &duplicate,
+            ExpireCondition::Nx,
+        )
+        .await
+        .unwrap(),
+        vec![1, 0]
+    );
+    assert_eq!(
+        db.hash_expire_fields_at_ms_async("async", 0, &duplicate, ExpireCondition::Xx)
+            .await
+            .unwrap(),
+        vec![2, -2]
+    );
+    assert!(!db.exists_readonly_async("async").await);
+
+    assert!(
+        db.hash_set_ex_async(
+            "immediate",
+            &[("field".to_string(), "value".to_string())],
+            Some(StringExpireUpdate::RelativeMs(0)),
+            false,
+            false,
+            false,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(!db.exists_readonly_async("immediate").await);
+
+    assert_eq!(db.hash_set_many_bytes("empty", &[]).unwrap(), 0);
+    assert!(!db.exists_readonly("empty"));
+    assert!(
+        db.hash_random_fields("missing", Some(i64::MIN), false)
+            .is_err()
+    );
+    assert!(
+        db.hash_set_ex(
+            "too-late",
+            &[("field".to_string(), "value".to_string())],
+            Some(StringExpireUpdate::AbsoluteMs(
+                crate::store::db::HASH_FIELD_MAX_EXPIRE_MS + 1,
+            )),
+            false,
+            false,
+            false,
+        )
+        .is_err()
+    );
+}

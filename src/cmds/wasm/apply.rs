@@ -19,7 +19,10 @@ impl WasmCommand {
                 let result = call_wasm(registry, db, &name, &function, &args, read_only).await;
                 global_metrics().record_wasm_call(elapsed_us(started), result.is_err());
                 match result {
-                    Ok(values) => wasm_values_frame(values),
+                    Ok(values) => match wasm_values_frame(values) {
+                        Ok(frame) => frame,
+                        Err(error) => wasm_error_frame(error),
+                    },
                     Err(error) => wasm_error_frame(error),
                 }
             }
@@ -66,16 +69,27 @@ async fn call_wasm(
     db: Arc<Db>,
     name: &str,
     function: &str,
-    args: &[String],
+    args: &[Vec<u8>],
     read_only: bool,
 ) -> Result<Vec<WasmValue>> {
     if read_only {
         return registry.call(db, name, function, args, true).await;
     }
     let txn_db = Arc::new(db.transactional_view()?);
-    let values = registry
+    match registry
         .call(txn_db.clone(), name, function, args, false)
-        .await?;
-    txn_db.commit_transaction_async().await?;
-    Ok(values)
+        .await
+    {
+        Ok(values) => {
+            if let Err(error) = txn_db.commit_transaction_async().await {
+                txn_db.discard_transaction();
+                return Err(error);
+            }
+            Ok(values)
+        }
+        Err(error) => {
+            txn_db.discard_transaction();
+            Err(error)
+        }
+    }
 }

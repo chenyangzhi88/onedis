@@ -24,29 +24,19 @@ impl GetRange {
                 "ERR wrong number of arguments for 'getrange' command",
             ));
         }
-        let key = frame.get_arg(1);
-        let start = frame.get_arg(2);
-        let end = frame.get_arg(3);
-
-        if key.is_none() || start.is_none() || end.is_none() {
-            return Err(Error::msg(
-                "ERR wrong number of arguments for 'getrange' command",
-            ));
-        }
-
-        let final_key = key.unwrap().to_string();
-        let final_start = start.unwrap().to_string();
-        let final_end = end.unwrap().to_string();
-
-        let start_int = match final_start.parse::<i64>() {
-            Ok(n) => n,
-            Err(_) => return Err(Error::msg("ERR value is not an integer or out of range")),
-        };
-
-        let end_int = match final_end.parse::<i64>() {
-            Ok(n) => n,
-            Err(_) => return Err(Error::msg("ERR value is not an integer or out of range")),
-        };
+        let final_key = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'getrange' command"))?;
+        let start_int = frame
+            .get_arg(2)
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?
+            .parse::<i64>()
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+        let end_int = frame
+            .get_arg(3)
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?
+            .parse::<i64>()
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
         Ok(GetRange {
             key: final_key,

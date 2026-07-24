@@ -159,9 +159,19 @@ fn parse_set_expiration(option: &str, value: &str) -> Result<SetExpiration, Erro
     }
 
     let expire_ms = match option.to_ascii_uppercase().as_str() {
-        "EX" => now_ms().saturating_add(value.saturating_mul(1000)),
-        "PX" => now_ms().saturating_add(value),
-        "EXAT" => value.saturating_mul(1000),
+        "EX" => now_ms()
+            .checked_add(
+                value
+                    .checked_mul(1000)
+                    .ok_or_else(|| Error::msg("ERR invalid expire time in 'set' command"))?,
+            )
+            .ok_or_else(|| Error::msg("ERR invalid expire time in 'set' command"))?,
+        "PX" => now_ms()
+            .checked_add(value)
+            .ok_or_else(|| Error::msg("ERR invalid expire time in 'set' command"))?,
+        "EXAT" => value
+            .checked_mul(1000)
+            .ok_or_else(|| Error::msg("ERR invalid expire time in 'set' command"))?,
         "PXAT" => value,
         _ => return Err(Error::msg("ERR syntax error")),
     };

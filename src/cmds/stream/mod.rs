@@ -18,7 +18,11 @@ pub mod xrevrange;
 pub mod xsetid;
 pub mod xtrim;
 
-pub(crate) use common::stream_entry_frame;
+pub(crate) use common::{
+    stream_claimed_frame, stream_consumers_frame, stream_entries_frame, stream_groups_frame,
+    stream_pending_entries_frame, stream_pending_summary_frame, stream_reads_frame,
+    stream_string_array, text_arg, validate_count,
+};
 
 #[cfg(test)]
 mod tests;

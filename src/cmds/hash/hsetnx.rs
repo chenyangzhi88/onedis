@@ -4,14 +4,14 @@ use anyhow::Error;
 pub struct Hsetnx {
     key: String,
     field: String,
-    value: String,
+    value: Vec<u8>,
 }
 
 impl Hsetnx {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         let key = frame.get_arg(1);
         let field = frame.get_arg(2);
-        let value = frame.get_arg(3);
+        let value = frame.get_arg_bytes(3);
 
         if frame.arg_len() != 4 || key.is_none() || field.is_none() || value.is_none() {
             return Err(Error::msg(
@@ -21,7 +21,7 @@ impl Hsetnx {
 
         let final_key = key.unwrap().to_string();
         let final_field = field.unwrap().to_string();
-        let final_value = value.unwrap().to_string();
+        let final_value = value.unwrap();
 
         Ok(Hsetnx {
             key: final_key,
@@ -31,7 +31,7 @@ impl Hsetnx {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_set_nx(&self.key, &self.field, &self.value) {
+        match db.hash_set_nx_bytes(&self.key, &self.field, &self.value) {
             Ok(inserted) => Ok(Frame::Integer(if inserted { 1 } else { 0 })),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
@@ -39,7 +39,7 @@ impl Hsetnx {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db
-            .hash_set_nx_async(&self.key, &self.field, &self.value)
+            .hash_set_nx_bytes_async(&self.key, &self.field, &self.value)
             .await
         {
             Ok(inserted) => Ok(Frame::Integer(if inserted { 1 } else { 0 })),

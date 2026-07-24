@@ -376,17 +376,28 @@ impl Db {
         left: bool,
         count: usize,
     ) -> Result<Option<(String, Vec<String>)>, Error> {
+        let mut shards = keys
+            .iter()
+            .map(|key| set_write_lock_shard(self.db_index, key))
+            .collect::<Vec<_>>();
+        shards.sort_unstable();
+        shards.dedup();
+        let mut guards = Vec::with_capacity(shards.len());
+        for shard in shards {
+            guards.push(self.set_write_locks[shard].lock().await);
+        }
+
         for key in keys {
             if self.list_len_async(key).await? == 0 {
                 continue;
             }
 
-            let mut values = Vec::new();
+            let mut values = Vec::with_capacity(count.min(1024));
             for _ in 0..count {
                 let value = if left {
-                    self.list_pop_left_async(key).await?
+                    self.list_pop_left_async_unlocked(key).await?
                 } else {
-                    self.list_pop_right_async(key).await?
+                    self.list_pop_right_async_unlocked(key).await?
                 };
                 match value {
                     Some(value) => values.push(value),

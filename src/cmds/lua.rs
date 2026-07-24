@@ -65,7 +65,7 @@ mod tests {
             LuaCommand::Eval(eval) => {
                 assert_eq!(eval.script, "return KEYS[1] .. ARGV[1]");
                 assert_eq!(eval.keys, vec!["k".to_string()]);
-                assert_eq!(eval.args, vec!["a".to_string()]);
+                assert_eq!(eval.args, vec![b"a".to_vec()]);
                 assert!(!eval.read_only);
             }
             _ => panic!("expected EVAL"),
@@ -84,7 +84,7 @@ mod tests {
             } => {
                 assert_eq!(sha, "abc");
                 assert!(keys.is_empty());
-                assert_eq!(args, vec!["arg".to_string()]);
+                assert_eq!(args, vec![b"arg".to_vec()]);
                 assert!(read_only);
             }
             _ => panic!("expected EVALSHA_RO"),
@@ -197,5 +197,21 @@ mod tests {
                 .apply(&db)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn lua_async_apply_runs_on_the_blocking_worker() {
+        let _lua_guard = crate::lua::LUA_TEST_LOCK.lock().unwrap();
+        let db = test_db("onedis-lua-cmd-async");
+        let command =
+            LuaCommand::parse_from_frame(frame(&["EVAL", "return ARGV[1]", "0", "x"])).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(matches!(
+            runtime.block_on(command.apply_async(&db)).unwrap(),
+            Frame::BulkString(value) if value == b"x"
+        ));
     }
 }

@@ -200,10 +200,16 @@ fn ft_search_text_analysis_highlight_and_summarize_return_snippets() {
             "1",
             "body",
             "HIGHLIGHT",
+            "FIELDS",
+            "1",
+            "body",
+            "TAGS",
+            "<mark>",
+            "</mark>",
         ],
         1,
     );
-    assert!(highlighted.to_string().contains("<b>quick</b>"));
+    assert!(highlighted.to_string().contains("<mark>quick</mark>"));
 
     let summarized = wait_total(
         &db,
@@ -215,6 +221,15 @@ fn ft_search_text_analysis_highlight_and_summarize_return_snippets() {
             "1",
             "body",
             "SUMMARIZE",
+            "FIELDS",
+            "1",
+            "body",
+            "FRAGS",
+            "1",
+            "LEN",
+            "12",
+            "SEPARATOR",
+            " | ",
         ],
         1,
     );
@@ -227,6 +242,7 @@ fn ft_search_text_analysis_highlight_and_summarize_return_snippets() {
     let snippet = bulk_text(&fields[1]);
     assert!(snippet.contains("quick"));
     assert!(snippet.len() < body.len());
+    assert!(snippet.contains(" | "));
 }
 
 #[test]

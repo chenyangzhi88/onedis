@@ -9,27 +9,24 @@ pub struct Ltrim {
 
 impl Ltrim {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let key = frame.get_arg(1);
-        let start = frame.get_arg(2);
-        let stop = frame.get_arg(3);
-
-        if frame.arg_len() != 4 || key.is_none() || start.is_none() || stop.is_none() {
+        if frame.arg_len() != 4 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'ltrim' command",
             ));
         }
-
-        let final_key = key.unwrap().to_string();
-
-        let start = match start.unwrap().parse::<i64>() {
-            Ok(n) => n,
-            Err(_) => return Err(Error::msg("ERR value is not an integer or out of range")),
-        };
-
-        let stop = match stop.unwrap().parse::<i64>() {
-            Ok(n) => n,
-            Err(_) => return Err(Error::msg("ERR value is not an integer or out of range")),
-        };
+        let final_key = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'ltrim' command"))?;
+        let start = frame
+            .get_arg(2)
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?
+            .parse::<i64>()
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+        let stop = frame
+            .get_arg(3)
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?
+            .parse::<i64>()
+            .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
         Ok(Ltrim {
             key: final_key,

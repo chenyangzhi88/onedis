@@ -7,22 +7,10 @@ impl VAdd {
         }
         let key = arg(&frame, 1, "ERR invalid vector key")?;
         let mut idx = 2;
-        let mut reduce = None;
         if upper_arg(&frame, idx)? == "REDUCE" {
-            reduce = Some(parse_usize_arg(
-                &frame,
-                idx + 1,
-                "ERR invalid vector REDUCE",
-            )?);
-            idx += 2;
+            return Err(Error::msg("ERR VADD REDUCE is not supported"));
         }
-        let mut vector = parse_redis_vector_arg(&frame, &mut idx)?;
-        if let Some(dim) = reduce {
-            if dim == 0 || dim > vector.len() {
-                return Err(Error::msg("ERR invalid vector REDUCE"));
-            }
-            vector.truncate(dim);
-        }
+        let vector = parse_redis_vector_arg(&frame, &mut idx)?;
         let element = arg(&frame, idx, "ERR invalid vector element")?;
         idx += 1;
         let mut attrs_json = None;
@@ -30,18 +18,29 @@ impl VAdd {
         let mut ef = None;
         while idx < frame.arg_len() {
             match upper_arg(&frame, idx)?.as_str() {
-                "CAS" | "NOQUANT" | "Q8" | "BIN" => idx += 1,
+                "CAS" | "NOQUANT" => idx += 1,
+                "Q8" | "BIN" => {
+                    return Err(Error::msg("ERR vector quantization mode is not supported"));
+                }
                 "SETATTR" => {
                     let attrs = arg(&frame, idx + 1, "ERR invalid vector attrs")?;
                     attrs_json = (!attrs.is_empty()).then_some(attrs);
                     idx += 2;
                 }
                 "EF" => {
-                    ef = Some(parse_usize_arg(&frame, idx + 1, "ERR invalid vector EF")?);
+                    let value = parse_usize_arg(&frame, idx + 1, "ERR invalid vector EF")?;
+                    if value == 0 {
+                        return Err(Error::msg("ERR invalid vector EF"));
+                    }
+                    ef = Some(value);
                     idx += 2;
                 }
                 "M" => {
-                    m = Some(parse_usize_arg(&frame, idx + 1, "ERR invalid vector M")?);
+                    let value = parse_usize_arg(&frame, idx + 1, "ERR invalid vector M")?;
+                    if value == 0 || value > 256 {
+                        return Err(Error::msg("ERR invalid vector M"));
+                    }
+                    m = Some(value);
                     idx += 2;
                 }
                 _ => return Err(Error::msg("ERR syntax error")),
@@ -131,10 +130,17 @@ impl VSim {
                 }
                 "COUNT" => {
                     count = parse_usize_arg(&frame, idx + 1, "ERR invalid vector COUNT")?;
+                    if count == 0 {
+                        return Err(Error::msg("ERR invalid vector COUNT"));
+                    }
                     idx += 2;
                 }
                 "EF" => {
-                    ef = Some(parse_usize_arg(&frame, idx + 1, "ERR invalid vector EF")?);
+                    let value = parse_usize_arg(&frame, idx + 1, "ERR invalid vector EF")?;
+                    if value == 0 {
+                        return Err(Error::msg("ERR invalid vector EF"));
+                    }
+                    ef = Some(value);
                     idx += 2;
                 }
                 "FILTER" => {
@@ -142,21 +148,25 @@ impl VSim {
                     idx += 2;
                 }
                 "EPSILON" => {
-                    epsilon = Some(parse_f32_arg(
-                        &frame,
-                        idx + 1,
-                        "ERR invalid vector EPSILON",
-                    )?);
+                    let value = parse_f32_arg(&frame, idx + 1, "ERR invalid vector EPSILON")?;
+                    if !(0.0..=1.0).contains(&value) {
+                        return Err(Error::msg("ERR invalid vector EPSILON"));
+                    }
+                    epsilon = Some(value);
                     idx += 2;
                 }
                 "FILTER-EF" => {
-                    let _ = parse_usize_arg(&frame, idx + 1, "ERR invalid vector FILTER-EF")?;
-                    idx += 2;
+                    return Err(Error::msg("ERR VSIM FILTER-EF is not supported"));
                 }
-                "TRUTH" | "NOTHREAD" => idx += 1,
+                "TRUTH" => {
+                    return Err(Error::msg("ERR VSIM TRUTH is not supported"));
+                }
+                "NOTHREAD" => idx += 1,
                 _ => return Err(Error::msg("ERR syntax error")),
             }
         }
+        let response_multiplier = 1 + usize::from(with_scores) + usize::from(with_attrs);
+        validate_vector_response_count(count, response_multiplier)?;
         Ok(Self {
             key,
             query,
@@ -170,6 +180,9 @@ impl VSim {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
+        if db.vector_dim(&self.key)?.is_none() {
+            return Ok(Frame::Array(Vec::new()));
+        }
         let vector = match &self.query {
             VSimQuery::Vector(vector) => vector.clone(),
             VSimQuery::Element(element) => {
@@ -195,6 +208,9 @@ impl VSim {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
+        if db.vector_dim_async(&self.key).await?.is_none() {
+            return Ok(Frame::Array(Vec::new()));
+        }
         let vector = match &self.query {
             VSimQuery::Vector(vector) => vector.clone(),
             VSimQuery::Element(element) => {

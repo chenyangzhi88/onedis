@@ -1,4 +1,4 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::bitmap::text_arg, frame::Frame, store::db::Db};
 use anyhow::Error;
 pub struct Bitpos {
     key: String,
@@ -15,7 +15,7 @@ impl Bitpos {
             ));
         }
         let bit_unit = if frame.arg_len() == 6 {
-            match frame.get_arg(5).unwrap().to_ascii_uppercase().as_str() {
+            match text_arg(&frame, 5)?.to_ascii_uppercase().as_str() {
                 "BYTE" => false,
                 "BIT" => true,
                 _ => return Err(Error::msg("ERR syntax error")),
@@ -24,17 +24,13 @@ impl Bitpos {
             false
         };
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
-            bit: frame
-                .get_arg(2)
-                .unwrap()
+            key: text_arg(&frame, 1)?,
+            bit: text_arg(&frame, 2)?
                 .parse()
                 .map_err(|_| Error::msg("ERR bit is not an integer or out of range"))?,
             start: if frame.arg_len() >= 4 {
                 Some(
-                    frame
-                        .get_arg(3)
-                        .unwrap()
+                    text_arg(&frame, 3)?
                         .parse()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
                 )
@@ -43,9 +39,7 @@ impl Bitpos {
             },
             end: if frame.arg_len() >= 5 {
                 Some(
-                    frame
-                        .get_arg(4)
-                        .unwrap()
+                    text_arg(&frame, 4)?
                         .parse()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
                 )

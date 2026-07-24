@@ -1,4 +1,8 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::bitmap::text_arg,
+    frame::{Frame, MAX_BULK_STRING_BYTES},
+    store::db::Db,
+};
 use anyhow::Error;
 pub struct Getbit {
     key: String,
@@ -11,13 +15,17 @@ impl Getbit {
                 "ERR wrong number of arguments for 'getbit' command",
             ));
         }
+        let offset = text_arg(&frame, 2)?
+            .parse()
+            .map_err(|_| Error::msg("ERR bit offset is not an integer or out of range"))?;
+        if offset >= MAX_BULK_STRING_BYTES.saturating_mul(8) {
+            return Err(Error::msg(
+                "ERR bit offset is not an integer or out of range",
+            ));
+        }
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
-            offset: frame
-                .get_arg(2)
-                .unwrap()
-                .parse()
-                .map_err(|_| Error::msg("ERR bit offset is not an integer or out of range"))?,
+            key: text_arg(&frame, 1)?,
+            offset,
         })
     }
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {

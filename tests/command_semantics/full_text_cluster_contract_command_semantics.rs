@@ -170,7 +170,23 @@ fn ft_cluster_multi_shard_rejects_queries_without_a_distributed_coordinator() {
     for args in [
         &["FT.SEARCH", "idx", "fox"][..],
         &["FT.AGGREGATE", "idx", "*"][..],
-        &["FT.HYBRID", "idx", "fox"][..],
+        &[
+            "FT.HYBRID",
+            "idx",
+            "SEARCH",
+            "fox",
+            "VSIM",
+            "@embedding",
+            "$vec",
+            "KNN",
+            "2",
+            "K",
+            "1",
+            "PARAMS",
+            "2",
+            "vec",
+            "[1,0]",
+        ][..],
     ] {
         let Err(err) = try_apply(&db, args) else {
             panic!("multi-shard query should fail");

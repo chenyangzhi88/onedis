@@ -1,4 +1,8 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::set::set_array,
+    frame::{Frame, MAX_ARRAY_ELEMENTS, MAX_FRAME_BYTES},
+    store::db::Db,
+};
 use anyhow::Error;
 
 pub struct Smembers {
@@ -19,19 +23,18 @@ impl Smembers {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.set_members(&self.key) {
-            Ok(members) => Ok(Frame::Array(
-                members.into_iter().map(Frame::bulk_string).collect(),
-            )),
+        match db.set_members_bounded(&self.key, MAX_ARRAY_ELEMENTS, MAX_FRAME_BYTES) {
+            Ok(members) => set_array(members),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.set_members_async(&self.key).await {
-            Ok(members) => Ok(Frame::Array(
-                members.into_iter().map(Frame::bulk_string).collect(),
-            )),
+        match db
+            .set_members_bounded_async(&self.key, MAX_ARRAY_ELEMENTS, MAX_FRAME_BYTES)
+            .await
+        {
+            Ok(members) => set_array(members),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

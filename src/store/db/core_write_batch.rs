@@ -108,6 +108,28 @@ impl Db {
         }
     }
 
+    pub(in crate::store::db) fn compare_and_write_batch_if_not_empty(
+        &self,
+        conditions: &[CompareCondition],
+        batch: &WriteBatch,
+    ) -> Result<bool, Error> {
+        if batch.count() == 0 {
+            return Ok(true);
+        }
+        let augmented = self.batch_with_version_owner_markers(batch);
+        let batch = augmented.as_ref().unwrap_or(batch);
+        self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_list_meta_cache_for_batch(batch);
+        match self.store.compare_and_write_batch(conditions, batch) {
+            Ok(()) => {
+                self.record_or_publish_mutations(batch);
+                Ok(true)
+            }
+            Err(Status::ConditionFailed(_)) => Ok(false),
+            Err(err) => Err(Error::msg(err.to_string())),
+        }
+    }
+
     pub(in crate::store::db) fn record_or_publish_mutations(&self, batch: &WriteBatch) {
         if !self.store.is_transactional() && !self.mutation_tracker.is_enabled() {
             return;

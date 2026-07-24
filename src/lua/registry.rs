@@ -60,7 +60,7 @@ pub fn lua_registry() -> &'static LuaRegistry {
 pub struct LuaEval {
     pub script: String,
     pub keys: Vec<String>,
-    pub args: Vec<String>,
+    pub args: Vec<Vec<u8>>,
     pub read_only: bool,
 }
 

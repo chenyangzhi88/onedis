@@ -62,9 +62,9 @@ impl VectorRuntime {
 
         for node in &mut self.active.nodes {
             let is_current = !node.deleted
-                && current.get(&node.id).is_some_and(|doc| {
-                    !doc.deleted && doc.doc_version == node.doc_version
-                })
+                && current
+                    .get(&node.id)
+                    .is_some_and(|doc| !doc.deleted && doc.doc_version == node.doc_version)
                 && found.insert(node.id.clone());
             if !is_current {
                 node.deleted = true;
@@ -73,9 +73,9 @@ impl VectorRuntime {
         for segment in &mut self.segments {
             for node in &mut segment.graph.nodes {
                 let is_current = !node.deleted
-                    && current.get(&node.id).is_some_and(|doc| {
-                        !doc.deleted && doc.doc_version == node.doc_version
-                    })
+                    && current
+                        .get(&node.id)
+                        .is_some_and(|doc| !doc.deleted && doc.doc_version == node.doc_version)
                     && found.insert(node.id.clone());
                 if !is_current {
                     node.deleted = true;
@@ -106,6 +106,15 @@ impl VectorRuntime {
             }
         }
         ids.len()
+    }
+
+    fn links(&self, id: &str) -> Option<Vec<Vec<(String, f32)>>> {
+        self.active.links(id).or_else(|| {
+            self.segments
+                .iter()
+                .rev()
+                .find_map(|segment| segment.graph.links(id))
+        })
     }
 
     fn search(

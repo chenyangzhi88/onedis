@@ -9,7 +9,7 @@ impl Handler {
                 .session_manager
                 .subscription_count(self.session.get_id())
                 > 0
-            || (self.args.requirepass.is_some() && !self.session.get_certification())
+            || !self.session.get_certification()
             || !self
                 .session_manager
                 .acl_allows(self.session.user(), "PING")
@@ -72,7 +72,7 @@ impl Handler {
                 .session_manager
                 .subscription_count(self.session.get_id())
                 > 0
-            || (self.args.requirepass.is_some() && !self.session.get_certification())
+            || !self.session.get_certification()
         {
             return None;
         }

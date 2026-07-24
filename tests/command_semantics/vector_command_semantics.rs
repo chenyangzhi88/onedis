@@ -74,7 +74,12 @@ fn apply_autocommit(db: &Db, args: &[&str]) -> Frame {
 }
 
 fn try_apply(db: &Db, args: &[&str]) -> anyhow::Result<Frame> {
-    onedis_server::command_dispatch::handle_command(db, command(args))
+    let command = Command::parse_from_frame(Frame::Array(
+        args.iter()
+            .map(|arg| Frame::bulk_string((*arg).to_string()))
+            .collect(),
+    ))?;
+    onedis_server::command_dispatch::handle_command(db, command)
 }
 
 fn command_frame(frame: Frame) -> Command {
@@ -221,8 +226,12 @@ fn redis_vector_set_basic_commands_are_supported() {
     let Frame::Array(layers) = links else {
         panic!("expected VLINKS layers");
     };
-    assert_eq!(layers.len(), 1);
-    assert!(matches!(&layers[0], Frame::Array(values) if values.len() == 2));
+    assert!(!layers.is_empty());
+    assert!(
+        layers
+            .iter()
+            .all(|layer| matches!(layer, Frame::Array(values) if values.len() == 2))
+    );
 }
 
 #[test]
@@ -490,7 +499,7 @@ async fn redis_vector_set_concurrent_adds_do_not_lose_meta_updates() {
         let db = Arc::clone(&db);
         tasks.push(tokio::spawn(async move {
             let id = format!("doc:{i}");
-            let x = i.to_string();
+            let x = (i + 1).to_string();
             let args = [
                 "VADD",
                 "concurrent",
@@ -512,7 +521,7 @@ async fn redis_vector_set_concurrent_adds_do_not_lose_meta_updates() {
     assert_integer(apply(&db, &["VCARD", "concurrent"]), 32);
     let result = apply(
         &db,
-        &["VSIM", "concurrent", "VALUES", "2", "0", "0", "COUNT", "32"],
+        &["VSIM", "concurrent", "VALUES", "2", "1", "0", "COUNT", "32"],
     );
     assert!(matches!(result, Frame::Array(values) if values.len() == 32));
 }
@@ -595,13 +604,13 @@ fn redis_vector_set_parser_and_missing_key_edges_are_deterministic() {
         apply(&db, &["VGETATTR", "missing", "e"]),
         Frame::Null
     ));
-    assert!(try_apply(&db, &["VSETATTR", "missing", "e", r#"{"x":1}"#]).is_err());
+    assert_integer(apply(&db, &["VSETATTR", "missing", "e", r#"{"x":1}"#]), 0);
     apply(&db, &["VADD", "existing", "VALUES", "1", "1", "present"]);
     assert_integer(
         apply(&db, &["VSETATTR", "existing", "absent", r#"{"x":1}"#]),
         0,
     );
-    assert!(try_apply(&db, &["VREM", "missing", "e"]).is_err());
+    assert_integer(apply(&db, &["VREM", "missing", "e"]), 0);
     assert_integer(apply(&db, &["VREM", "existing", "absent"]), 0);
     assert!(matches!(
         apply(&db, &["VRANDMEMBER", "missing"]),
@@ -611,8 +620,14 @@ fn redis_vector_set_parser_and_missing_key_edges_are_deterministic() {
         apply(&db, &["VRANDMEMBER", "missing", "2"]),
         Frame::Array(values) if values.is_empty()
     ));
-    assert!(try_apply(&db, &["VSIM", "missing", "ELE", "e"]).is_err());
-    assert!(try_apply(&db, &["VLINKS", "missing", "e"]).is_err());
+    assert!(matches!(
+        apply(&db, &["VSIM", "missing", "ELE", "e"]),
+        Frame::Array(values) if values.is_empty()
+    ));
+    assert!(matches!(
+        apply(&db, &["VLINKS", "missing", "e"]),
+        Frame::Null
+    ));
 }
 
 #[test]
@@ -625,25 +640,38 @@ fn redis_vector_set_advanced_options_cover_reduce_fp32_epsilon_and_attr_clear() 
             &[
                 "VADD",
                 "advanced",
-                "REDUCE",
-                "2",
                 "VALUES",
-                "3",
+                "2",
                 "1",
                 "0",
-                "9",
                 "a",
                 "SETATTR",
                 r#"{"group":"keep"}"#,
                 "NOQUANT",
                 "CAS",
-                "Q8",
-                "BIN",
             ],
         ),
         1,
     );
     assert_integer(apply(&db, &["VDIM", "advanced"]), 2);
+    for args in [
+        &[
+            "VADD",
+            "unsupported",
+            "REDUCE",
+            "2",
+            "VALUES",
+            "3",
+            "1",
+            "0",
+            "9",
+            "a",
+        ][..],
+        &["VADD", "unsupported", "VALUES", "2", "1", "0", "a", "Q8"][..],
+        &["VADD", "unsupported", "VALUES", "2", "1", "0", "a", "BIN"][..],
+    ] {
+        assert!(try_apply(&db, args).is_err());
+    }
 
     let mut blob = Vec::new();
     blob.extend_from_slice(&0.0f32.to_le_bytes());
@@ -673,7 +701,6 @@ fn redis_vector_set_advanced_options_cover_reduce_fp32_epsilon_and_attr_clear() 
             "2",
             "EPSILON",
             "0",
-            "TRUTH",
             "NOTHREAD",
             "WITHATTRIBS",
         ],
@@ -681,6 +708,8 @@ fn redis_vector_set_advanced_options_cover_reduce_fp32_epsilon_and_attr_clear() 
     assert!(
         matches!(exact_only, Frame::Array(values) if values.len() == 2 && bulk_string(&values[0]) == "a")
     );
+    assert!(try_apply(&db, &["VSIM", "advanced", "ELE", "a", "TRUTH"]).is_err());
+    assert!(try_apply(&db, &["VSIM", "advanced", "ELE", "a", "FILTER-EF", "10"]).is_err());
 
     let duplicates = apply(&db, &["VRANDMEMBER", "advanced", "-3"]);
     assert!(matches!(duplicates, Frame::Array(values) if values.len() == 3));

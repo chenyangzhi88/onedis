@@ -19,11 +19,8 @@ impl Bgsave {
         Ok(Bgsave {})
     }
 
-    pub fn apply_sync(self, db_manager: &DatabaseManager) -> Result<Frame, Error> {
-        db_manager
-            .store()
-            .manual_compaction()
-            .map_err(|err| Error::msg(err.to_string()))?;
+    pub fn apply_sync(self, _db_manager: &DatabaseManager) -> Result<Frame, Error> {
+        // Compatibility-only command; durable storage does not create Redis RDB snapshots.
         Ok(Frame::Ok)
     }
 }

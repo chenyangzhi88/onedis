@@ -1,4 +1,4 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::hash::common::checked_hash_entries, frame::Frame, store::db::Db};
 use anyhow::Error;
 
 pub struct Hgetall {
@@ -21,29 +21,15 @@ impl Hgetall {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get_all(&self.key) {
-            Ok(entries) => {
-                let mut result = Vec::with_capacity(entries.len() * 2);
-                for (field, value) in entries {
-                    result.push(Frame::bulk_string(field));
-                    result.push(Frame::bulk_string(value));
-                }
-                Ok(Frame::Array(result))
-            }
+        match db.hash_get_all_bytes(&self.key) {
+            Ok(entries) => checked_hash_entries(entries, true),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get_all_async(&self.key).await {
-            Ok(entries) => {
-                let mut result = Vec::with_capacity(entries.len() * 2);
-                for (field, value) in entries {
-                    result.push(Frame::bulk_string(field));
-                    result.push(Frame::bulk_string(value));
-                }
-                Ok(Frame::Array(result))
-            }
+        match db.hash_get_all_bytes_async(&self.key).await {
+            Ok(entries) => checked_hash_entries(entries, true),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

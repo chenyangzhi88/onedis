@@ -1,8 +1,9 @@
 use anyhow::Error;
 
 use crate::{
-    cmds::sorted_set::common::{
-        entries_with_scores, parse_numkeys_command, parse_weights_and_aggregate,
+    cmds::sorted_set::{
+        common::{entries_with_scores, parse_numkeys_command, parse_weights_and_aggregate},
+        zrange::flatten_entries,
     },
     frame::Frame,
     store::db::Db,
@@ -30,13 +31,8 @@ impl Zinter {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         match db.zset_union_or_inter(&self.keys, &self.weights, self.aggregate, true) {
-            Ok(entries) if self.withscores => Ok(Frame::Array(entries_with_scores(entries))),
-            Ok(entries) => Ok(Frame::Array(
-                entries
-                    .into_iter()
-                    .map(|(m, _)| Frame::bulk_string(m))
-                    .collect(),
-            )),
+            Ok(entries) if self.withscores => Ok(Frame::Array(entries_with_scores(entries)?)),
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, false)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -46,13 +42,8 @@ impl Zinter {
             .zset_union_or_inter_async(&self.keys, &self.weights, self.aggregate, true)
             .await
         {
-            Ok(entries) if self.withscores => Ok(Frame::Array(entries_with_scores(entries))),
-            Ok(entries) => Ok(Frame::Array(
-                entries
-                    .into_iter()
-                    .map(|(m, _)| Frame::bulk_string(m))
-                    .collect(),
-            )),
+            Ok(entries) if self.withscores => Ok(Frame::Array(entries_with_scores(entries)?)),
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, false)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

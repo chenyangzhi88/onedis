@@ -47,9 +47,10 @@ impl JsonSet {
         )
         .map_err(|_| Error::msg("ERR invalid JSON value"))?;
 
-        let condition = match frame.arg_len() {
-            4 => SetCondition::Always,
-            5 => match frame
+        let condition = if frame.arg_len() == 4 {
+            SetCondition::Always
+        } else {
+            match frame
                 .get_arg(4)
                 .ok_or_else(|| Error::msg("ERR syntax error"))?
                 .to_ascii_uppercase()
@@ -58,8 +59,7 @@ impl JsonSet {
                 "NX" => SetCondition::Nx,
                 "XX" => SetCondition::Xx,
                 _ => return Err(Error::msg("ERR syntax error")),
-            },
-            _ => unreachable!(),
+            }
         };
 
         Ok(JsonSet {
@@ -101,7 +101,7 @@ impl JsonGet {
             key: frame
                 .get_arg(1)
                 .ok_or_else(|| Error::msg("ERR invalid UTF-8 key"))?,
-            path: frame.get_arg(2).unwrap_or_else(|| "$".to_string()),
+            path: optional_path(&frame)?,
         })
     }
 
@@ -133,7 +133,7 @@ impl JsonDel {
             key: frame
                 .get_arg(1)
                 .ok_or_else(|| Error::msg("ERR invalid UTF-8 key"))?,
-            path: frame.get_arg(2).unwrap_or_else(|| "$".to_string()),
+            path: optional_path(&frame)?,
         })
     }
 
@@ -163,7 +163,7 @@ impl JsonType {
             key: frame
                 .get_arg(1)
                 .ok_or_else(|| Error::msg("ERR invalid UTF-8 key"))?,
-            path: frame.get_arg(2).unwrap_or_else(|| "$".to_string()),
+            path: optional_path(&frame)?,
         })
     }
 
@@ -181,5 +181,15 @@ impl JsonType {
             Ok(None) => Ok(Frame::Null),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
+    }
+}
+
+fn optional_path(frame: &Frame) -> Result<String, Error> {
+    if frame.arg_len() == 2 {
+        Ok("$".to_string())
+    } else {
+        frame
+            .get_arg(2)
+            .ok_or_else(|| Error::msg("ERR invalid JSON path"))
     }
 }

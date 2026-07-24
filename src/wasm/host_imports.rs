@@ -197,11 +197,11 @@ async fn host_redis_hset(
     let Some(field) = read_guest_string(&mut caller, field_ptr, field_len) else {
         return host_error(&mut caller, WASM_ERR_MEMORY);
     };
-    let Some(value) = read_guest_string(&mut caller, value_ptr, value_len) else {
+    let Some(value) = read_guest_bytes(&mut caller, value_ptr, value_len) else {
         return host_error(&mut caller, WASM_ERR_MEMORY);
     };
     let db = caller.data().db.clone();
-    match db.hash_set_async(&key, &field, &value).await {
+    match db.hash_set_bytes_async(&key, &field, &value).await {
         Ok(added) => added as i32,
         Err(_) => host_error(&mut caller, WASM_ERR_DB),
     }
@@ -222,11 +222,16 @@ async fn host_redis_call(
     let Some(args_blob) = read_guest_bytes(&mut caller, args_ptr, args_len) else {
         return host_error(&mut caller, WASM_ERR_MEMORY);
     };
-    let args = split_nul_args(&args_blob);
+    let Some(args) = split_nul_args(&args_blob) else {
+        return host_error(&mut caller, WASM_ERR_ARGUMENT);
+    };
     match command.to_ascii_uppercase().as_str() {
         "GET" if args.len() == 1 => {
+            let Ok(key) = std::str::from_utf8(&args[0]) else {
+                return host_error(&mut caller, WASM_ERR_ARGUMENT);
+            };
             let db = caller.data().db.clone();
-            match db.get_string_bytes_async(&args[0]).await {
+            match db.get_string_bytes_async(key).await {
                 Ok(Some(value)) => write_guest_bytes(&mut caller, out_ptr, out_cap, &value),
                 Ok(None) => WASM_OK_NIL,
                 Err(_) => host_error(&mut caller, WASM_ERR_DB),
@@ -236,11 +241,14 @@ async fn host_redis_call(
             if caller.data().read_only {
                 return host_error(&mut caller, WASM_ERR_READONLY);
             }
+            let Ok(key) = std::str::from_utf8(&args[0]) else {
+                return host_error(&mut caller, WASM_ERR_ARGUMENT);
+            };
             let db = caller.data().db.clone();
             match db
                 .set_string_bytes_async(
-                    args[0].clone(),
-                    args[1].as_bytes().to_vec(),
+                    key.to_string(),
+                    args[1].clone(),
                     SetExpiration::Clear,
                     SetCondition::Always,
                     false,
@@ -256,15 +264,21 @@ async fn host_redis_call(
             if caller.data().read_only {
                 return host_error(&mut caller, WASM_ERR_READONLY);
             }
+            let Ok(key) = std::str::from_utf8(&args[0]) else {
+                return host_error(&mut caller, WASM_ERR_ARGUMENT);
+            };
             let db = caller.data().db.clone();
-            i32::from(db.delete_key_async(&args[0]).await)
+            i32::from(db.delete_key_async(key).await)
         }
         "HGET" if args.len() == 2 => {
+            let (Ok(key), Ok(field)) =
+                (std::str::from_utf8(&args[0]), std::str::from_utf8(&args[1]))
+            else {
+                return host_error(&mut caller, WASM_ERR_ARGUMENT);
+            };
             let db = caller.data().db.clone();
-            match db.hash_get_async(&args[0], &args[1]).await {
-                Ok(Some(value)) => {
-                    write_guest_bytes(&mut caller, out_ptr, out_cap, value.as_bytes())
-                }
+            match db.hash_get_bytes_async(key, field).await {
+                Ok(Some(value)) => write_guest_bytes(&mut caller, out_ptr, out_cap, &value),
                 Ok(None) => WASM_OK_NIL,
                 Err(_) => host_error(&mut caller, WASM_ERR_DB),
             }
@@ -273,8 +287,13 @@ async fn host_redis_call(
             if caller.data().read_only {
                 return host_error(&mut caller, WASM_ERR_READONLY);
             }
+            let (Ok(key), Ok(field)) =
+                (std::str::from_utf8(&args[0]), std::str::from_utf8(&args[1]))
+            else {
+                return host_error(&mut caller, WASM_ERR_ARGUMENT);
+            };
             let db = caller.data().db.clone();
-            match db.hash_set_async(&args[0], &args[1], &args[2]).await {
+            match db.hash_set_bytes_async(key, field, &args[2]).await {
                 Ok(added) => added as i32,
                 Err(_) => host_error(&mut caller, WASM_ERR_DB),
             }

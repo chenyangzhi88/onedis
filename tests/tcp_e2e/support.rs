@@ -41,6 +41,7 @@ impl TestServer {
 
         let mut child = Command::new(&bin)
             .current_dir(workspace_root())
+            .env("RUST_LOG", "error")
             .arg("--config")
             .arg(&config_path)
             .arg("--bind")

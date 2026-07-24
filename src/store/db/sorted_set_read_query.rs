@@ -144,4 +144,77 @@ impl Db {
             .filter(|score| *score >= min && *score <= max)
             .count())
     }
+
+    pub fn zset_intersection_card(&self, keys: &[String], limit: usize) -> Result<usize, Error> {
+        if keys.is_empty() {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'zintercard' command",
+            ));
+        }
+        let mut versions = Vec::with_capacity(keys.len());
+        for key in keys {
+            versions.push(self.zset_expire_ms(key)?.map(|(_, version)| version));
+        }
+        let Some(versions) = versions.into_iter().collect::<Option<Vec<_>>>() else {
+            return Ok(0);
+        };
+
+        let mut smallest = 0usize;
+        let mut smallest_len = usize::MAX;
+        for (idx, (key, version)) in keys.iter().zip(&versions).enumerate() {
+            let prefix = zset_member_prefix(self.db_index, key, *version);
+            let len = self.store.scan_range_raw_visit(
+                &prefix,
+                prefix_exclusive_upper_bound(&prefix),
+                usize::MAX,
+                |_, _| true,
+            );
+            if len < smallest_len {
+                smallest = idx;
+                smallest_len = len;
+            }
+        }
+        if smallest_len == 0 {
+            return Ok(0);
+        }
+
+        let prefix = zset_member_prefix(self.db_index, &keys[smallest], versions[smallest]);
+        let mut count = 0usize;
+        self.store.scan_range_raw_visit(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            usize::MAX,
+            |member_key, _| {
+                let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
+                    return true;
+                };
+                let Ok(member) = std::str::from_utf8(member) else {
+                    return true;
+                };
+                if keys.iter().enumerate().all(|(idx, key)| {
+                    idx == smallest
+                        || self.store.contains_key(&zset_member_key(
+                            self.db_index,
+                            key,
+                            versions[idx],
+                            member,
+                        ))
+                }) {
+                    count = count.saturating_add(1);
+                }
+                limit == 0 || count < limit
+            },
+        );
+        Ok(count)
+    }
+
+    pub async fn zset_intersection_card_async(
+        &self,
+        keys: &[String],
+        limit: usize,
+    ) -> Result<usize, Error> {
+        let keys = keys.to_vec();
+        self.run_blocking_store_task(move |db| db.zset_intersection_card(&keys, limit))
+            .await
+    }
 }

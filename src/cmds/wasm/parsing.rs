@@ -33,7 +33,13 @@ impl WasmCommand {
                 let function = frame
                     .get_arg(2)
                     .ok_or_else(|| Error::msg("ERR invalid wasm function name"))?;
-                let args = frame.get_args_from_index(3);
+                let args = (3..frame.arg_len())
+                    .map(|index| {
+                        frame
+                            .get_arg_bytes(index)
+                            .ok_or_else(|| Error::msg("ERR invalid wasm argument"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 Ok(Self::Call {
                     name,
                     function,
@@ -78,6 +84,9 @@ impl WasmCommand {
                         .map_err(|_| Error::msg("ERR invalid wasm scan limit"))?,
                     None => 1000,
                 };
+                if limit > WASM_SCAN_MAX_ITEMS || limit > MAX_ARRAY_ELEMENTS {
+                    return Err(Error::msg("ERR wasm scan limit is too large"));
+                }
                 Ok(Self::Scan {
                     name,
                     function,
@@ -162,7 +171,10 @@ fn parse_fcall_command(frame: Frame, read_only: bool) -> Result<WasmCommand> {
         .ok_or_else(|| Error::msg("ERR invalid numkeys"))?
         .parse::<usize>()
         .map_err(|_| Error::msg("ERR invalid numkeys"))?;
-    if frame.arg_len() < 3 + numkeys {
+    let required = 3usize
+        .checked_add(numkeys)
+        .ok_or_else(|| Error::msg("ERR invalid numkeys"))?;
+    if frame.arg_len() < required {
         return Err(Error::msg(
             "ERR wrong number of arguments for 'fcall' command",
         ));
@@ -170,7 +182,13 @@ fn parse_fcall_command(frame: Frame, read_only: bool) -> Result<WasmCommand> {
     let (name, function) = function_ref
         .split_once('.')
         .ok_or_else(|| Error::msg("ERR function name must be module.function"))?;
-    let args = frame.get_args_from_index(3);
+    let args = (3..frame.arg_len())
+        .map(|index| {
+            frame
+                .get_arg_bytes(index)
+                .ok_or_else(|| Error::msg("ERR invalid fcall argument"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(WasmCommand::Call {
         name: name.to_string(),
         function: function.to_string(),

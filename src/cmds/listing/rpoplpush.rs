@@ -1,6 +1,6 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::listing::text_arg, frame::Frame, store::db::Db};
 
 pub struct Rpoplpush {
     source: String,
@@ -16,8 +16,8 @@ impl Rpoplpush {
         }
 
         Ok(Self {
-            source: frame.get_arg(1).unwrap(),
-            destination: frame.get_arg(2).unwrap(),
+            source: text_arg(&frame, 1)?,
+            destination: text_arg(&frame, 2)?,
         })
     }
 

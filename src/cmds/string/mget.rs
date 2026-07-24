@@ -1,4 +1,4 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::string::checked_string_values, frame::Frame, store::db::Db};
 use anyhow::Error;
 
 pub struct Mget {
@@ -18,24 +18,25 @@ impl Mget {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.keys.len());
         for key in self.keys {
             match db.get_string_bytes(&key) {
-                Ok(Some(value)) => result.push(Frame::bulk_string(value)),
-                Ok(None) | Err(_) => result.push(Frame::Null),
+                Ok(value) => result.push(value),
+                // Redis treats keys holding non-string values as missing in MGET.
+                Err(_) => result.push(None),
             }
         }
-        Ok(Frame::Array(result))
+        checked_string_values(result)
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.keys.len());
         for key in self.keys {
             match db.get_string_bytes_async(&key).await {
-                Ok(Some(value)) => result.push(Frame::bulk_string(value)),
-                Ok(None) | Err(_) => result.push(Frame::Null),
+                Ok(value) => result.push(value),
+                Err(_) => result.push(None),
             }
         }
-        Ok(Frame::Array(result))
+        checked_string_values(result)
     }
 }

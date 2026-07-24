@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::hash::common::checked_random_entries,
+    frame::{Frame, MAX_ARRAY_ELEMENTS},
+    store::db::Db,
+};
 
 pub struct Hrandfield {
     key: String,
@@ -34,6 +38,16 @@ impl Hrandfield {
             }
             with_values = true;
         }
+        if let Some(count) = count {
+            let max_count = if with_values {
+                MAX_ARRAY_ELEMENTS / 2
+            } else {
+                MAX_ARRAY_ELEMENTS
+            };
+            if count.unsigned_abs() > max_count as u64 {
+                return Err(Error::msg("ERR count exceeds configured response limit"));
+            }
+        }
 
         Ok(Hrandfield {
             key: args[1].to_string(),
@@ -43,23 +57,14 @@ impl Hrandfield {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_random_fields(&self.key, self.count, self.with_values) {
+        match db.hash_random_fields_bytes(&self.key, self.count, self.with_values) {
             Ok(Some(entries)) if self.count.is_none() => {
                 let Some((field, _)) = entries.into_iter().next() else {
                     return Ok(Frame::Null);
                 };
                 Ok(Frame::bulk_string(field))
             }
-            Ok(Some(entries)) => {
-                let mut frames = Vec::new();
-                for (field, value) in entries {
-                    frames.push(Frame::bulk_string(field));
-                    if let Some(value) = value {
-                        frames.push(Frame::bulk_string(value));
-                    }
-                }
-                Ok(Frame::Array(frames))
-            }
+            Ok(Some(entries)) => checked_random_entries(entries),
             Ok(None) if self.count.is_none() => Ok(Frame::Null),
             Ok(None) => Ok(Frame::Array(Vec::new())),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -68,7 +73,7 @@ impl Hrandfield {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db
-            .hash_random_fields_async(&self.key, self.count, self.with_values)
+            .hash_random_fields_bytes_async(&self.key, self.count, self.with_values)
             .await
         {
             Ok(Some(entries)) if self.count.is_none() => {
@@ -77,16 +82,7 @@ impl Hrandfield {
                 };
                 Ok(Frame::bulk_string(field))
             }
-            Ok(Some(entries)) => {
-                let mut frames = Vec::new();
-                for (field, value) in entries {
-                    frames.push(Frame::bulk_string(field));
-                    if let Some(value) = value {
-                        frames.push(Frame::bulk_string(value));
-                    }
-                }
-                Ok(Frame::Array(frames))
-            }
+            Ok(Some(entries)) => checked_random_entries(entries),
             Ok(None) if self.count.is_none() => Ok(Frame::Null),
             Ok(None) => Ok(Frame::Array(Vec::new())),
             Err(err) => Ok(Frame::Error(err.to_string())),

@@ -35,10 +35,7 @@ impl FtAggregate {
                     }
                     let count = parse_usize_arg(&frame, idx, "ERR invalid LOAD count")?;
                     idx += 1;
-                    if idx + count > frame.arg_len() {
-                        return Err(Error::msg("ERR syntax error"));
-                    }
-                    let end = idx + count;
+                    let end = checked_count_end(&frame, idx, count)?;
                     let mut fields = Vec::new();
                     while idx < end {
                         let identifier = arg(&frame, idx, "ERR invalid LOAD field")?;
@@ -77,12 +74,13 @@ impl FtAggregate {
                 }
                 "GROUPBY" => {
                     let count = parse_usize_arg(&frame, idx + 1, "ERR invalid GROUPBY count")?;
-                    idx += 2;
-                    if idx + count > frame.arg_len() {
-                        return Err(Error::msg("ERR syntax error"));
-                    }
+                    let start = idx
+                        .checked_add(2)
+                        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                    let end = checked_count_end(&frame, start, count)?;
+                    idx = start;
                     let mut fields = Vec::with_capacity(count);
-                    for _ in 0..count {
+                    while idx < end {
                         fields.push(arg(&frame, idx, "ERR invalid GROUPBY field")?);
                         idx += 1;
                     }
@@ -96,11 +94,11 @@ impl FtAggregate {
                 }
                 "SORTBY" => {
                     let count = parse_usize_arg(&frame, idx + 1, "ERR invalid SORTBY count")?;
-                    idx += 2;
-                    if idx + count > frame.arg_len() {
-                        return Err(Error::msg("ERR syntax error"));
-                    }
-                    let end = idx + count;
+                    let start = idx
+                        .checked_add(2)
+                        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                    let end = checked_count_end(&frame, start, count)?;
+                    idx = start;
                     while idx < end {
                         let field = arg(&frame, idx, "ERR invalid SORTBY field")?;
                         idx += 1;
@@ -159,11 +157,15 @@ impl FtAggregate {
                 }
                 "PARAMS" => {
                     let count = parse_usize_arg(&frame, idx + 1, "ERR invalid PARAMS count")?;
-                    idx += 2;
-                    if count % 2 != 0 || idx + count > frame.arg_len() {
+                    let start = idx
+                        .checked_add(2)
+                        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                    if count % 2 != 0 {
                         return Err(Error::msg("ERR syntax error"));
                     }
-                    for _ in 0..(count / 2) {
+                    let end = checked_count_end(&frame, start, count)?;
+                    idx = start;
+                    while idx < end {
                         let name = arg(&frame, idx, "ERR invalid PARAMS name")?;
                         let value = frame
                             .get_arg_bytes(idx + 1)
@@ -264,7 +266,7 @@ impl FtCursor {
 
 impl FtProfile {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        if frame.arg_len() < 6 {
+        if frame.arg_len() < 5 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'ft.profile' command",
             ));
@@ -272,7 +274,8 @@ impl FtProfile {
         let index = arg(&frame, 1, "ERR invalid fulltext index")?;
         let kind = upper_arg(&frame, 2)?;
         let mut idx = 3;
-        if upper_arg(&frame, idx)?.as_str() == "LIMITED" {
+        let limited = upper_arg(&frame, idx)?.as_str() == "LIMITED";
+        if limited {
             idx += 1;
         }
         if upper_arg(&frame, idx)?.as_str() != "QUERY" {
@@ -284,6 +287,15 @@ impl FtProfile {
                 let search_frame = fulltext_profile_inner_frame(&frame, "FT.SEARCH", &index, idx)?;
                 Ok(Self {
                     target: FtProfileTarget::Search(FtSearch::parse_from_frame(search_frame)?),
+                    limited,
+                })
+            }
+            "HYBRID" => {
+                let hybrid_frame =
+                    fulltext_profile_inner_frame(&frame, "FT.HYBRID", &index, idx)?;
+                Ok(Self {
+                    target: FtProfileTarget::Hybrid(FtHybrid::parse_from_frame(hybrid_frame)?),
+                    limited,
                 })
             }
             "AGGREGATE" => {
@@ -293,6 +305,7 @@ impl FtProfile {
                     target: FtProfileTarget::Aggregate(FtAggregate::parse_from_frame(
                         aggregate_frame,
                     )?),
+                    limited,
                 })
             }
             _ => Err(Error::msg("ERR unsupported fulltext profile target")),
@@ -300,6 +313,7 @@ impl FtProfile {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
+        let limited = self.limited;
         match self.target {
             FtProfileTarget::Search(search) => {
                 let start = Instant::now();
@@ -308,6 +322,17 @@ impl FtProfile {
                     result,
                     start.elapsed().as_secs_f64() * 1000.0,
                     "Search",
+                    limited,
+                ))
+            }
+            FtProfileTarget::Hybrid(hybrid) => {
+                let start = Instant::now();
+                let result = hybrid.apply(db)?;
+                Ok(fulltext_profile_frame(
+                    result,
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    "Hybrid",
+                    limited,
                 ))
             }
             FtProfileTarget::Aggregate(aggregate) => {
@@ -317,12 +342,14 @@ impl FtProfile {
                     result,
                     start.elapsed().as_secs_f64() * 1000.0,
                     "Aggregate",
+                    limited,
                 ))
             }
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
+        let limited = self.limited;
         match self.target {
             FtProfileTarget::Search(search) => {
                 let start = Instant::now();
@@ -331,6 +358,17 @@ impl FtProfile {
                     result,
                     start.elapsed().as_secs_f64() * 1000.0,
                     "Search",
+                    limited,
+                ))
+            }
+            FtProfileTarget::Hybrid(hybrid) => {
+                let start = Instant::now();
+                let result = hybrid.apply_async(db).await?;
+                Ok(fulltext_profile_frame(
+                    result,
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    "Hybrid",
+                    limited,
                 ))
             }
             FtProfileTarget::Aggregate(aggregate) => {
@@ -340,6 +378,7 @@ impl FtProfile {
                     result,
                     start.elapsed().as_secs_f64() * 1000.0,
                     "Aggregate",
+                    limited,
                 ))
             }
         }

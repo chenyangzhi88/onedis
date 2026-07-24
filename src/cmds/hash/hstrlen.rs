@@ -27,7 +27,7 @@ impl Hstrlen {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get(&self.key, &self.field) {
+        match db.hash_get_bytes(&self.key, &self.field) {
             Ok(Some(value)) => Ok(Frame::Integer(value.len() as i64)),
             Ok(None) => Ok(Frame::Integer(0)),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -35,7 +35,7 @@ impl Hstrlen {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get_async(&self.key, &self.field).await {
+        match db.hash_get_bytes_async(&self.key, &self.field).await {
             Ok(Some(value)) => Ok(Frame::Integer(value.len() as i64)),
             Ok(None) => Ok(Frame::Integer(0)),
             Err(err) => Ok(Frame::Error(err.to_string())),

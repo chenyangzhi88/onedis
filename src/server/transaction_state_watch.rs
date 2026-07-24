@@ -1,9 +1,13 @@
 impl Handler {
     // 事务相关方法
     pub fn start_transaction(&mut self) -> Result<(), Error> {
-        self.session.start_transaction();
+        if self.session.is_in_transaction() {
+            return Err(Error::msg("ERR MULTI calls can not be nested"));
+        }
         let db = self.session.get_db().clone();
-        self.transaction_db = Some(db.transactional_view()?);
+        let transaction_db = db.transactional_view()?;
+        self.session.start_transaction();
+        self.transaction_db = Some(transaction_db);
         Ok(())
     }
 

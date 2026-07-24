@@ -9,30 +9,12 @@ impl Db {
         pattern_str: &str,
         count: usize,
     ) -> Result<(u64, Vec<(String, f64)>), Error> {
-        let meta = self.zset_expire_ms(key)?;
-        let Some((_, version)) = meta else {
-            return Ok((0, Vec::new()));
-        };
-
-        let mut entries = self.zset_ranked_members(key, version);
-        if pattern_str != "*" {
-            entries.retain(|(member, _)| pattern::is_match(member, pattern_str));
-        }
-
-        let start_index = cursor as usize;
-        let end_index = std::cmp::min(start_index + count, entries.len());
-        let items = if start_index < entries.len() {
-            entries[start_index..end_index].to_vec()
-        } else {
-            Vec::new()
-        };
-        let next_cursor = if end_index >= entries.len() {
-            0
-        } else {
-            end_index as u64
-        };
-
-        Ok((next_cursor, items))
+        let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+        let mut state = ZsetScanState::new(cursor, count);
+        self.zset_visit_entries(key, |member, score| {
+            state.visit(member, score, matcher.as_ref())
+        })?;
+        state.finish()
     }
 
     pub async fn zset_scan_async(
@@ -42,29 +24,75 @@ impl Db {
         pattern_str: &str,
         count: usize,
     ) -> Result<(u64, Vec<(String, f64)>), Error> {
-        let meta = self.zset_expire_ms_async(key).await?;
-        let Some((_, version)) = meta else {
-            return Ok((0, Vec::new()));
-        };
+        let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+        let mut state = ZsetScanState::new(cursor, count);
+        self.zset_visit_entries_async(key, |member, score| {
+            state.visit(member, score, matcher.as_ref())
+        })
+        .await?;
+        state.finish()
+    }
+}
 
-        let mut entries = self.zset_ranked_members_async(key, version).await;
-        if pattern_str != "*" {
-            entries.retain(|(member, _)| pattern::is_match(member, pattern_str));
+struct ZsetScanState {
+    cursor: u64,
+    position: u64,
+    count: usize,
+    bytes: usize,
+    entries: Vec<(String, f64)>,
+    stopped: bool,
+    error: Option<Error>,
+}
+
+impl ZsetScanState {
+    fn new(cursor: u64, count: usize) -> Self {
+        Self {
+            cursor,
+            position: 0,
+            count,
+            bytes: 32,
+            entries: Vec::with_capacity(count.min(1024)),
+            stopped: false,
+            error: None,
         }
+    }
 
-        let start_index = cursor as usize;
-        let end_index = std::cmp::min(start_index + count, entries.len());
-        let items = if start_index < entries.len() {
-            entries[start_index..end_index].to_vec()
-        } else {
-            Vec::new()
-        };
-        let next_cursor = if end_index >= entries.len() {
-            0
-        } else {
-            end_index as u64
-        };
+    fn visit(&mut self, member: String, score: f64, matcher: Option<&pattern::Matcher>) -> bool {
+        self.position = self.position.saturating_add(1);
+        if self.position <= self.cursor || matcher.is_some_and(|matcher| !matcher.is_match(&member))
+        {
+            return true;
+        }
+        let cost = member
+            .len()
+            .saturating_add(score.to_string().len())
+            .saturating_add(64);
+        if self
+            .bytes
+            .checked_add(cost)
+            .is_none_or(|bytes| bytes > crate::frame::MAX_FRAME_BYTES)
+        {
+            if self.entries.is_empty() {
+                self.error = Some(Error::msg("ERR response exceeds configured limit"));
+            } else {
+                self.position = self.position.saturating_sub(1);
+            }
+            self.stopped = true;
+            return false;
+        }
+        self.bytes += cost;
+        self.entries.push((member, score));
+        if self.entries.len() >= self.count {
+            self.stopped = true;
+            return false;
+        }
+        true
+    }
 
-        Ok((next_cursor, items))
+    fn finish(self) -> Result<(u64, Vec<(String, f64)>), Error> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        Ok((if self.stopped { self.position } else { 0 }, self.entries))
     }
 }

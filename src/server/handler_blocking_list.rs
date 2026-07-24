@@ -1,11 +1,12 @@
 impl Handler {
     async fn apply_blocking_list_command(&mut self, command: Command) -> Result<Vec<u8>, Error> {
+        let mut blocked = None;
         let timeout_secs = Self::blocking_list_timeout_secs(&command);
         let deadline = if timeout_secs > 0.0 {
             Some(
                 Instant::now()
                     .checked_add(Duration::from_micros(
-                        (timeout_secs * 1_000_000.0).ceil() as u64,
+                        (timeout_secs * 1_000_000.0).ceil() as u64
                     ))
                     .ok_or_else(|| Error::msg("ERR timeout is out of range"))?,
             )
@@ -23,6 +24,7 @@ impl Handler {
                 }
                 return Ok(frame.as_bytes());
             }
+            blocked.get_or_insert_with(|| self.client_control.begin_blocking());
 
             match deadline {
                 Some(deadline) => {
@@ -40,6 +42,10 @@ impl Handler {
                             result?;
                             return Err(Error::msg("Connection closed by peer"));
                         }
+                        _ = self.client_control.wait_killed() => return Ok(Vec::new()),
+                        mode = self.client_control.wait_unblocked() => {
+                            return Ok(Self::client_unblock_response(mode));
+                        }
                     }
                 }
                 None => {
@@ -48,6 +54,10 @@ impl Handler {
                         result = self.connection.wait_read_closed() => {
                             result?;
                             return Err(Error::msg("Connection closed by peer"));
+                        }
+                        _ = self.client_control.wait_killed() => return Ok(Vec::new()),
+                        mode = self.client_control.wait_unblocked() => {
+                            return Ok(Self::client_unblock_response(mode));
                         }
                     }
                 }
@@ -62,45 +72,42 @@ impl Handler {
         let db = self.session.get_db().clone();
         let txn_db = db.transactional_view()?;
         let frame = match command {
-            Command::Blpop(blpop) => {
-                txn_db
-                    .list_multi_pop_async(&blpop.keys, true, 1)
-                    .await?
-                    .and_then(|(key, mut values)| values.pop().map(|value| (key, value))).map(|(key, value)| Frame::Array(vec![
-                        Frame::bulk_string(key),
-                        Frame::bulk_string(value),
-                    ]))
-            }
+            Command::Blpop(blpop) => txn_db
+                .list_multi_pop_async(&blpop.keys, true, 1)
+                .await?
+                .and_then(|(key, mut values)| values.pop().map(|value| (key, value)))
+                .map(|(key, value)| {
+                    Frame::Array(vec![Frame::bulk_string(key), Frame::bulk_string(value)])
+                }),
             Command::Brpop(brpop) => txn_db
                 .list_multi_pop_async(&brpop.inner.keys, false, 1)
                 .await?
-                .and_then(|(key, mut values)| values.pop().map(|value| (key, value))).map(|(key, value)| Frame::Array(vec![
-                    Frame::bulk_string(key),
-                    Frame::bulk_string(value),
-                ])),
-            Command::Brpoplpush(command) => {
-                txn_db
-                    .list_move_async(&command.source, &command.destination, false, true)
-                    .await?.map(Frame::bulk_string)
-            }
-            Command::Blmove(command) => {
-                txn_db
-                    .list_move_async(
-                        &command.source,
-                        &command.destination,
-                        command.source_side.is_left(),
-                        command.destination_side.is_left(),
-                    )
-                    .await?.map(Frame::bulk_string)
-            }
-            Command::Blmpop(command) => {
-                txn_db
-                    .list_multi_pop_async(&command.keys, command.left, command.count)
-                    .await?.map(|(key, values)| Frame::Array(vec![
+                .and_then(|(key, mut values)| values.pop().map(|value| (key, value)))
+                .map(|(key, value)| {
+                    Frame::Array(vec![Frame::bulk_string(key), Frame::bulk_string(value)])
+                }),
+            Command::Brpoplpush(command) => txn_db
+                .list_move_async(&command.source, &command.destination, false, true)
+                .await?
+                .map(Frame::bulk_string),
+            Command::Blmove(command) => txn_db
+                .list_move_async(
+                    &command.source,
+                    &command.destination,
+                    command.source_side.is_left(),
+                    command.destination_side.is_left(),
+                )
+                .await?
+                .map(Frame::bulk_string),
+            Command::Blmpop(command) => txn_db
+                .list_multi_pop_async(&command.keys, command.left, command.count)
+                .await?
+                .map(|(key, values)| {
+                    Frame::Array(vec![
                         Frame::bulk_string(key),
                         Frame::Array(values.into_iter().map(Frame::bulk_string).collect()),
-                    ]))
-            }
+                    ])
+                }),
             _ => unreachable!("non blocking-list command routed to blocking list handler"),
         };
         txn_db.commit_transaction_async().await?;

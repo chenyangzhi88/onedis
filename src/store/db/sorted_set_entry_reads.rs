@@ -29,14 +29,27 @@ impl Db {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let mut entries = Vec::new();
+        self.zset_visit_entries(key, |member, score| {
+            if accept(&member, score) {
+                entries.push((member, score));
+            }
+            entries.len() < limit
+        })?;
+        Ok(entries)
+    }
+
+    pub(crate) fn zset_visit_entries<F>(&self, key: &str, mut visit: F) -> Result<(), Error>
+    where
+        F: FnMut(String, f64) -> bool,
+    {
         let meta = self.zset_expire_ms(key)?;
         let Some((_, version)) = meta else {
-            return Ok(Vec::new());
+            return Ok(());
         };
 
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let upper = prefix_exclusive_upper_bound(&prefix);
-        let mut entries = Vec::new();
         self.store
             .scan_range_raw_visit(&prefix, upper, usize::MAX, |rank_key, _| {
                 let Some(score) = self.decode_rank_score(key, version, rank_key) else {
@@ -45,12 +58,9 @@ impl Db {
                 let Some(member) = self.decode_rank_member(key, version, rank_key) else {
                     return true;
                 };
-                if accept(&member, score) {
-                    entries.push((member, score));
-                }
-                entries.len() < limit
+                visit(member, score)
             });
-        Ok(entries)
+        Ok(())
     }
 
     pub(crate) async fn zset_filter_entries_limited_async<F>(
@@ -65,14 +75,32 @@ impl Db {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let mut entries = Vec::new();
+        self.zset_visit_entries_async(key, |member, score| {
+            if accept(&member, score) {
+                entries.push((member, score));
+            }
+            entries.len() < limit
+        })
+        .await?;
+        Ok(entries)
+    }
+
+    pub(crate) async fn zset_visit_entries_async<F>(
+        &self,
+        key: &str,
+        mut visit: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(String, f64) -> bool + Send,
+    {
         let meta = self.zset_expire_ms_async(key).await?;
         let Some((_, version)) = meta else {
-            return Ok(Vec::new());
+            return Ok(());
         };
 
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let upper = prefix_exclusive_upper_bound(&prefix);
-        let mut entries = Vec::new();
         self.store
             .scan_range_raw_visit_async(&prefix, upper, usize::MAX, |rank_key, _| {
                 let Some(score) = self.decode_rank_score(key, version, rank_key) else {
@@ -81,13 +109,10 @@ impl Db {
                 let Some(member) = self.decode_rank_member(key, version, rank_key) else {
                     return true;
                 };
-                if accept(&member, score) {
-                    entries.push((member, score));
-                }
-                entries.len() < limit
+                visit(member, score)
             })
             .await;
-        Ok(entries)
+        Ok(())
     }
 
     pub fn zset_random_members(

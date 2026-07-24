@@ -1,0 +1,17 @@
+mod aggregate_cursor_store;
+mod aggregate_expressions;
+mod aggregate_reducers;
+mod aggregate_row_projection;
+mod aggregate_sort_frame;
+mod aggregate_value_ops;
+mod index_management_config;
+mod metadata_config_helpers;
+mod query_helpers_validation;
+mod query_parser_core;
+mod runtime_search;
+mod search_eval_ast;
+mod source_vector_indexing;
+mod storage_keys_config;
+mod support;
+mod text_analysis;
+mod vector_query;

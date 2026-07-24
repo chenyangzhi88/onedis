@@ -98,6 +98,43 @@ impl KvStore {
         result
     }
 
+    pub fn compare_and_write_batch(
+        &self,
+        conditions: &[CompareCondition],
+        batch: &WriteBatch,
+    ) -> KvResult<()> {
+        let started = Instant::now();
+        if let Some(result) = self.with_transaction_mut(|txn| {
+            for condition in conditions {
+                let value = txn.get(&condition.key)?;
+                if !condition.matches_transaction_value(value.as_deref()) {
+                    return Err(Status::ConditionFailed(
+                        "compare_and_write condition failed".to_string(),
+                    ));
+                }
+            }
+            stage_batch_in_transaction(txn, batch)
+        }) {
+            global_metrics().record_storage_write(elapsed_us(started), result.is_err());
+            return result;
+        }
+        let table_batch = SchemalessWriteBatch::from_write_batch(batch.clone());
+        let engine_conditions = conditions
+            .iter()
+            .map(|condition| {
+                condition.engine.clone().ok_or_else(|| {
+                    Status::InvalidArgument(
+                        "transaction observation cannot be used outside its transaction"
+                            .to_string(),
+                    )
+                })
+            })
+            .collect::<KvResult<Vec<_>>>()?;
+        let result = self.table.compare_and_write(&engine_conditions, &table_batch);
+        global_metrics().record_storage_write(elapsed_us(started), result.is_err());
+        result
+    }
+
     /// 直接提交到底层 DB，绕过当前事务视图。
     ///
     /// Version high-water reservations intentionally use this path: gaps are

@@ -3,7 +3,7 @@ pub enum LuaCommand {
     EvalSha {
         sha: String,
         keys: Vec<String>,
-        args: Vec<String>,
+        args: Vec<Vec<u8>>,
         read_only: bool,
     },
     ScriptLoad(String),

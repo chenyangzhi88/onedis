@@ -56,9 +56,12 @@ impl HnswGraph {
 
     fn upsert(&mut self, id: String, doc_version: u64, vector: Vec<f32>) -> Result<(), Error> {
         validate_vector(&vector, self.dim)?;
-        if let Some(pos) = self.id_to_pos.get(&id).copied() {
+        let replaces_existing = if let Some(pos) = self.id_to_pos.get(&id).copied() {
             self.nodes[pos].deleted = true;
-        }
+            true
+        } else {
+            false
+        };
         validate_vector_for_distance(&vector, self.distance)?;
         let pos = self.nodes.len();
         self.nodes.push(HnswNode {
@@ -68,8 +71,33 @@ impl HnswGraph {
             deleted: false,
         });
         self.id_to_pos.insert(id, pos);
-        self.backend.insert(&vector, pos);
+        if replaces_existing {
+            // hnsw_rs has no physical replacement operation. Rebuilding the
+            // bounded active graph prevents a fresh version from connecting
+            // only to its tombstoned predecessor, which otherwise makes
+            // VLINKS and small-graph searches nondeterministic.
+            self.rebuild_backend();
+        } else {
+            self.backend.insert(&vector, pos);
+        }
         Ok(())
+    }
+
+    fn rebuild_backend(&mut self) {
+        self.backend = HnswBackend::new(
+            self.distance,
+            self.m,
+            self.nodes.len().max(1),
+            self.ef_construction,
+        );
+        self.id_to_pos.clear();
+        for (pos, node) in self.nodes.iter().enumerate() {
+            if node.deleted {
+                continue;
+            }
+            self.id_to_pos.insert(node.id.clone(), pos);
+            self.backend.insert(&node.vector, pos);
+        }
     }
 
     fn mark_deleted(&mut self, id: &str) {
@@ -122,6 +150,62 @@ impl HnswGraph {
 
     fn len(&self) -> usize {
         self.nodes.iter().filter(|node| !node.deleted).count()
+    }
+
+    fn links(&self, id: &str) -> Option<Vec<Vec<(String, f32)>>> {
+        let origin_id = self.id_to_pos.get(id).copied()?;
+        if self.nodes.get(origin_id).is_none_or(|node| node.deleted) {
+            return None;
+        }
+        let mut layers = self
+            .backend
+            .neighborhood(origin_id)
+            .into_iter()
+            .map(|layer| {
+                layer
+                    .into_iter()
+                    .filter_map(|neighbor| {
+                        let node = self.nodes.get(neighbor.d_id)?;
+                        (!node.deleted && node.id != id)
+                            .then(|| (node.id.clone(), neighbor.distance))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // hnsw_rs may retain an outgoing edge to a tombstoned version of an
+        // updated document while live nodes still have real incoming edges to
+        // the replacement. VLINKS is a graph-neighborhood view, so include
+        // those incoming edges as well instead of intermittently reporting no
+        // live links for the replacement node.
+        for (candidate_id, candidate) in self.nodes.iter().enumerate() {
+            if candidate_id == origin_id || candidate.deleted {
+                continue;
+            }
+            for (layer_index, layer) in self
+                .backend
+                .neighborhood(candidate_id)
+                .into_iter()
+                .enumerate()
+            {
+                let Some(edge) = layer.into_iter().find(|edge| edge.d_id == origin_id) else {
+                    continue;
+                };
+                if layers.len() <= layer_index {
+                    layers.resize_with(layer_index + 1, Vec::new);
+                }
+                if !layers[layer_index]
+                    .iter()
+                    .any(|(neighbor_id, _)| neighbor_id == &candidate.id)
+                {
+                    layers[layer_index].push((candidate.id.clone(), edge.distance));
+                }
+            }
+        }
+        while layers.last().is_some_and(Vec::is_empty) {
+            layers.pop();
+        }
+        Some(layers)
     }
 
     fn max_doc_version(&self) -> u64 {
@@ -222,6 +306,24 @@ impl HnswBackend {
             HnswBackend::L2(index) => index.search_filter(query, limit, ef, filter),
             HnswBackend::Cosine(index) => index.search_filter(query, limit, ef, filter),
             HnswBackend::Ip(index) => index.search_filter(query, limit, ef, filter),
+        }
+    }
+
+    fn neighborhood(&self, origin_id: usize) -> Vec<Vec<hnsw_rs::prelude::Neighbour>> {
+        macro_rules! neighborhood {
+            ($index:expr) => {
+                $index
+                    .get_point_indexation()
+                    .into_iter()
+                    .find(|point| point.get_origin_id() == origin_id)
+                    .map(|point| point.get_neighborhood_id())
+                    .unwrap_or_default()
+            };
+        }
+        match self {
+            HnswBackend::L2(index) => neighborhood!(index),
+            HnswBackend::Cosine(index) => neighborhood!(index),
+            HnswBackend::Ip(index) => neighborhood!(index),
         }
     }
 }

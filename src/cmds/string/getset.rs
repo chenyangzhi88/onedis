@@ -6,7 +6,7 @@ use anyhow::Error;
 
 pub struct GetSet {
     pub key: String,
-    pub value: String,
+    pub value: Vec<u8>,
 }
 
 impl GetSet {
@@ -24,9 +24,9 @@ impl GetSet {
             .ok_or(Error::msg("ERR missing key"))?
             .to_string();
         let value = frame
-            .get_arg(2)
+            .get_arg_bytes(2)
             .ok_or(Error::msg("ERR missing value"))?
-            .to_string();
+            .to_vec();
 
         Ok(GetSet { key, value })
     }
@@ -35,7 +35,7 @@ impl GetSet {
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         match db.set_string_bytes(
             self.key,
-            self.value.into_bytes(),
+            self.value,
             SetExpiration::Clear,
             SetCondition::Always,
             true,
@@ -52,7 +52,7 @@ impl GetSet {
         match db
             .set_string_bytes_async(
                 self.key,
-                self.value.into_bytes(),
+                self.value,
                 SetExpiration::Clear,
                 SetCondition::Always,
                 true,

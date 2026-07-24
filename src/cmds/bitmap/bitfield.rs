@@ -1,4 +1,5 @@
 use crate::{
+    cmds::bitmap::text_arg,
     frame::Frame,
     store::db::{Db, SetCondition, SetExpiration, read_bits_from, write_bits_into},
 };
@@ -112,8 +113,9 @@ fn execute_ops(bytes: &mut Vec<u8>, ops: &[BitfieldOp]) -> Result<(Vec<Frame>, b
                     out.push(Frame::Null);
                     continue;
                 };
+                let old_len = bytes.len();
                 write_bits_into(bytes, offset, ty.width, value)?;
-                changed = true;
+                changed |= old != value || bytes.len() != old_len;
                 out.push(Frame::Integer(old));
             }
             BitfieldOp::IncrBy(ty, offset, increment, overflow) => {
@@ -123,8 +125,9 @@ fn execute_ops(bytes: &mut Vec<u8>, ops: &[BitfieldOp]) -> Result<(Vec<Frame>, b
                     out.push(Frame::Null);
                     continue;
                 };
+                let old_len = bytes.len();
                 write_bits_into(bytes, offset, ty.width, next)?;
-                changed = true;
+                changed |= old != next || bytes.len() != old_len;
                 out.push(Frame::Integer(next));
             }
         }
@@ -138,19 +141,17 @@ fn parse(frame: Frame, readonly: bool) -> Result<Bitfield, Error> {
             "ERR wrong number of arguments for 'bitfield' command",
         ));
     }
-    let key = frame.get_arg(1).unwrap();
+    let key = text_arg(&frame, 1)?;
     let mut ops = Vec::new();
     let mut idx = 2;
     let mut overflow = Overflow::Wrap;
     while idx < frame.arg_len() {
-        match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+        match text_arg(&frame, idx)?.to_ascii_uppercase().as_str() {
             "GET" if idx + 2 < frame.arg_len() => {
+                let ty = parse_type(&text_arg(&frame, idx + 1)?)?;
                 ops.push(BitfieldOp::Get(
-                    parse_type(&frame.get_arg(idx + 1).unwrap())?,
-                    parse_offset(
-                        &frame.get_arg(idx + 2).unwrap(),
-                        parse_type(&frame.get_arg(idx + 1).unwrap())?.width,
-                    )?,
+                    ty,
+                    parse_offset(&text_arg(&frame, idx + 2)?, ty.width)?,
                 ));
                 idx += 3;
             }
@@ -158,13 +159,11 @@ fn parse(frame: Frame, readonly: bool) -> Result<Bitfield, Error> {
                 if readonly {
                     return Err(Error::msg("ERR BITFIELD_RO only supports GET"));
                 }
-                let ty = parse_type(&frame.get_arg(idx + 1).unwrap())?;
+                let ty = parse_type(&text_arg(&frame, idx + 1)?)?;
                 ops.push(BitfieldOp::Set(
                     ty,
-                    parse_offset(&frame.get_arg(idx + 2).unwrap(), ty.width)?,
-                    frame
-                        .get_arg(idx + 3)
-                        .unwrap()
+                    parse_offset(&text_arg(&frame, idx + 2)?, ty.width)?,
+                    text_arg(&frame, idx + 3)?
                         .parse()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
                     overflow,
@@ -175,13 +174,11 @@ fn parse(frame: Frame, readonly: bool) -> Result<Bitfield, Error> {
                 if readonly {
                     return Err(Error::msg("ERR BITFIELD_RO only supports GET"));
                 }
-                let ty = parse_type(&frame.get_arg(idx + 1).unwrap())?;
+                let ty = parse_type(&text_arg(&frame, idx + 1)?)?;
                 ops.push(BitfieldOp::IncrBy(
                     ty,
-                    parse_offset(&frame.get_arg(idx + 2).unwrap(), ty.width)?,
-                    frame
-                        .get_arg(idx + 3)
-                        .unwrap()
+                    parse_offset(&text_arg(&frame, idx + 2)?, ty.width)?,
+                    text_arg(&frame, idx + 3)?
                         .parse()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?,
                     overflow,
@@ -189,12 +186,7 @@ fn parse(frame: Frame, readonly: bool) -> Result<Bitfield, Error> {
                 idx += 4;
             }
             "OVERFLOW" if !readonly && idx + 1 < frame.arg_len() => {
-                overflow = match frame
-                    .get_arg(idx + 1)
-                    .unwrap()
-                    .to_ascii_uppercase()
-                    .as_str()
-                {
+                overflow = match text_arg(&frame, idx + 1)?.to_ascii_uppercase().as_str() {
                     "WRAP" => Overflow::Wrap,
                     "SAT" => Overflow::Sat,
                     "FAIL" => Overflow::Fail,
@@ -224,7 +216,7 @@ fn parse_type(text: &str) -> Result<BitType, Error> {
 }
 
 fn parse_offset(text: &str, width: usize) -> Result<usize, Error> {
-    if let Some(multiplied) = text.strip_prefix('#') {
+    let offset = if let Some(multiplied) = text.strip_prefix('#') {
         multiplied
             .parse::<usize>()
             .map_err(|_| Error::msg("ERR bit offset is not an integer or out of range"))?
@@ -233,7 +225,13 @@ fn parse_offset(text: &str, width: usize) -> Result<usize, Error> {
     } else {
         text.parse()
             .map_err(|_| Error::msg("ERR bit offset is not an integer or out of range"))
+    }?;
+    if offset >= crate::frame::MAX_BULK_STRING_BYTES.saturating_mul(8) {
+        return Err(Error::msg(
+            "ERR bit offset is not an integer or out of range",
+        ));
     }
+    Ok(offset)
 }
 
 fn apply_overflow(value: i128, ty: BitType, overflow: Overflow) -> Option<i64> {

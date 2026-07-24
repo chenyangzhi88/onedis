@@ -26,6 +26,8 @@ pub enum ExpireCondition {
     Xx,
     Gt,
     Lt,
+    XxGt,
+    XxLt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +91,9 @@ pub enum StringExpireUpdate {
     RelativeMs(u64),
     AbsoluteMs(u64),
 }
+
+/// Redis reserves the upper two bits of its 48-bit hash-field expiry timestamp.
+pub const HASH_FIELD_MAX_EXPIRE_MS: u64 = 0x3fff_ffff_ffff;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetOutcome {

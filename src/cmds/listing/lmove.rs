@@ -1,6 +1,6 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::listing::text_arg, frame::Frame, store::db::Db};
 
 #[derive(Clone, Copy)]
 pub enum ListSide {
@@ -34,10 +34,10 @@ impl Lmove {
         }
 
         Ok(Self {
-            source: frame.get_arg(1).unwrap(),
-            destination: frame.get_arg(2).unwrap(),
-            source_side: ListSide::parse(&frame.get_arg(3).unwrap())?,
-            destination_side: ListSide::parse(&frame.get_arg(4).unwrap())?,
+            source: text_arg(&frame, 1)?,
+            destination: text_arg(&frame, 2)?,
+            source_side: ListSide::parse(&text_arg(&frame, 3)?)?,
+            destination_side: ListSide::parse(&text_arg(&frame, 4)?)?,
         })
     }
 

@@ -26,6 +26,10 @@ pub struct Session {
     transaction_bytes: usize,
     watched_keys: Vec<WatchedKey>,
     name: Option<String>,
+    library_name: Option<String>,
+    library_version: Option<String>,
+    no_evict: bool,
+    no_touch: bool,
     created_at: Instant,
     last_interaction_at: Instant,
     last_cmd: Option<String>,
@@ -63,6 +67,10 @@ impl Session {
             transaction_bytes: 0,
             watched_keys: Vec::new(),
             name: None,
+            library_name: None,
+            library_version: None,
+            no_evict: false,
+            no_touch: false,
             created_at: now,
             last_interaction_at: now,
             last_cmd: None,
@@ -189,6 +197,38 @@ impl Session {
 
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    pub fn set_library_name(&mut self, name: Option<String>) {
+        self.library_name = name;
+    }
+
+    pub fn library_name(&self) -> Option<&str> {
+        self.library_name.as_deref()
+    }
+
+    pub fn set_library_version(&mut self, version: Option<String>) {
+        self.library_version = version;
+    }
+
+    pub fn library_version(&self) -> Option<&str> {
+        self.library_version.as_deref()
+    }
+
+    pub fn set_no_evict(&mut self, enabled: bool) {
+        self.no_evict = enabled;
+    }
+
+    pub fn no_evict(&self) -> bool {
+        self.no_evict
+    }
+
+    pub fn set_no_touch(&mut self, enabled: bool) {
+        self.no_touch = enabled;
+    }
+
+    pub fn no_touch(&self) -> bool {
+        self.no_touch
     }
 
     pub fn set_last_cmd(&mut self, command: String) {

@@ -1,6 +1,7 @@
 use anyhow::Error;
 
 use crate::{
+    cmds::stream::text_arg,
     frame::Frame,
     store::db::{Db, StreamId},
 };
@@ -40,24 +41,24 @@ impl Xgroup {
                 "ERR wrong number of arguments for 'xgroup' command",
             ));
         }
-        match frame.get_arg(1).unwrap().to_ascii_uppercase().as_str() {
+        match text_arg(&frame, 1)?.to_ascii_uppercase().as_str() {
             "CREATE" => {
                 if frame.arg_len() < 5 {
                     return Err(Error::msg(
                         "ERR wrong number of arguments for 'xgroup create' command",
                     ));
                 }
-                let id = parse_id_or_latest(&frame.get_arg(4).unwrap())?;
+                let id = parse_id_or_latest(&text_arg(&frame, 4)?)?;
                 let mut mkstream = false;
                 for idx in 5..frame.arg_len() {
-                    match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+                    match text_arg(&frame, idx)?.to_ascii_uppercase().as_str() {
                         "MKSTREAM" if !mkstream => mkstream = true,
                         _ => return Err(Error::msg("ERR syntax error")),
                     }
                 }
                 Ok(Self::Create {
-                    key: frame.get_arg(2).unwrap(),
-                    group: frame.get_arg(3).unwrap(),
+                    key: text_arg(&frame, 2)?,
+                    group: text_arg(&frame, 3)?,
                     id,
                     mkstream,
                 })
@@ -69,9 +70,9 @@ impl Xgroup {
                     ));
                 }
                 Ok(Self::SetId {
-                    key: frame.get_arg(2).unwrap(),
-                    group: frame.get_arg(3).unwrap(),
-                    id: parse_id_or_latest(&frame.get_arg(4).unwrap())?,
+                    key: text_arg(&frame, 2)?,
+                    group: text_arg(&frame, 3)?,
+                    id: parse_id_or_latest(&text_arg(&frame, 4)?)?,
                 })
             }
             "DESTROY" => {
@@ -81,8 +82,8 @@ impl Xgroup {
                     ));
                 }
                 Ok(Self::Destroy {
-                    key: frame.get_arg(2).unwrap(),
-                    group: frame.get_arg(3).unwrap(),
+                    key: text_arg(&frame, 2)?,
+                    group: text_arg(&frame, 3)?,
                 })
             }
             "CREATECONSUMER" => {
@@ -92,9 +93,9 @@ impl Xgroup {
                     ));
                 }
                 Ok(Self::CreateConsumer {
-                    key: frame.get_arg(2).unwrap(),
-                    group: frame.get_arg(3).unwrap(),
-                    consumer: frame.get_arg(4).unwrap(),
+                    key: text_arg(&frame, 2)?,
+                    group: text_arg(&frame, 3)?,
+                    consumer: text_arg(&frame, 4)?,
                 })
             }
             "DELCONSUMER" => {
@@ -104,9 +105,9 @@ impl Xgroup {
                     ));
                 }
                 Ok(Self::DelConsumer {
-                    key: frame.get_arg(2).unwrap(),
-                    group: frame.get_arg(3).unwrap(),
-                    consumer: frame.get_arg(4).unwrap(),
+                    key: text_arg(&frame, 2)?,
+                    group: text_arg(&frame, 3)?,
+                    consumer: text_arg(&frame, 4)?,
                 })
             }
             _ => Err(Error::msg("ERR unknown subcommand")),

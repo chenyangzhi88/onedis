@@ -8,9 +8,8 @@ impl Handler {
                 if self.args.requirepass.is_some() && !self.session.get_certification() =>
             {
                 self.session.mark_transaction_dirty();
-                response_bytes.extend(
-                    Frame::Error("NOAUTH Authentication required.".to_string()).as_bytes(),
-                );
+                response_bytes
+                    .extend(Frame::Error("NOAUTH Authentication required.".to_string()).as_bytes());
             }
             Ok(command)
                 if !self
@@ -150,6 +149,7 @@ impl Handler {
                 | Command::Ttl(_)
                 | Command::Touch(_)
                 | Command::Type(_)
+                | Command::Unwatch(_)
                 | Command::Unlink(_)
                 | Command::Xack(_)
                 | Command::Xadd(_)

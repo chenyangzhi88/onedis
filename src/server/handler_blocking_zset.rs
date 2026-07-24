@@ -1,11 +1,12 @@
 impl Handler {
     async fn apply_blocking_zset_command(&mut self, command: Command) -> Result<Vec<u8>, Error> {
+        let mut blocked = None;
         let timeout_secs = Self::blocking_zset_timeout_secs(&command);
         let deadline = if timeout_secs > 0.0 {
             Some(
                 Instant::now()
                     .checked_add(Duration::from_micros(
-                        (timeout_secs * 1_000_000.0).ceil() as u64,
+                        (timeout_secs * 1_000_000.0).ceil() as u64
                     ))
                     .ok_or_else(|| Error::msg("ERR timeout is out of range"))?,
             )
@@ -22,6 +23,7 @@ impl Handler {
                 }
                 return Ok(frame.as_bytes());
             }
+            blocked.get_or_insert_with(|| self.client_control.begin_blocking());
             match deadline {
                 Some(deadline) => {
                     let now = Instant::now();
@@ -38,6 +40,10 @@ impl Handler {
                             result?;
                             return Err(Error::msg("Connection closed by peer"));
                         }
+                        _ = self.client_control.wait_killed() => return Ok(Vec::new()),
+                        mode = self.client_control.wait_unblocked() => {
+                            return Ok(Self::client_unblock_response(mode));
+                        }
                     }
                 }
                 None => {
@@ -46,6 +52,10 @@ impl Handler {
                         result = self.connection.wait_read_closed() => {
                             result?;
                             return Err(Error::msg("Connection closed by peer"));
+                        }
+                        _ = self.client_control.wait_killed() => return Ok(Vec::new()),
+                        mode = self.client_control.wait_unblocked() => {
+                            return Ok(Self::client_unblock_response(mode));
                         }
                     }
                 }
@@ -97,10 +107,11 @@ impl Handler {
                     None => None,
                 }
             }
-            Command::Bzmpop(command) => {
-                txn_db
-                    .zset_multi_pop_async(&command.keys, command.min, command.count)
-                    .await?.map(|(key, entries)| Frame::Array(vec![
+            Command::Bzmpop(command) => txn_db
+                .zset_multi_pop_async(&command.keys, command.min, command.count)
+                .await?
+                .map(|(key, entries)| {
+                    Frame::Array(vec![
                         Frame::bulk_string(key),
                         Frame::Array(
                             entries
@@ -113,8 +124,8 @@ impl Handler {
                                 })
                                 .collect(),
                         ),
-                    ]))
-            }
+                    ])
+                }),
             _ => unreachable!("non blocking-zset command routed to blocking zset handler"),
         };
         txn_db.commit_transaction_async().await?;

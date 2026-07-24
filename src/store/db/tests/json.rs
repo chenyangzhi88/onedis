@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::db::JsonPathToken;
 
 #[test]
 fn update_preserves_ttl_for_get() {
@@ -59,6 +60,18 @@ fn json_set_get_type_and_del_paths() {
     assert_eq!(db.json_del("doc", "$.profile.zip").unwrap(), 1);
     assert_eq!(db.json_del("doc", "$.profile.zip").unwrap(), 0);
     assert_eq!(db.json_get("doc", "$.profile.zip").unwrap(), None);
+}
+
+#[test]
+fn json_paths_reject_ambiguous_and_resource_amplifying_inputs() {
+    assert!(parse_json_path("").is_err());
+    assert!(parse_json_path("[0]").is_err());
+    assert_eq!(
+        parse_json_path(".[0]").unwrap(),
+        vec![JsonPathToken::Index(0)]
+    );
+    assert!(parse_json_path(&format!("$.{}", "a.".repeat(128) + "a")).is_err());
+    assert!(parse_json_path(&format!("$.{}", "a".repeat(4096))).is_err());
 }
 
 #[test]

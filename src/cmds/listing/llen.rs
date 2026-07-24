@@ -7,15 +7,14 @@ pub struct Llen {
 
 impl Llen {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let key = frame.get_arg(1);
-
-        if frame.arg_len() != 2 || key.is_none() {
+        if frame.arg_len() != 2 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'llen' command",
             ));
         }
-
-        let final_key = key.unwrap().to_string(); // 键
+        let final_key = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'llen' command"))?;
 
         Ok(Llen { key: final_key })
     }

@@ -42,14 +42,18 @@ fn parse_redis_vector_arg(frame: &Frame, idx: &mut usize) -> Result<Vec<f32>, Er
         }
         "VALUES" => {
             let count = parse_usize_arg(frame, *idx + 1, "ERR invalid vector VALUES")?;
+            if count == 0 || count > MAX_VECTOR_DIMENSIONS {
+                return Err(Error::msg("ERR invalid vector dimension"));
+            }
             *idx += 2;
+            let values_end = (*idx)
+                .checked_add(count)
+                .filter(|end| *end <= frame.arg_len())
+                .ok_or_else(|| Error::msg("ERR invalid vector VALUES"))?;
             let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
+            while *idx < values_end {
                 values.push(parse_f32_arg(frame, *idx, "ERR invalid vector value")?);
                 *idx += 1;
-            }
-            if values.is_empty() {
-                return Err(Error::msg("ERR vector VALUES cannot be empty"));
             }
             Ok(values)
         }
@@ -61,8 +65,12 @@ fn parse_vector_blob(bytes: &[u8]) -> Result<Vec<f32>, Error> {
     if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return Err(Error::msg("ERR invalid vector blob length"));
     }
+    let dimensions = bytes.len() / 4;
+    if dimensions > MAX_VECTOR_DIMENSIONS {
+        return Err(Error::msg("ERR invalid vector dimension"));
+    }
     Ok(bytes
         .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk length is 4")))
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }

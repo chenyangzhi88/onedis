@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{cmds::hash::common::parse_hash_fields, frame::Frame, store::db::Db};
+use crate::{
+    cmds::hash::common::{checked_bulk_array, parse_hash_fields},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Hgetdel {
     key: String,
@@ -22,25 +26,15 @@ impl Hgetdel {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get_del(&self.key, &self.fields) {
-            Ok(values) => Ok(Frame::Array(
-                values
-                    .into_iter()
-                    .map(|value| value.map(Frame::bulk_string).unwrap_or(Frame::Null))
-                    .collect(),
-            )),
+        match db.hash_get_del_bytes(&self.key, &self.fields) {
+            Ok(values) => checked_bulk_array(values),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get_del_async(&self.key, &self.fields).await {
-            Ok(values) => Ok(Frame::Array(
-                values
-                    .into_iter()
-                    .map(|value| value.map(Frame::bulk_string).unwrap_or(Frame::Null))
-                    .collect(),
-            )),
+        match db.hash_get_del_bytes_async(&self.key, &self.fields).await {
+            Ok(values) => checked_bulk_array(values),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

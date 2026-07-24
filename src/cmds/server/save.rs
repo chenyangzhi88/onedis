@@ -14,15 +14,10 @@ impl Save {
         Ok(Save {})
     }
 
-    pub fn apply_sync(self, db_manager: &DatabaseManager) -> Result<Frame, Error> {
-        db_manager
-            .store()
-            .manual_compaction()
-            .map_err(|err| Error::msg(err.to_string()))?;
-        db_manager
-            .store()
-            .sync_wal()
-            .map_err(|err| Error::msg(err.to_string()))?;
+    pub fn apply_sync(self, _db_manager: &DatabaseManager) -> Result<Frame, Error> {
+        // Compatibility-only command. The engine persists writes continuously, so forcing a
+        // compaction/WAL sync here would turn an otherwise harmless probe into a blocking
+        // resource spike.
         Ok(Frame::Ok)
     }
 }

@@ -50,6 +50,7 @@ fn test_db() -> Db {
     Db::new(0, store, version_counter, ttl_manager)
 }
 
+mod full_text_directory;
 mod hash;
 mod json;
 mod key_string_bitmap;

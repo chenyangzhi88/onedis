@@ -81,7 +81,7 @@ fn getset_replaces_string_and_returns_old_value() {
 
     let frame = GetSet {
         key: "name".to_string(),
-        value: "bob".to_string(),
+        value: b"bob".to_vec(),
     }
     .apply(&db)
     .unwrap();

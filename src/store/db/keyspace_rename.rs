@@ -1,6 +1,94 @@
 use super::*;
 
 impl Db {
+    pub fn rename_key(&self, old_key: &str, new_key: &str, replace: bool) -> Result<bool, Error> {
+        if old_key == new_key {
+            return if Self::load_live_raw_for_db_with_backend(&self.store, self.db_index, old_key)
+                .is_some()
+            {
+                Ok(replace)
+            } else {
+                Err(Error::msg("ERR no such key"))
+            };
+        }
+
+        let old_key_bytes = self.mk(old_key);
+        let new_key_bytes = self.mk(new_key);
+        for _ in 0..64 {
+            self.expire_if_needed(old_key);
+            self.expire_if_needed(new_key);
+
+            let Some(source_raw) = self.store.get_raw(&old_key_bytes) else {
+                return Err(Error::msg("ERR no such key"));
+            };
+            let target_raw = self.store.get_raw(&new_key_bytes);
+            if target_raw.is_some() && !replace {
+                return Ok(false);
+            }
+
+            let mut batch = WriteBatch::new();
+            if let Some(target_raw) = target_raw.as_deref() {
+                Self::delete_structure_for_db_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    new_key,
+                    target_raw,
+                );
+                if let Some(header) = decode_meta_header(target_raw)
+                    && header.expire_ms > 0
+                {
+                    self.ttl_manager.remove_known_to_batch(
+                        &mut batch,
+                        header.expire_ms,
+                        self.db_index,
+                        new_key,
+                    );
+                }
+            }
+            Self::copy_structure_between_dbs_to_batch(
+                &mut batch,
+                StructureCopyContext::new(
+                    &self.store,
+                    &self.store,
+                    DbKeyRef::new(self.db_index, old_key),
+                    DbKeyRef::new(self.db_index, new_key),
+                    &source_raw,
+                    &self.version_counter,
+                ),
+            );
+            Self::delete_structure_for_db_to_batch(&mut batch, self.db_index, old_key, &source_raw);
+            if let Some(header) = decode_meta_header(&source_raw)
+                && header.expire_ms > 0
+            {
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    header.expire_ms,
+                    self.db_index,
+                    old_key,
+                );
+                self.ttl_manager
+                    .add_to_batch(&mut batch, header.expire_ms, self.db_index, new_key);
+            }
+
+            let conditions = [
+                CompareCondition::exists_with(&old_key_bytes, &source_raw),
+                CompareCondition::with_expected(&new_key_bytes, target_raw),
+            ];
+            if self.compare_and_write_batch_if_not_empty(&conditions, &batch)? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                if !self.store.is_transactional() {
+                    self.non_transactional_view()
+                        .fulltext_reconcile_committed_keys(
+                            &[old_key_bytes.clone(), new_key_bytes.clone()],
+                            true,
+                        )?;
+                }
+                return Ok(true);
+            }
+        }
+        Err(Error::msg("ERR rename write conflict"))
+    }
+
     pub async fn rename_key_async(
         &self,
         old_key: &str,
@@ -39,7 +127,7 @@ impl Db {
                 .await
                 .is_some()
             {
-                return Ok(true);
+                return Ok(replace);
             }
             return Err(Error::msg("ERR no such key"));
         }

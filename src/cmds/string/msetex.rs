@@ -26,7 +26,7 @@ impl Msetex {
         }
         let numkeys = frame
             .get_arg(1)
-            .unwrap()
+            .ok_or_else(|| Error::msg("ERR value is not an integer or out of range"))?
             .parse::<usize>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
         if numkeys == 0 {
@@ -58,7 +58,10 @@ impl Msetex {
         let mut expiration_seen = false;
         let mut idx = options_start;
         while idx < frame.arg_len() {
-            let option = frame.get_arg(idx).unwrap().to_ascii_uppercase();
+            let option = frame
+                .get_arg(idx)
+                .ok_or_else(|| Error::msg("ERR syntax error"))?
+                .to_ascii_uppercase();
             match option.as_str() {
                 "NX" | "XX" => {
                     if condition != SetCondition::Always {
@@ -83,7 +86,10 @@ impl Msetex {
                     if expiration_seen || idx + 1 >= frame.arg_len() {
                         return Err(Error::msg("ERR syntax error"));
                     }
-                    expiration = parse_expiration(&option, &frame.get_arg(idx + 1).unwrap())?;
+                    let value = frame
+                        .get_arg(idx + 1)
+                        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                    expiration = parse_expiration(&option, &value)?;
                     expiration_seen = true;
                     idx += 2;
                 }

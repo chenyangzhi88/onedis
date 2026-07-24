@@ -14,11 +14,15 @@ impl FtExplain {
             match upper_arg(&frame, idx)?.as_str() {
                 "PARAMS" => {
                     let count = parse_usize_arg(&frame, idx + 1, "ERR invalid PARAMS count")?;
-                    idx += 2;
-                    if count % 2 != 0 || idx + count > frame.arg_len() {
+                    let start = idx
+                        .checked_add(2)
+                        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                    if count % 2 != 0 {
                         return Err(Error::msg("ERR syntax error"));
                     }
-                    for _ in 0..(count / 2) {
+                    let end = checked_count_end(&frame, start, count)?;
+                    idx = start;
+                    while idx < end {
                         let name = arg(&frame, idx, "ERR invalid PARAMS name")?;
                         let value = frame
                             .get_arg_bytes(idx + 1)

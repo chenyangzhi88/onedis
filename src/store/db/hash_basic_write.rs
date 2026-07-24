@@ -2,43 +2,60 @@ use super::*;
 
 impl Db {
     pub fn hash_get(&self, key: &str, field: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .hash_get_bytes(key, field)?
+            .and_then(|value| String::from_utf8(value).ok()))
+    }
+
+    pub fn hash_get_bytes(&self, key: &str, field: &str) -> Result<Option<Vec<u8>>, Error> {
         let meta = self.hash_expire_ms(key)?;
         let Some((_, version)) = meta else {
             return Ok(None);
         };
 
-        Ok(self
-            .hash_live_field_value(key, version, field)
-            .and_then(|value| String::from_utf8(value).ok()))
+        Ok(self.hash_live_field_value(key, version, field))
     }
 
     pub async fn hash_get_async(&self, key: &str, field: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .hash_get_bytes_async(key, field)
+            .await?
+            .and_then(|value| String::from_utf8(value).ok()))
+    }
+
+    pub async fn hash_get_bytes_async(
+        &self,
+        key: &str,
+        field: &str,
+    ) -> Result<Option<Vec<u8>>, Error> {
         let meta = self.hash_expire_ms_async(key).await?;
         let Some((_, version)) = meta else {
             return Ok(None);
         };
 
-        Ok(self
-            .hash_live_field_value_async(key, version, field)
-            .await
-            .and_then(|value| String::from_utf8(value).ok()))
+        Ok(self.hash_live_field_value_async(key, version, field).await)
     }
 
     /// 设置 hash field，返回是否为新字段。
     pub fn hash_set(&self, key: &str, field: &str, value: &str) -> Result<bool, Error> {
+        self.hash_set_bytes(key, field, value.as_bytes())
+    }
+
+    pub fn hash_set_bytes(&self, key: &str, field: &str, value: &[u8]) -> Result<bool, Error> {
         let meta = self.hash_expire_ms(key)?;
         let version = match meta {
             Some((_, v)) => v,
             None => self.next_persisted_version(),
         };
         let field_key = hash_field_key(self.db_index, key, version, field);
-        let is_new_field = meta.is_none() || !self.store.contains_key(&field_key);
+        let is_new_field =
+            meta.is_none() || self.hash_live_field_value(key, version, field).is_none();
 
         let mut batch = WriteBatch::new();
         if meta.is_none() {
             batch.put(&self.mk(key), &encode_hash_meta(0, version));
         }
-        batch.put(&field_key, value.as_bytes());
+        batch.put(&field_key, value);
         if meta.is_some() {
             batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
         }
@@ -53,15 +70,25 @@ impl Db {
     }
 
     pub async fn hash_set_async(&self, key: &str, field: &str, value: &str) -> Result<bool, Error> {
-        let _write_guard = self.set_write_lock(key).lock().await;
-        self.hash_set_async_unlocked(key, field, value).await
+        self.hash_set_bytes_async(key, field, value.as_bytes())
+            .await
     }
 
-    async fn hash_set_async_unlocked(
+    pub async fn hash_set_bytes_async(
         &self,
         key: &str,
         field: &str,
-        value: &str,
+        value: &[u8],
+    ) -> Result<bool, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        self.hash_set_bytes_async_unlocked(key, field, value).await
+    }
+
+    async fn hash_set_bytes_async_unlocked(
+        &self,
+        key: &str,
+        field: &str,
+        value: &[u8],
     ) -> Result<bool, Error> {
         for _ in 0..64 {
             let key_bytes = self.mk(key);
@@ -94,7 +121,7 @@ impl Db {
             if meta.is_none() {
                 batch.put(&key_bytes, &encode_hash_meta(0, version));
             }
-            batch.put(&field_key, value.as_bytes());
+            batch.put(&field_key, value);
 
             let may_have_field_ttl = meta.is_some_and(|meta| meta.may_have_field_ttl);
             let use_value_observed = meta.is_none() || may_have_field_ttl;
@@ -140,7 +167,22 @@ impl Db {
     }
 
     pub fn hash_set_many(&self, key: &str, fields: &[(String, String)]) -> Result<usize, Error> {
+        let fields = fields
+            .iter()
+            .map(|(field, value)| (field.clone(), value.as_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        self.hash_set_many_bytes(key, &fields)
+    }
+
+    pub fn hash_set_many_bytes(
+        &self,
+        key: &str,
+        fields: &[(String, Vec<u8>)],
+    ) -> Result<usize, Error> {
         let meta = self.hash_expire_ms(key)?;
+        if fields.is_empty() {
+            return Ok(0);
+        }
         let version = match meta {
             Some((_, v)) => v,
             None => self.next_persisted_version(),
@@ -154,17 +196,14 @@ impl Db {
         let mut seen_in_batch = HashSet::new();
         for (field, value) in fields {
             if !seen_in_batch.insert(field.clone()) {
-                batch.put(
-                    &hash_field_key(self.db_index, key, version, field),
-                    value.as_bytes(),
-                );
+                batch.put(&hash_field_key(self.db_index, key, version, field), value);
                 continue;
             }
             let field_key = hash_field_key(self.db_index, key, version, field);
-            if meta.is_none() || !self.store.contains_key(&field_key) {
+            if meta.is_none() || self.hash_live_field_value(key, version, field).is_none() {
                 added += 1;
             }
-            batch.put(&field_key, value.as_bytes());
+            batch.put(&field_key, value);
             if meta.is_some() {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
@@ -184,14 +223,30 @@ impl Db {
         key: &str,
         fields: &[(String, String)],
     ) -> Result<usize, Error> {
-        let _write_guard = self.set_write_lock(key).lock().await;
-        self.hash_set_many_async_unlocked(key, fields).await
+        let fields = fields
+            .iter()
+            .map(|(field, value)| (field.clone(), value.as_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        self.hash_set_many_bytes_async(key, &fields).await
     }
 
-    async fn hash_set_many_async_unlocked(
+    pub async fn hash_set_many_bytes_async(
         &self,
         key: &str,
-        fields: &[(String, String)],
+        fields: &[(String, Vec<u8>)],
+    ) -> Result<usize, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
+        if fields.is_empty() {
+            self.hash_expire_ms_async(key).await?;
+            return Ok(0);
+        }
+        self.hash_set_many_bytes_async_unlocked(key, fields).await
+    }
+
+    async fn hash_set_many_bytes_async_unlocked(
+        &self,
+        key: &str,
+        fields: &[(String, Vec<u8>)],
     ) -> Result<usize, Error> {
         for _ in 0..64 {
             let key_bytes = self.mk(key);
@@ -229,10 +284,7 @@ impl Db {
             let use_value_observed = meta.is_none() || may_have_field_ttl;
             for (field, value) in fields {
                 if !seen_in_batch.insert(field.clone()) {
-                    batch.put(
-                        &hash_field_key(self.db_index, key, version, field),
-                        value.as_bytes(),
-                    );
+                    batch.put(&hash_field_key(self.db_index, key, version, field), value);
                     continue;
                 }
                 let field_key = hash_field_key(self.db_index, key, version, field);
@@ -246,7 +298,7 @@ impl Db {
                     if observed_field.value().is_none() {
                         added += 1;
                     }
-                    batch.put(&field_key, value.as_bytes());
+                    batch.put(&field_key, value);
                     if may_have_field_ttl {
                         batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
                     }
@@ -256,7 +308,7 @@ impl Db {
                     if !observed_field.exists() {
                         added += 1;
                     }
-                    batch.put(&field_key, value.as_bytes());
+                    batch.put(&field_key, value);
                     conditions.push(CompareCondition::from_observed_state(&observed_field));
                 }
             }

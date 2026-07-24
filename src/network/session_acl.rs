@@ -1,14 +1,19 @@
 impl SessionManager {
+    pub fn acl_user_is_nopass(&self, user: &str) -> bool {
+        self.acl_users
+            .get(user)
+            .is_some_and(|acl_user| acl_user.enabled && acl_user.nopass)
+    }
+
     pub fn acl_authenticate(&self, user: &str, password: &str) -> bool {
         let Some(acl_user) = self.acl_users.get(user) else {
             return false;
         };
         acl_user.enabled
             && (acl_user.nopass
-                || acl_user
-                    .password
-                    .as_deref()
-                    .is_some_and(|expected| constant_time_eq(expected.as_bytes(), password.as_bytes())))
+                || acl_user.password.as_deref().is_some_and(|expected| {
+                    constant_time_eq(expected.as_bytes(), password.as_bytes())
+                }))
     }
 
     pub fn acl_allows(&self, user: &str, command: &str) -> bool {
@@ -19,10 +24,18 @@ impl SessionManager {
             return false;
         }
         let command = command.to_ascii_lowercase();
+        let parent_command = command.split_once('|').map(|(parent, _)| parent);
         if acl_user.denied.contains(&command) {
             return false;
         }
-        acl_user.all_commands || acl_user.allowed.contains(&command)
+        if acl_user.allowed.contains(&command) {
+            return true;
+        }
+        if parent_command.is_some_and(|parent| acl_user.denied.contains(parent)) {
+            return false;
+        }
+        acl_user.all_commands
+            || parent_command.is_some_and(|parent| acl_user.allowed.contains(parent))
     }
 
     pub fn acl_whoami(&self, session_id: usize) -> String {

@@ -7,17 +7,17 @@ pub struct Renamenx {
 
 impl Renamenx {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let old_key = frame.get_arg(1);
-        let new_key = frame.get_arg(2);
-
-        if frame.arg_len() != 3 || old_key.is_none() || new_key.is_none() {
+        if frame.arg_len() != 3 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'renamenx' command",
             ));
         }
-
-        let old_key_str = old_key.unwrap().to_string();
-        let new_key_str = new_key.unwrap().to_string();
+        let old_key_str = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'renamenx' command"))?;
+        let new_key_str = frame
+            .get_arg(2)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'renamenx' command"))?;
 
         Ok(Renamenx {
             old_key: old_key_str,
@@ -26,19 +26,8 @@ impl Renamenx {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        if !db.exists(&self.old_key) {
-            return Err(Error::msg("ERR no such key"));
-        }
-
-        if db.exists(&self.new_key) {
-            return Ok(Frame::Integer(0));
-        }
-
-        if let Some(value) = db.remove(&self.old_key) {
-            db.insert(self.new_key.clone(), value);
-        }
-
-        Ok(Frame::Integer(1))
+        let renamed = db.rename_key(&self.old_key, &self.new_key, false)?;
+        Ok(Frame::Integer(if renamed { 1 } else { 0 }))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {

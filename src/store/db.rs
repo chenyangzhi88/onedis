@@ -21,9 +21,7 @@ use super::ttl::{
 };
 use crate::{observability::metrics::global_metrics, tools::pattern};
 
-#[path = "full_text.rs"]
 mod full_text;
-#[path = "full_text_directory.rs"]
 mod full_text_directory;
 #[path = "vector.rs"]
 mod vector;
@@ -31,15 +29,17 @@ pub use full_text::{
     FullTextAggregateLoadField, FullTextAggregateOptions, FullTextAggregateReducer,
     FullTextAggregateReducerKind, FullTextAggregateSortBy, FullTextAggregateStep,
     FullTextCreateOptions, FullTextFieldKind, FullTextFieldOptions, FullTextFieldSchema,
-    FullTextGeoShapeCoordinateSystem, FullTextIndexOptions, FullTextReturnField,
-    FullTextRuntimeRegistry, FullTextScorer, FullTextSearchBound, FullTextSearchGeoFilter,
-    FullTextSearchNumericFilter, FullTextSearchOptions, FullTextSortBy, FullTextSourceType,
-    FullTextVectorAlgorithm, FullTextVectorOptions,
+    FullTextGeoShapeCoordinateSystem, FullTextHighlightOptions, FullTextHybridCombine,
+    FullTextHybridOptions, FullTextIndexOptions, FullTextReturnField, FullTextRuntimeRegistry,
+    FullTextScorer, FullTextSearchBound, FullTextSearchGeoFilter, FullTextSearchNumericFilter,
+    FullTextSearchOptions, FullTextSortBy, FullTextSourceType, FullTextSpellcheckDictionary,
+    FullTextSummarizeOptions, FullTextVectorAlgorithm, FullTextVectorOptions,
 };
 pub use vector::{
     VectorCreateOptions, VectorFieldKind, VectorFieldSchema, VectorRuntimeRegistry,
     VectorSearchOptions, VectorSearchResult,
 };
+pub type VectorLinkLayers = Vec<Vec<(String, f32)>>;
 
 mod collection_key_codec;
 mod core_key_watch;
@@ -111,6 +111,7 @@ mod stream_pending_ops;
 mod string_batch_write_ops;
 mod string_bitmap_ops;
 pub(crate) use string_bitmap_ops::{read_bits_from, write_bits_into};
+mod string_hll_ops;
 mod string_integer_ops;
 mod string_key_readonly;
 mod string_keyspace_flush;

@@ -1,4 +1,7 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    frame::{Frame, MAX_ARRAY_ELEMENTS},
+    store::db::Db,
+};
 use anyhow::Error;
 
 pub struct Keys {
@@ -17,13 +20,21 @@ impl Keys {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let keys = db.keys(&self.pattern);
+        let (cursor, keys) = db.scan_keys_page(0, &self.pattern, MAX_ARRAY_ELEMENTS, None)?;
+        if cursor != 0 {
+            return Err(Error::msg("ERR response exceeds configured limit"));
+        }
         let results: Vec<Frame> = keys.into_iter().map(Frame::bulk_string).collect();
         Ok(Frame::Array(results))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let keys = db.keys_async(&self.pattern).await;
+        let (cursor, keys) = db
+            .scan_keys_page_async(0, &self.pattern, MAX_ARRAY_ELEMENTS, None)
+            .await?;
+        if cursor != 0 {
+            return Err(Error::msg("ERR response exceeds configured limit"));
+        }
         let results: Vec<Frame> = keys.into_iter().map(Frame::bulk_string).collect();
         Ok(Frame::Array(results))
     }

@@ -12,8 +12,7 @@ impl Select {
     }
 
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let args = frame.get_args();
-        if args.len() != 2 {
+        if frame.arg_len() != 2 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'select' command",
             ));

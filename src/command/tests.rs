@@ -121,6 +121,33 @@ fn parse_dispatch_reports_empty_and_unknown_commands() {
 }
 
 #[test]
+fn bitmap_parsers_reject_binary_text_arguments_and_oversized_offsets() {
+    let binary_key = Frame::Array(vec![
+        Frame::BulkString(b"BITCOUNT".to_vec()),
+        Frame::BulkString(vec![0xff]),
+    ]);
+    assert!(Command::parse_from_frame(binary_key).is_err());
+
+    let maximum_offset = crate::frame::MAX_BULK_STRING_BYTES
+        .saturating_mul(8)
+        .to_string();
+    for args in [
+        vec!["GETBIT", "key", maximum_offset.as_str()],
+        vec!["SETBIT", "key", maximum_offset.as_str(), "1"],
+        vec!["BITFIELD", "key", "SET", "u8", maximum_offset.as_str(), "1"],
+    ] {
+        assert!(
+            Command::parse_from_frame(frame_args(&args)).is_err(),
+            "{args:?}"
+        );
+    }
+    assert!(Command::parse_from_frame(frame_args(&["BITOP", "BAD", "dst", "src"])).is_err());
+    assert!(
+        Command::parse_from_frame(frame_args(&["BITOP", "NOT", "dst", "left", "right"])).is_err()
+    );
+}
+
+#[test]
 fn command_name_and_aof_flags_cover_late_dispatch_variants() {
     let cases: &[(&[&str], &str, bool)] = &[
         (&["CLIENT", "HELP"], "CLIENT", false),
@@ -165,7 +192,15 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
             &[
                 "FT.HYBRID",
                 "idx",
-                "*=>[KNN 1 @v $BLOB]",
+                "SEARCH",
+                "*",
+                "VSIM",
+                "@v",
+                "$BLOB",
+                "KNN",
+                "2",
+                "K",
+                "1",
                 "PARAMS",
                 "2",
                 "BLOB",

@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::listing::{list_array, validate_response_count},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Rpop {
     pub key: String,
@@ -27,6 +31,9 @@ impl Rpop {
                     .map_err(|_| Error::msg("ERR value is out of range, must be positive"))
             })
             .transpose()?;
+        if let Some(count) = count {
+            validate_response_count(count)?;
+        }
 
         Ok(Rpop { key, count })
     }
@@ -34,9 +41,7 @@ impl Rpop {
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         if let Some(count) = self.count {
             return match db.list_multi_pop(std::slice::from_ref(&self.key), false, count) {
-                Ok(Some((_, values))) => Ok(Frame::Array(
-                    values.into_iter().map(Frame::bulk_string).collect(),
-                )),
+                Ok(Some((_, values))) => list_array(values),
                 Ok(None) => Ok(Frame::Array(Vec::new())),
                 Err(err) => Ok(Frame::Error(err.to_string())),
             };
@@ -54,9 +59,7 @@ impl Rpop {
                 .list_multi_pop_async(std::slice::from_ref(&self.key), false, count)
                 .await
             {
-                Ok(Some((_, values))) => Ok(Frame::Array(
-                    values.into_iter().map(Frame::bulk_string).collect(),
-                )),
+                Ok(Some((_, values))) => list_array(values),
                 Ok(None) => Ok(Frame::Array(Vec::new())),
                 Err(err) => Ok(Frame::Error(err.to_string())),
             };

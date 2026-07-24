@@ -10,20 +10,45 @@ impl FtSpellCheck {
         let mut distance = 1usize;
         let mut include = Vec::new();
         let mut exclude = Vec::new();
+        let mut dialect = None;
         let mut idx = 3;
         while idx < frame.arg_len() {
             match upper_arg(&frame, idx)?.as_str() {
                 "DISTANCE" => {
                     distance = parse_usize_arg(&frame, idx + 1, "ERR invalid DISTANCE")?;
+                    if !(1..=4).contains(&distance) {
+                        return Err(Error::msg("ERR DISTANCE must be between 1 and 4"));
+                    }
                     idx += 2;
                 }
                 "TERMS" => {
-                    match upper_arg(&frame, idx + 1)?.as_str() {
-                        "INCLUDE" => include.push(arg(&frame, idx + 2, "ERR invalid dictionary")?),
-                        "EXCLUDE" => exclude.push(arg(&frame, idx + 2, "ERR invalid dictionary")?),
+                    let mode = upper_arg(&frame, idx + 1)?;
+                    let name = arg(&frame, idx + 2, "ERR invalid dictionary")?;
+                    idx += 3;
+                    let mut terms = Vec::new();
+                    while idx < frame.arg_len()
+                        && !matches!(
+                            upper_arg(&frame, idx)?.as_str(),
+                            "DISTANCE" | "TERMS" | "DIALECT"
+                        )
+                    {
+                        terms.push(arg(&frame, idx, "ERR invalid dictionary term")?);
+                        idx += 1;
+                    }
+                    let dictionary = FullTextSpellcheckDictionary { name, terms };
+                    match mode.as_str() {
+                        "INCLUDE" => include.push(dictionary),
+                        "EXCLUDE" => exclude.push(dictionary),
                         _ => return Err(Error::msg("ERR syntax error")),
                     }
-                    idx += 3;
+                }
+                "DIALECT" => {
+                    let value = parse_u64_arg(&frame, idx + 1, "ERR invalid DIALECT")?;
+                    if !(1..=4).contains(&value) {
+                        return Err(Error::msg("ERR invalid DIALECT"));
+                    }
+                    dialect = Some(value as u8);
+                    idx += 2;
                 }
                 _ => return Err(Error::msg("ERR syntax error")),
             }
@@ -34,6 +59,7 @@ impl FtSpellCheck {
             distance,
             include,
             exclude,
+            dialect,
         })
     }
 

@@ -13,15 +13,19 @@ pub struct Info {
 
 impl Info {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let args = frame.get_args();
-        if args.len() > 2 {
+        if frame.arg_len() > 2 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'info' command",
             ));
         }
 
-        let section = if args.len() > 1 {
-            Some(args[1].to_lowercase())
+        let section = if frame.arg_len() > 1 {
+            Some(
+                frame
+                    .get_arg(1)
+                    .ok_or_else(|| Error::msg("ERR invalid UTF-8 INFO section"))?
+                    .to_lowercase(),
+            )
         } else {
             None
         };
@@ -107,7 +111,7 @@ impl Info {
         if show_memory {
             info.push_str("# Memory\r\n");
             // Estimate memory usage based on the number of records
-            let memory_used = db_size * 100; // Rough estimate
+            let memory_used = db_size.saturating_mul(100); // Rough estimate
             info.push_str(&format!("used_memory:{}\r\n", memory_used));
             info.push_str(&format!("used_memory_human:{}B\r\n", memory_used));
             info.push_str("used_memory_rss:0\r\n");
@@ -248,8 +252,11 @@ impl Info {
         if show_keyspace {
             info.push_str("# Keyspace\r\n");
             info.push_str(&format!(
-                "db0:keys={},expires={},avg_ttl={}\r\n",
-                db_size, ttl.expires, ttl.avg_ttl_millis
+                "db{}:keys={},expires={},avg_ttl={}\r\n",
+                db.db_index(),
+                db_size,
+                ttl.expires,
+                ttl.avg_ttl_millis
             ));
         }
 

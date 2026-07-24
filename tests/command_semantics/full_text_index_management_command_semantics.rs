@@ -143,7 +143,7 @@ fn ft_list_alias_and_config_survive_reopen() {
 }
 
 #[test]
-fn ft_dropindex_keeps_or_deletes_hash_documents() {
+fn ft_dropindex_keeps_or_deletes_source_documents() {
     let (_dir, db) = make_db();
     apply(
         &db,
@@ -191,6 +191,36 @@ fn ft_dropindex_keeps_or_deletes_hash_documents() {
         apply(&db, &["EXISTS", "delete:1"]),
         Frame::Integer(0)
     ));
+
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "idx_json_delete",
+            "ON",
+            "JSON",
+            "PREFIX",
+            "1",
+            "json:",
+            "SCHEMA",
+            "$.title",
+            "AS",
+            "title",
+            "TEXT",
+        ],
+    );
+    apply(
+        &db,
+        &["JSON.SET", "json:1", "$", r#"{"title":"delete json"}"#],
+    );
+    assert!(matches!(
+        apply(&db, &["FT.DROPINDEX", "idx_json_delete", "DD"]),
+        Frame::Ok
+    ));
+    assert!(matches!(
+        apply(&db, &["EXISTS", "json:1"]),
+        Frame::Integer(0)
+    ));
 }
 
 #[test]
@@ -233,6 +263,47 @@ fn ft_alter_adds_schema_and_survives_reopen() {
         &["FT.SEARCH", "idx", "@category:{book}"],
         &["doc:1"],
     );
+}
+
+#[test]
+fn ft_alter_skipinitialscan_preserves_old_index_without_backfilling_new_field() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "idx",
+            "PREFIX",
+            "1",
+            "doc:",
+            "SCHEMA",
+            "title",
+            "TEXT",
+        ],
+    );
+    apply(&db, &["HSET", "doc:1", "title", "alpha", "body", "oldbody"]);
+    wait_for_search_ids(&db, &["FT.SEARCH", "idx", "alpha"], &["doc:1"]);
+
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "FT.ALTER",
+                "idx",
+                "SKIPINITIALSCAN",
+                "SCHEMA",
+                "ADD",
+                "body",
+                "TEXT",
+            ],
+        ),
+        Frame::Ok
+    ));
+    wait_for_search_ids(&db, &["FT.SEARCH", "idx", "alpha"], &["doc:1"]);
+    wait_for_search_ids(&db, &["FT.SEARCH", "idx", "oldbody"], &[]);
+
+    apply(&db, &["HSET", "doc:1", "body", "newbody"]);
+    wait_for_search_ids(&db, &["FT.SEARCH", "idx", "newbody"], &["doc:1"]);
 }
 
 #[test]

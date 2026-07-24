@@ -8,6 +8,14 @@
         )
     }
 
+    fn bytes_frame(args: &[&[u8]]) -> Frame {
+        Frame::Array(
+            args.iter()
+                .map(|arg| Frame::BulkString(arg.to_vec()))
+                .collect(),
+        )
+    }
+
     fn assert_error_frame(frame: Frame, expected: &str) {
         match frame {
             Frame::Error(value) => assert!(value.contains(expected)),
@@ -242,7 +250,8 @@
             "1",
             "title",
             "TAGS",
-            "<b></b>",
+            "<b>",
+            "</b>",
             "SLOP",
             "2",
             "TIMEOUT",
@@ -282,8 +291,17 @@
         assert_eq!(search.options.in_keys.as_ref().unwrap().len(), 2);
         assert_eq!(search.options.in_fields.as_ref().unwrap().len(), 2);
         assert!(!search.options.sort_by.as_ref().unwrap().asc);
-        assert!(search.options.summarize);
-        assert!(search.options.highlight);
+        let summarize = search.options.summarize.as_ref().unwrap();
+        assert_eq!(summarize.frags, 2);
+        assert_eq!(summarize.len, 10);
+        assert_eq!(summarize.separator, "...");
+        assert_eq!(
+            summarize.fields.as_ref().unwrap(),
+            &HashSet::from(["title".to_string()])
+        );
+        let highlight = search.options.highlight.as_ref().unwrap();
+        assert_eq!(highlight.open_tag, "<b>");
+        assert_eq!(highlight.close_tag, "</b>");
         assert!(search.options.inorder);
         assert!(search.options.explain_score);
         assert_eq!(search.options.params.len(), 1);
@@ -504,6 +522,18 @@
             .len(),
             1
         );
+        let alter_skip = FtAlter::parse_from_frame(frame(&[
+            "FT.ALTER",
+            "idx",
+            "SKIPINITIALSCAN",
+            "SCHEMA",
+            "ADD",
+            "new_field",
+            "TEXT",
+        ]))
+        .unwrap();
+        assert!(alter_skip.skip_initial_scan);
+        assert_eq!(alter_skip.fields.len(), 1);
         assert!(
             FtAlter::parse_from_frame(frame(&[
                 "FT.ALTER", "idx", "SCHEMA", "DROP", "field", "TAG",
@@ -602,8 +632,20 @@
         ]))
         .unwrap();
         assert_eq!(spell.distance, 2);
-        assert_eq!(spell.include, vec!["dict1"]);
-        assert_eq!(spell.exclude, vec!["dict2"]);
+        assert_eq!(
+            spell.include,
+            vec![FullTextSpellcheckDictionary {
+                name: "dict1".to_string(),
+                terms: Vec::new(),
+            }]
+        );
+        assert_eq!(
+            spell.exclude,
+            vec![FullTextSpellcheckDictionary {
+                name: "dict2".to_string(),
+                terms: Vec::new(),
+            }]
+        );
         assert!(FtSpellCheck::parse_from_frame(frame(&["FT.SPELLCHECK", "idx"])).is_err());
         assert!(
             FtSpellCheck::parse_from_frame(frame(&[
@@ -687,4 +729,308 @@
 
         let unsupported = FtUnsupported::parse_from_frame(frame(&["FT.DEBUG", "idx"])).unwrap();
         assert_error_frame(unsupported.apply().unwrap(), "FT.DEBUG");
+    }
+
+    #[test]
+    fn full_text_parsers_reject_unsafe_counts_and_invalid_search_combinations() {
+        let huge = usize::MAX.to_string();
+        let owned_frame = |args: Vec<&str>| {
+            Frame::Array(
+                args.into_iter()
+                    .map(|arg| Frame::bulk_string(arg.to_string()))
+                    .collect(),
+            )
+        };
+        for args in [
+            vec!["FT.SEARCH", "idx", "*", "RETURN", huge.as_str()],
+            vec!["FT.SEARCH", "idx", "*", "INKEYS", huge.as_str()],
+            vec!["FT.SEARCH", "idx", "*", "INFIELDS", huge.as_str()],
+            vec!["FT.SEARCH", "idx", "*", "PARAMS", huge.as_str()],
+            vec![
+                "FT.SEARCH",
+                "idx",
+                "*",
+                "SUMMARIZE",
+                "FIELDS",
+                huge.as_str(),
+            ],
+            vec!["FT.CREATE", "idx", "PREFIX", huge.as_str(), "SCHEMA", "t", "TEXT"],
+            vec![
+                "FT.CREATE",
+                "idx",
+                "STOPWORDS",
+                huge.as_str(),
+                "SCHEMA",
+                "t",
+                "TEXT",
+            ],
+            vec![
+                "FT.CREATE",
+                "idx",
+                "SCHEMA",
+                "v",
+                "VECTOR",
+                "FLAT",
+                huge.as_str(),
+            ],
+            vec!["FT.AGGREGATE", "idx", "*", "GROUPBY", huge.as_str()],
+            vec![
+                "FT.AGGREGATE",
+                "idx",
+                "*",
+                "GROUPBY",
+                "0",
+                "REDUCE",
+                "COUNT",
+                huge.as_str(),
+            ],
+            vec!["FT.AGGREGATE", "idx", "*", "SORTBY", huge.as_str()],
+            vec!["FT.AGGREGATE", "idx", "*", "PARAMS", huge.as_str()],
+            vec!["FT.EXPLAIN", "idx", "*", "PARAMS", huge.as_str()],
+        ] {
+            let result = match args[0] {
+                "FT.SEARCH" => FtSearch::parse_from_frame(owned_frame(args)).map(|_| ()),
+                "FT.CREATE" => FtCreate::parse_from_frame(owned_frame(args)).map(|_| ()),
+                "FT.AGGREGATE" => FtAggregate::parse_from_frame(owned_frame(args)).map(|_| ()),
+                "FT.EXPLAIN" => FtExplain::parse_from_frame(owned_frame(args)).map(|_| ()),
+                _ => unreachable!(),
+            };
+            assert!(result.is_err());
+        }
+        for args in [
+            vec![
+                "FT.HYBRID",
+                "idx",
+                "SEARCH",
+                "*",
+                "VSIM",
+                "@v",
+                "$vec",
+                "KNN",
+                huge.as_str(),
+            ],
+            vec![
+                "FT.HYBRID",
+                "idx",
+                "SEARCH",
+                "*",
+                "VSIM",
+                "@v",
+                "$vec",
+                "KNN",
+                "2",
+                "K",
+                "1",
+                "COMBINE",
+                "RRF",
+                huge.as_str(),
+            ],
+            vec![
+                "FT.HYBRID",
+                "idx",
+                "SEARCH",
+                "*",
+                "VSIM",
+                "@v",
+                "$vec",
+                "KNN",
+                "2",
+                "K",
+                "1",
+                "LOAD",
+                huge.as_str(),
+            ],
+        ] {
+            assert!(FtHybrid::parse_from_frame(owned_frame(args)).is_err());
+        }
+
+        let return_zero =
+            FtSearch::parse_from_frame(frame(&["FT.SEARCH", "idx", "*", "RETURN", "0"]))
+                .unwrap();
+        assert!(return_zero.options.no_content);
+        assert!(return_zero.options.return_fields.unwrap().is_empty());
+        assert!(
+            FtSearch::parse_from_frame(frame(&["FT.SEARCH", "idx", "*", "INKEYS", "0"]))
+                .is_err()
+        );
+        assert!(
+            FtSearch::parse_from_frame(frame(&["FT.SEARCH", "idx", "*", "INFIELDS", "0"]))
+                .is_err()
+        );
+        assert!(
+            FtSearch::parse_from_frame(frame(&["FT.SEARCH", "idx", "*", "EXPLAINSCORE"]))
+                .is_err()
+        );
+        assert!(
+            FtSearch::parse_from_frame(frame(&[
+                "FT.SEARCH",
+                "idx",
+                "*",
+                "SLOP",
+                "4294967296",
+            ]))
+            .is_err()
+        );
+        assert!(
+            FtSearch::parse_from_frame(frame(&[
+                "FT.SEARCH",
+                "idx",
+                "*",
+                "HIGHLIGHT",
+                "TAGS",
+                "<i>",
+            ]))
+            .is_err()
+        );
+
+        let binary = FtSearch::parse_from_frame(bytes_frame(&[
+            b"FT.SEARCH",
+            b"idx",
+            b"*",
+            b"PAYLOAD",
+            &[0xff, 0x00, 0x01],
+        ]))
+        .unwrap();
+        assert_eq!(binary.options.payload, Some(vec![0xff, 0x00, 0x01]));
+    }
+
+    #[test]
+    fn full_text_profile_spell_synonym_and_hybrid_options_are_preserved() {
+        let profile =
+            FtProfile::parse_from_frame(frame(&["FT.PROFILE", "idx", "SEARCH", "QUERY", "*"]))
+                .unwrap();
+        assert!(!profile.limited);
+        assert!(matches!(profile.target, FtProfileTarget::Search(_)));
+        let profile = FtProfile::parse_from_frame(frame(&[
+            "FT.PROFILE",
+            "idx",
+            "SEARCH",
+            "LIMITED",
+            "QUERY",
+            "*",
+        ]))
+        .unwrap();
+        assert!(profile.limited);
+
+        let spell = FtSpellCheck::parse_from_frame(frame(&[
+            "FT.SPELLCHECK",
+            "idx",
+            "helo",
+            "TERMS",
+            "INCLUDE",
+            "dict",
+            "hello",
+            "help",
+            "DIALECT",
+            "4",
+        ]))
+        .unwrap();
+        assert_eq!(spell.include[0].terms, vec!["hello", "help"]);
+        assert_eq!(spell.dialect, Some(4));
+        assert!(
+            FtSpellCheck::parse_from_frame(frame(&[
+                "FT.SPELLCHECK",
+                "idx",
+                "helo",
+                "DISTANCE",
+                "5",
+            ]))
+            .is_err()
+        );
+
+        let syn = FtSyn::parse_from_frame(frame(&[
+            "FT.SYNUPDATE",
+            "idx",
+            "group",
+            "SKIPINITIALSCAN",
+            "fast",
+            "quick",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            syn,
+            FtSyn::Update {
+                skip_initial_scan: true,
+                ..
+            }
+        ));
+
+        let hybrid = FtHybrid::parse_from_frame(frame(&[
+            "FT.HYBRID",
+            "idx",
+            "SEARCH",
+            "fox",
+            "YIELD_SCORE_AS",
+            "text_score",
+            "VSIM",
+            "@embedding",
+            "$vec",
+            "KNN",
+            "4",
+            "K",
+            "5",
+            "YIELD_DISTANCE_AS",
+            "distance",
+            "COMBINE",
+            "RRF",
+            "6",
+            "WINDOW",
+            "7",
+            "CONSTANT",
+            "20",
+            "YIELD_SCORE_AS",
+            "combined",
+            "PARAMS",
+            "2",
+            "vec",
+            "[1,0]",
+            "LIMIT",
+            "1",
+            "3",
+            "WITHSCORES",
+        ]))
+        .unwrap();
+        assert_eq!(hybrid.index, "idx");
+        assert!(hybrid.vector_query.contains("KNN 5 @embedding $vec"));
+        assert_eq!(
+            hybrid.options.search.params.get("vec").unwrap(),
+            b"[1,0]"
+        );
+        assert_eq!(
+            hybrid.options.search_score_alias.as_deref(),
+            Some("text_score")
+        );
+        assert_eq!(
+            hybrid.options.vector_score_alias.as_deref(),
+            Some("distance")
+        );
+        assert_eq!(
+            hybrid.options.combined_score_alias.as_deref(),
+            Some("combined")
+        );
+        assert!(matches!(
+            hybrid.options.combine,
+            FullTextHybridCombine::Rrf {
+                window: 7,
+                constant: 20.0,
+            }
+        ));
+        assert!(FtHybrid::parse_from_frame(frame(&["FT.HYBRID", "idx", "fox"])).is_err());
+
+        let suggestion = FtSug::parse_from_frame(bytes_frame(&[
+            b"FT.SUGADD",
+            b"sug",
+            b"hello",
+            b"1",
+            b"PAYLOAD",
+            &[0xff, 0x00],
+        ]))
+        .unwrap();
+        assert!(matches!(
+            suggestion,
+            FtSug::Add {
+                payload: Some(payload),
+                ..
+            } if payload == vec![0xff, 0x00]
+        ));
     }

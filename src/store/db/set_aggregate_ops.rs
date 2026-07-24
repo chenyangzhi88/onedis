@@ -2,8 +2,60 @@ use super::*;
 
 impl Db {
     pub fn set_intersection_card(&self, keys: &[String], limit: usize) -> Result<usize, Error> {
-        let count = self.set_intersection(keys)?.len();
-        Ok(if limit == 0 { count } else { count.min(limit) })
+        if keys.is_empty() {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'sintercard' command",
+            ));
+        }
+        let mut metas = Vec::with_capacity(keys.len());
+        for key in keys {
+            metas.push(self.set_meta(key)?);
+        }
+        let Some(metas) = metas.into_iter().collect::<Option<Vec<_>>>() else {
+            return Ok(0);
+        };
+        let smallest = metas
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, meta)| meta.len)
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        let prefix = set_member_prefix(self.db_index, &keys[smallest], metas[smallest].version);
+        let mut count = 0usize;
+        self.store.scan_range_raw_visit(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            usize::MAX,
+            |member_key, _| {
+                let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
+                    return true;
+                };
+                let present_everywhere = keys.iter().enumerate().all(|(idx, key)| {
+                    idx == smallest
+                        || self.store.contains_key(&set_member_key_bytes(
+                            self.db_index,
+                            key,
+                            metas[idx].version,
+                            member,
+                        ))
+                });
+                if present_everywhere {
+                    count = count.saturating_add(1);
+                }
+                limit == 0 || count < limit
+            },
+        );
+        Ok(count)
+    }
+
+    pub async fn set_intersection_card_async(
+        &self,
+        keys: &[String],
+        limit: usize,
+    ) -> Result<usize, Error> {
+        let keys = keys.to_vec();
+        self.run_blocking_store_task(move |db| db.set_intersection_card(&keys, limit))
+            .await
     }
     /// 计算多个 set 的差集。不存在的 key 视为空 set。
     pub fn set_diff(&self, keys: &[String]) -> Result<HashSet<String>, Error> {

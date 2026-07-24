@@ -5,6 +5,7 @@ impl Command {
         match self {
             Command::Unknown(command) => command.command_name(),
             Command::FtUnsupported(command) => command.command_name(),
+            Command::Client(command) => command.command_name(),
             _ => self.name(),
         }
     }

@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{cmds::sorted_set::common::entries_with_scores, frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::common::{entries_with_scores, text_arg, validate_entry_count},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Zpopmin {
     pub(crate) key: String,
@@ -15,14 +19,14 @@ impl Zpopmin {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         match db.zset_pop(&self.key, self.min, self.count) {
-            Ok(entries) => Ok(Frame::Array(entries_with_scores(entries))),
+            Ok(entries) => Ok(Frame::Array(entries_with_scores(entries)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db.zset_pop_async(&self.key, self.min, self.count).await {
-            Ok(entries) => Ok(Frame::Array(entries_with_scores(entries))),
+            Ok(entries) => Ok(Frame::Array(entries_with_scores(entries)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -36,16 +40,15 @@ pub(crate) fn parse_zpop(frame: Frame, min: bool, command: &str) -> Result<Zpopm
         )));
     }
     let count = if frame.arg_len() == 3 {
-        frame
-            .get_arg(2)
-            .unwrap()
+        text_arg(&frame, 2)?
             .parse::<usize>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?
     } else {
         1
     };
+    validate_entry_count(count as u64, true)?;
     Ok(Zpopmin {
-        key: frame.get_arg(1).unwrap(),
+        key: text_arg(&frame, 1)?,
         count,
         min,
     })

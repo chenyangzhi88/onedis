@@ -36,13 +36,13 @@ pub(super) fn prepare_call_inputs(
     store: &mut Store<WasmHostContext>,
     instance: &Instance,
     params: &[ValType],
-    args: &[String],
+    args: &[Vec<u8>],
 ) -> Result<Vec<Val>> {
     if params.len() == args.len() {
         return args
             .iter()
             .zip(params)
-            .map(|(arg, ty)| parse_wasm_arg(arg, ty.clone()))
+            .map(|(arg, ty)| parse_wasm_arg_bytes(arg, ty.clone()))
             .collect::<Result<Vec<_>>>();
     }
 
@@ -63,7 +63,7 @@ pub(super) fn prepare_call_inputs(
 fn prepare_string_pair_inputs(
     store: &mut Store<WasmHostContext>,
     instance: &Instance,
-    args: &[String],
+    args: &[Vec<u8>],
 ) -> Result<Vec<Val>> {
     let memory = instance
         .get_memory(&mut *store, "memory")
@@ -72,22 +72,33 @@ fn prepare_string_pair_inputs(
     let mut total = 0usize;
     let mut inputs = Vec::with_capacity(args.len() * 2);
     for arg in args {
-        let bytes = arg.as_bytes();
-        total = total.saturating_add(bytes.len());
+        total = total
+            .checked_add(arg.len())
+            .ok_or_else(|| Error::msg("ERR wasm call arguments are too large"))?;
         if total > WASM_ARG_MAX_TOTAL_BYTES {
             return Err(Error::msg("ERR wasm call arguments are too large"));
         }
         memory
-            .write(&mut *store, offset, bytes)
+            .write(&mut *store, offset, arg)
             .map_err(|_| Error::msg("ERR wasm call argument does not fit in memory"))?;
         inputs.push(Val::I32(offset as i32));
-        inputs.push(Val::I32(bytes.len() as i32));
-        offset = offset.saturating_add(bytes.len()).saturating_add(1);
+        inputs.push(Val::I32(arg.len() as i32));
+        offset = offset
+            .checked_add(arg.len())
+            .and_then(|offset| offset.checked_add(1))
+            .ok_or_else(|| Error::msg("ERR wasm call arguments are too large"))?;
     }
     Ok(inputs)
 }
 
+#[cfg(test)]
 pub(super) fn parse_wasm_arg(value: &str, ty: ValType) -> Result<Val> {
+    parse_wasm_arg_bytes(value.as_bytes(), ty)
+}
+
+fn parse_wasm_arg_bytes(value: &[u8], ty: ValType) -> Result<Val> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| Error::msg("ERR wasm numeric argument is not valid UTF-8"))?;
     match ty {
         ValType::I32 => value
             .parse::<i32>()

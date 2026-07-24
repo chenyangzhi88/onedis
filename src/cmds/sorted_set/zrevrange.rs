@@ -41,7 +41,7 @@ impl Zrevrange {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         match db.zset_range(&self.key, self.start, self.stop, true) {
-            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores))),
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -51,7 +51,7 @@ impl Zrevrange {
             .zset_range_async(&self.key, self.start, self.stop, true)
             .await
         {
-            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores))),
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

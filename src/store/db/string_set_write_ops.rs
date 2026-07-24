@@ -208,6 +208,67 @@ impl Db {
         .await
     }
 
+    pub(crate) fn mutate_string_bytes<R, F>(&self, key: &str, mutation: F) -> Result<R, Error>
+    where
+        F: Fn(&mut Vec<u8>, bool) -> Result<R, Error>,
+    {
+        self.mutate_string_bytes_if_changed(key, |value, exists| {
+            mutation(value, exists).map(|result| (result, true))
+        })
+    }
+
+    pub(crate) fn mutate_string_bytes_if_changed<R, F>(
+        &self,
+        key: &str,
+        mutation: F,
+    ) -> Result<R, Error>
+    where
+        F: Fn(&mut Vec<u8>, bool) -> Result<(R, bool), Error>,
+    {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            self.expire_if_needed(key);
+            let old_raw = self.store.get_raw(&key_bytes);
+            let exists = old_raw.is_some();
+            let (expire_ms, mut value) = match old_raw.as_deref() {
+                Some(raw) => {
+                    let header =
+                        decode_meta_header(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+                    if header.type_tag != TYPE_STRING {
+                        return Err(Error::msg(WRONG_TYPE_ERROR));
+                    }
+                    let value =
+                        decode_string_bytes(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+                    (header.expire_ms, value)
+                }
+                None => (0, Vec::new()),
+            };
+            let (result, changed) = mutation(&mut value, exists)?;
+            if !changed {
+                return Ok(result);
+            }
+            let mut batch = WriteBatch::new();
+            self.write_string_to_batch_with_deferred_old_raw(
+                &mut batch,
+                key,
+                &value,
+                expire_ms,
+                old_raw.as_deref(),
+            );
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::with_expected(
+                    &key_bytes,
+                    old_raw.as_deref().map(ToOwned::to_owned),
+                )],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(result);
+            }
+        }
+        Err(Error::msg("ERR string write conflict"))
+    }
+
     pub(crate) async fn mutate_string_bytes_if_changed_async<R, F>(
         &self,
         key: &str,
@@ -256,6 +317,63 @@ impl Db {
             {
                 self.changes.fetch_add(1, Ordering::Relaxed);
                 return Ok(result);
+            }
+        }
+        Err(Error::msg("ERR string write conflict"))
+    }
+
+    pub fn getdel_string_bytes(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            self.expire_if_needed(key);
+            let Some(raw) = self.store.get_raw(&key_bytes) else {
+                return Ok(None);
+            };
+            let header = decode_meta_header(&raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+            if header.type_tag != TYPE_STRING {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let value = decode_string_bytes(&raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+            let mut batch = WriteBatch::new();
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::with_expected(
+                    &key_bytes,
+                    Some(raw.clone()),
+                )],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(value));
+            }
+        }
+        Err(Error::msg("ERR string write conflict"))
+    }
+
+    pub async fn getdel_string_bytes_async(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            self.expire_if_needed_async(key).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(None);
+            };
+            let header = decode_meta_header(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+            if header.type_tag != TYPE_STRING {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let value = decode_string_bytes(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+            let mut batch = WriteBatch::new();
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(value));
             }
         }
         Err(Error::msg("ERR string write conflict"))

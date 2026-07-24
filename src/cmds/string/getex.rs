@@ -71,9 +71,17 @@ fn parse_getex_expiration(
                 return Err(Error::msg("ERR invalid expire time in 'getex' command"));
             }
             Ok(match option.to_ascii_uppercase().as_str() {
-                "EX" => StringExpireUpdate::RelativeMs(value.saturating_mul(1000)),
+                "EX" => StringExpireUpdate::RelativeMs(
+                    value
+                        .checked_mul(1000)
+                        .ok_or_else(|| Error::msg("ERR invalid expire time in 'getex' command"))?,
+                ),
                 "PX" => StringExpireUpdate::RelativeMs(value),
-                "EXAT" => StringExpireUpdate::AbsoluteMs(value.saturating_mul(1000)),
+                "EXAT" => StringExpireUpdate::AbsoluteMs(
+                    value
+                        .checked_mul(1000)
+                        .ok_or_else(|| Error::msg("ERR invalid expire time in 'getex' command"))?,
+                ),
                 "PXAT" => StringExpireUpdate::AbsoluteMs(value),
                 _ => unreachable!(),
             })

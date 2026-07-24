@@ -159,7 +159,7 @@ fn server_new_initializes_core_runtime_components_without_binding_socket() {
 }
 
 #[test]
-fn transaction_execution_error_aborts_without_partial_writes() {
+fn transaction_runtime_errors_are_returned_inline_and_other_writes_commit() {
     let db = test_db();
     db.insert(
         "bad-number".to_string(),
@@ -177,12 +177,35 @@ fn transaction_execution_error_aborts_without_partial_writes() {
     )
     .unwrap();
 
-    assert!(matches!(result, Frame::Error(message) if message.contains("EXECABORT")));
-    assert!(db.get("side-effect").is_none());
+    assert!(matches!(
+        result,
+        Frame::Array(values)
+            if values.len() == 2 && matches!(&values[1], Frame::Error(message) if message.contains("integer"))
+    ));
+    assert!(matches!(
+        db.get("side-effect"),
+        Some(Structure::String(value)) if value == "written"
+    ));
     assert!(matches!(
         db.get("bad-number"),
         Some(Structure::String(value)) if value == "not-a-number"
     ));
+}
+
+#[test]
+fn nested_multi_is_rejected_without_resetting_the_queued_transaction() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (mut handler, _) = rt.block_on(test_handler(2, None));
+    handler.start_transaction().unwrap();
+    handler.add_transaction_frame(Frame::Array(vec![
+        Frame::bulk_string("set"),
+        Frame::bulk_string("queued"),
+        Frame::bulk_string("value"),
+    ]));
+
+    assert!(handler.start_transaction().is_err());
+    assert!(handler.is_in_transaction());
+    assert_eq!(handler.get_transaction_frames().len(), 1);
 }
 
 #[test]
@@ -554,9 +577,7 @@ fn handler_fast_paths_acl_pubsub_and_monitor_cover_private_routes() {
     assert_eq!(bytes, b":2\r\n");
     let delivered = rt
         .block_on(async {
-            tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 let mut response = Vec::new();
                 let mut chunk = [0; 256];
                 while response.len() < 4096 {
@@ -573,8 +594,7 @@ fn handler_fast_paths_acl_pubsub_and_monitor_cover_private_routes() {
                     }
                 }
                 Ok(false)
-            },
-            )
+            })
             .await
         })
         .expect("timed out waiting for pubsub delivery")
@@ -632,6 +652,12 @@ fn handler_accepts_redis_cli_pipe_trailer_and_binary_echo_marker() {
             request.extend_from_slice(b"\r\n*2\r\n$4\r\nECHO\r\n$4\r\n");
             request.extend_from_slice(&marker);
             request.extend_from_slice(b"\r\n");
+            let injection = b"\r\n+PWNED\r\n*1\r\n$4\r\nPING\r\n";
+            request.extend_from_slice(b"*2\r\n$4\r\nECHO\r\n$");
+            request.extend_from_slice(injection.len().to_string().as_bytes());
+            request.extend_from_slice(b"\r\n");
+            request.extend_from_slice(injection);
+            request.extend_from_slice(b"\r\n*1\r\n$4\r\nPING\r\n");
             client.write_all(&request).await.unwrap();
 
             let mut expected = Vec::new();
@@ -641,6 +667,11 @@ fn handler_accepts_redis_cli_pipe_trailer_and_binary_echo_marker() {
             expected.extend_from_slice(b"$4\r\n");
             expected.extend_from_slice(&marker);
             expected.extend_from_slice(b"\r\n");
+            expected.extend_from_slice(b"$");
+            expected.extend_from_slice(injection.len().to_string().as_bytes());
+            expected.extend_from_slice(b"\r\n");
+            expected.extend_from_slice(injection);
+            expected.extend_from_slice(b"\r\n+PONG\r\n");
             let mut response = vec![0; expected.len()];
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
@@ -723,9 +754,9 @@ fn fast_paths_are_acl_checked_and_visible_to_monitor() {
         .acl_setuser("default", &["-set".to_string()])
         .unwrap();
     assert!(
-        rt.block_on(handler.try_handle_borrowed_fast_batch(
-            b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
-        ))
+        rt.block_on(
+            handler.try_handle_borrowed_fast_batch(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n")
+        )
         .is_none()
     );
     handler
@@ -740,9 +771,9 @@ fn fast_paths_are_acl_checked_and_visible_to_monitor() {
         b"+PONG\r\n"
     );
     assert_eq!(
-        rt.block_on(handler.try_handle_borrowed_fast_batch(
-            b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
-        ))
+        rt.block_on(
+            handler.try_handle_borrowed_fast_batch(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n")
+        )
         .unwrap(),
         b"+OK\r\n"
     );
@@ -751,8 +782,8 @@ fn fast_paths_are_acl_checked_and_visible_to_monitor() {
     let read = rt
         .block_on(async {
             tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            monitor_client.read(&mut monitor_output),
+                std::time::Duration::from_secs(1),
+                monitor_client.read(&mut monitor_output),
             )
             .await
         })
@@ -1256,10 +1287,10 @@ fn command_apply_routes_server_and_db_commands_without_full_tcp_loop() {
         .unwrap();
     let lua_guard = crate::lua::LUA_TEST_LOCK.lock().unwrap();
     let lua_acl_error = match rt.block_on(handler.apply_command(command(&[
-            "eval",
-            "return redis.call('set', 'lua-acl-key', 'blocked')",
-            "0",
-        ]))) {
+        "eval",
+        "return redis.call('set', 'lua-acl-key', 'blocked')",
+        "0",
+    ]))) {
         Ok(frame) => panic!("expected nested Lua ACL error, got {frame}"),
         Err(error) => error,
     };

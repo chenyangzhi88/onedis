@@ -8,14 +8,15 @@ pub struct Pttl {
 
 impl Pttl {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let key = frame.get_arg(1);
-        if frame.arg_len() != 2 || key.is_none() {
+        if frame.arg_len() != 2 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'pttl' command",
             ));
         }
-        let fianl_key = key.unwrap().to_string();
-        Ok(Pttl { key: fianl_key })
+        let key = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'pttl' command"))?;
+        Ok(Pttl { key })
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {

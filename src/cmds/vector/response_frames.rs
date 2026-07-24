@@ -23,11 +23,9 @@ fn redis_attr_frame(attrs_json: Option<String>) -> Frame {
 }
 
 fn vector_similarity_score(distance: f32) -> f32 {
-    if distance <= 0.0 {
-        1.0
-    } else {
-        (1.0 / (1.0 + distance)).clamp(0.0, 1.0)
-    }
+    // Redis vector sets use cosine distance and expose it as a [0, 1] similarity where
+    // identical vectors are 1 and opposite vectors are 0.
+    (1.0 - distance / 2.0).clamp(0.0, 1.0)
 }
 
 fn redis_vsim_results_frame(
@@ -37,64 +35,87 @@ fn redis_vsim_results_frame(
     with_scores: bool,
     with_attrs: bool,
 ) -> Result<Frame, Error> {
-    let mut frames = Vec::new();
+    let multiplier = 1 + usize::from(with_scores) + usize::from(with_attrs);
+    validate_vector_response_count(results.len(), multiplier)?;
+    let mut frames = Vec::with_capacity(results.len().saturating_mul(multiplier));
+    let mut response_bytes = 32usize;
     for result in results {
+        response_bytes = response_bytes
+            .checked_add(result.id.len().saturating_add(32))
+            .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+            .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
         frames.push(Frame::bulk_string(result.id.clone()));
         if with_scores {
-            frames.push(Frame::bulk_string(format_float(vector_similarity_score(
-                result.score,
-            ))));
+            let score = format_float(vector_similarity_score(result.score));
+            response_bytes = response_bytes
+                .checked_add(score.len().saturating_add(32))
+                .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+                .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
+            frames.push(Frame::bulk_string(score));
         }
         if with_attrs {
-            frames.push(redis_attr_frame(
-                db.vector_element(key, &result.id)?
-                    .map(|element| element.attrs_json),
-            ));
+            let attrs = db
+                .vector_element(key, &result.id)?
+                .map(|element| element.attrs_json);
+            response_bytes = response_bytes
+                .checked_add(
+                    attrs
+                        .as_ref()
+                        .filter(|attrs| attrs.as_str() != "{}")
+                        .map_or(5, |attrs| attrs.len().saturating_add(32)),
+                )
+                .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+                .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
+            frames.push(redis_attr_frame(attrs));
         }
     }
     Ok(Frame::Array(frames))
 }
 
-fn redis_vrandmember_frame(ids: Vec<String>, count: Option<i64>) -> Frame {
+fn redis_vrandmember_frame(ids: Vec<String>, count: Option<i64>) -> Result<Frame, Error> {
     if ids.is_empty() {
-        return count.map_or(Frame::Null, |_| Frame::Array(Vec::new()));
+        return Ok(count.map_or(Frame::Null, |_| Frame::Array(Vec::new())));
     }
     let Some(count) = count else {
-        return Frame::bulk_string(ids[0].clone());
+        return Ok(Frame::bulk_string(ids[0].clone()));
     };
     if count == 0 {
-        return Frame::Array(Vec::new());
+        return Ok(Frame::Array(Vec::new()));
     }
-    let mut out = Vec::new();
-    if count > 0 {
-        for id in ids.into_iter().take(count as usize) {
-            out.push(Frame::bulk_string(id));
-        }
-    } else {
-        let count = count.unsigned_abs() as usize;
-        for idx in 0..count {
-            out.push(Frame::bulk_string(ids[idx % ids.len()].clone()));
-        }
+    let mut response_bytes = 32usize;
+    let mut frames = Vec::with_capacity(ids.len());
+    for id in ids {
+        response_bytes = response_bytes
+            .checked_add(id.len().saturating_add(32))
+            .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+            .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
+        frames.push(Frame::bulk_string(id));
     }
-    Frame::Array(out)
+    Ok(Frame::Array(frames))
 }
 
-fn redis_vlinks_frame(results: Vec<VectorSearchResult>, element: &str, with_scores: bool) -> Frame {
-    let layer = results
-        .into_iter()
-        .filter(|result| result.id != element)
-        .take(16)
-        .flat_map(|result| {
-            let mut frames = vec![Frame::bulk_string(result.id)];
-            if with_scores {
-                frames.push(Frame::bulk_string(format_float(vector_similarity_score(
-                    result.score,
-                ))));
-            }
-            frames
-        })
-        .collect::<Vec<_>>();
-    Frame::Array(vec![Frame::Array(layer)])
+fn redis_vlinks_frame(layers: Vec<Vec<(String, f32)>>, with_scores: bool) -> Frame {
+    Frame::Array(
+        layers
+            .into_iter()
+            .map(|layer| {
+                Frame::Array(
+                    layer
+                        .into_iter()
+                        .flat_map(|(id, distance)| {
+                            let mut frames = vec![Frame::bulk_string(id)];
+                            if with_scores {
+                                frames.push(Frame::bulk_string(format_float(
+                                    vector_similarity_score(distance),
+                                )));
+                            }
+                            frames
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
 }
 
 async fn redis_vsim_results_frame_async(
@@ -104,20 +125,39 @@ async fn redis_vsim_results_frame_async(
     with_scores: bool,
     with_attrs: bool,
 ) -> Result<Frame, Error> {
-    let mut frames = Vec::new();
+    let multiplier = 1 + usize::from(with_scores) + usize::from(with_attrs);
+    validate_vector_response_count(results.len(), multiplier)?;
+    let mut frames = Vec::with_capacity(results.len().saturating_mul(multiplier));
+    let mut response_bytes = 32usize;
     for result in results {
+        response_bytes = response_bytes
+            .checked_add(result.id.len().saturating_add(32))
+            .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+            .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
         frames.push(Frame::bulk_string(result.id.clone()));
         if with_scores {
-            frames.push(Frame::bulk_string(format_float(vector_similarity_score(
-                result.score,
-            ))));
+            let score = format_float(vector_similarity_score(result.score));
+            response_bytes = response_bytes
+                .checked_add(score.len().saturating_add(32))
+                .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+                .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
+            frames.push(Frame::bulk_string(score));
         }
         if with_attrs {
-            frames.push(redis_attr_frame(
-                db.vector_element_async(key, &result.id)
-                    .await?
-                    .map(|element| element.attrs_json),
-            ));
+            let attrs = db
+                .vector_element_async(key, &result.id)
+                .await?
+                .map(|element| element.attrs_json);
+            response_bytes = response_bytes
+                .checked_add(
+                    attrs
+                        .as_ref()
+                        .filter(|attrs| attrs.as_str() != "{}")
+                        .map_or(5, |attrs| attrs.len().saturating_add(32)),
+                )
+                .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+                .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
+            frames.push(redis_attr_frame(attrs));
         }
     }
     Ok(Frame::Array(frames))
@@ -133,6 +173,5 @@ fn info_frame(entries: Vec<(String, String)>) -> Frame {
 }
 
 fn format_float(value: f32) -> String {
-    let text = format!("{value:.6}");
-    text.trim_end_matches('0').trim_end_matches('.').to_string()
+    value.to_string()
 }

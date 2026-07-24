@@ -1,5 +1,8 @@
 use super::*;
 
+pub type HashScanEntries = Vec<(String, String)>;
+pub type HashScanEntriesBytes = Vec<(String, Vec<u8>)>;
+
 impl Db {
     pub fn hash_scan(
         &self,
@@ -7,14 +10,34 @@ impl Db {
         cursor: u64,
         pattern_str: &str,
         count: usize,
-    ) -> Result<(u64, Vec<(String, String)>), Error> {
-        let mut entries = self.hash_get_all(key)?;
+    ) -> Result<(u64, HashScanEntries), Error> {
+        let (cursor, entries) = self.hash_scan_bytes(key, cursor, pattern_str, count)?;
+        Ok((
+            cursor,
+            entries
+                .into_iter()
+                .filter_map(|(field, value)| {
+                    String::from_utf8(value).ok().map(|value| (field, value))
+                })
+                .collect(),
+        ))
+    }
+
+    pub fn hash_scan_bytes(
+        &self,
+        key: &str,
+        cursor: u64,
+        pattern_str: &str,
+        count: usize,
+    ) -> Result<(u64, HashScanEntriesBytes), Error> {
+        let mut entries = self.hash_get_all_bytes(key)?;
         if pattern_str != "*" {
-            entries.retain(|(field, _)| pattern::is_match(field, pattern_str));
+            let matcher = pattern::Matcher::new(pattern_str);
+            entries.retain(|(field, _)| matcher.is_match(field));
         }
 
-        let start_index = cursor as usize;
-        let end_index = std::cmp::min(start_index + count, entries.len());
+        let start_index = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+        let end_index = start_index.saturating_add(count).min(entries.len());
         let items = if start_index < entries.len() {
             entries[start_index..end_index].to_vec()
         } else {
@@ -35,14 +58,36 @@ impl Db {
         cursor: u64,
         pattern_str: &str,
         count: usize,
-    ) -> Result<(u64, Vec<(String, String)>), Error> {
-        let mut entries = self.hash_get_all_async(key).await?;
+    ) -> Result<(u64, HashScanEntries), Error> {
+        let (cursor, entries) = self
+            .hash_scan_bytes_async(key, cursor, pattern_str, count)
+            .await?;
+        Ok((
+            cursor,
+            entries
+                .into_iter()
+                .filter_map(|(field, value)| {
+                    String::from_utf8(value).ok().map(|value| (field, value))
+                })
+                .collect(),
+        ))
+    }
+
+    pub async fn hash_scan_bytes_async(
+        &self,
+        key: &str,
+        cursor: u64,
+        pattern_str: &str,
+        count: usize,
+    ) -> Result<(u64, HashScanEntriesBytes), Error> {
+        let mut entries = self.hash_get_all_bytes_async(key).await?;
         if pattern_str != "*" {
-            entries.retain(|(field, _)| pattern::is_match(field, pattern_str));
+            let matcher = pattern::Matcher::new(pattern_str);
+            entries.retain(|(field, _)| matcher.is_match(field));
         }
 
-        let start_index = cursor as usize;
-        let end_index = std::cmp::min(start_index + count, entries.len());
+        let start_index = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+        let end_index = start_index.saturating_add(count).min(entries.len());
         let items = if start_index < entries.len() {
             entries[start_index..end_index].to_vec()
         } else {

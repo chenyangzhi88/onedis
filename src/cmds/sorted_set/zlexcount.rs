@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{cmds::sorted_set::zrange::parse_lex_bound, frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::{common::text_arg, zrange::parse_lex_bound},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Zlexcount {
     key: String,
@@ -16,9 +20,9 @@ impl Zlexcount {
             ));
         }
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
-            min: parse_lex_bound(&frame.get_arg(2).unwrap())?,
-            max: parse_lex_bound(&frame.get_arg(3).unwrap())?,
+            key: text_arg(&frame, 1)?,
+            min: parse_lex_bound(&text_arg(&frame, 2)?)?,
+            max: parse_lex_bound(&text_arg(&frame, 3)?)?,
         })
     }
 

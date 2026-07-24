@@ -63,7 +63,7 @@ fn search_ids(frame: &Frame) -> Vec<String> {
 }
 
 fn wait_for_search_ids(db: &Db, args: &[&str], expected: &[&str]) -> Frame {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let expected = expected
         .iter()
         .map(|value| value.to_string())

@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{cmds::sorted_set::zrange::flatten_entries, frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::{common::validate_entry_count, zrange::flatten_entries},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Zscan {
     key: String,
@@ -41,6 +45,7 @@ impl Zscan {
                 if parsed == 0 {
                     return Err(Error::msg("ERR syntax error"));
                 }
+                validate_entry_count(parsed, true)?;
                 count = Some(parsed);
                 i += 2;
             } else {
@@ -64,7 +69,7 @@ impl Zscan {
         match db.zset_scan(&self.key, self.cursor, &pattern, count) {
             Ok((next_cursor, entries)) => Ok(Frame::Array(vec![
                 Frame::bulk_string(next_cursor.to_string()),
-                Frame::Array(flatten_entries(entries, true)),
+                Frame::Array(flatten_entries(entries, true)?),
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
@@ -81,7 +86,7 @@ impl Zscan {
         {
             Ok((next_cursor, entries)) => Ok(Frame::Array(vec![
                 Frame::bulk_string(next_cursor.to_string()),
-                Frame::Array(flatten_entries(entries, true)),
+                Frame::Array(flatten_entries(entries, true)?),
             ])),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }

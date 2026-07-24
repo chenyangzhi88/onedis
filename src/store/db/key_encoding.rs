@@ -154,14 +154,14 @@ impl KeyEncodingLayout {
         match self {
             Self::DbPrefixedV1 => {
                 let prefix = self.internal_prefix(db_index);
-                if key.len() <= prefix.len() || !key.starts_with(prefix.as_slice()) {
+                if key.len() < prefix.len() || !key.starts_with(prefix.as_slice()) {
                     return None;
                 }
                 let rest = &key[prefix.len()..];
                 if is_known_subkey_namespace(rest) {
                     return None;
                 }
-                Some(key.to_vec())
+                Some(rest.to_vec())
             }
             Self::TableLocalV2 => {
                 let prefix = self.internal_prefix(db_index);
@@ -174,6 +174,27 @@ impl KeyEncodingLayout {
                 }
                 Some(key.to_vec())
             }
+        }
+    }
+
+    pub(in crate::store::db) fn logical_main_key_ranges(
+        self,
+        db_index: u16,
+    ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        match self {
+            Self::DbPrefixedV1 => {
+                let lower = self.db_prefix(db_index);
+                let mut upper = lower.clone();
+                upper.push(0xff);
+                vec![(lower, Some(upper))]
+            }
+            Self::TableLocalV2 => vec![
+                (
+                    Vec::new(),
+                    Some(crate::store::TABLE_LOCAL_INTERNAL_PREFIX.to_vec()),
+                ),
+                (vec![crate::store::TABLE_LOCAL_INTERNAL_PREFIX[0] + 1], None),
+            ],
         }
     }
 

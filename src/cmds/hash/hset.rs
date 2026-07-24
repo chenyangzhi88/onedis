@@ -3,7 +3,7 @@ use anyhow::Error;
 
 pub struct Hset {
     pub key: String,
-    pub fields: Vec<(String, String)>,
+    pub fields: Vec<(String, Vec<u8>)>,
 }
 
 impl Hset {
@@ -23,8 +23,8 @@ impl Hset {
                 .get_arg(idx)
                 .ok_or_else(|| Error::msg("ERR invalid UTF-8 hash field"))?;
             let value = frame
-                .get_arg(idx + 1)
-                .ok_or_else(|| Error::msg("ERR invalid UTF-8 hash value"))?;
+                .get_arg_bytes(idx + 1)
+                .ok_or_else(|| Error::msg("ERR invalid hash value"))?;
             fields.push((field, value));
         }
 
@@ -33,13 +33,13 @@ impl Hset {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         if let [(field, value)] = self.fields.as_slice() {
-            return match db.hash_set(&self.key, field, value) {
+            return match db.hash_set_bytes(&self.key, field, value) {
                 Ok(added) => Ok(Frame::Integer(i64::from(added))),
                 Err(err) => Ok(Frame::Error(err.to_string())),
             };
         }
 
-        match db.hash_set_many(&self.key, &self.fields) {
+        match db.hash_set_many_bytes(&self.key, &self.fields) {
             Ok(added) => Ok(Frame::Integer(added as i64)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
@@ -47,13 +47,13 @@ impl Hset {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         if let [(field, value)] = self.fields.as_slice() {
-            return match db.hash_set_async(&self.key, field, value).await {
+            return match db.hash_set_bytes_async(&self.key, field, value).await {
                 Ok(added) => Ok(Frame::Integer(i64::from(added))),
                 Err(err) => Ok(Frame::Error(err.to_string())),
             };
         }
 
-        match db.hash_set_many_async(&self.key, &self.fields).await {
+        match db.hash_set_many_bytes_async(&self.key, &self.fields).await {
             Ok(added) => Ok(Frame::Integer(added as i64)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }

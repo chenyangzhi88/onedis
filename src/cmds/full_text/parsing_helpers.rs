@@ -33,34 +33,29 @@ fn fulltext_profile_inner_frame(
     Ok(Frame::Array(args))
 }
 
-fn fulltext_profile_frame(result: Frame, elapsed_ms: f64, pipeline: &str) -> Frame {
-    Frame::Array(vec![
-        result,
-        Frame::Array(vec![
-            Frame::bulk_string("Total profile time"),
-            Frame::bulk_string(format!("{elapsed_ms:.3}")),
-            Frame::bulk_string("Parsing time"),
-            Frame::bulk_string("0.000"),
-            Frame::bulk_string("Planning time"),
-            Frame::bulk_string("0.000"),
-            Frame::bulk_string("Index lookup time"),
-            Frame::bulk_string("0.000"),
-            Frame::bulk_string("Vector search time"),
-            Frame::bulk_string("0.000"),
-            Frame::bulk_string("Fetch time"),
-            Frame::bulk_string("0.000"),
-            Frame::bulk_string("Sort time"),
-            Frame::bulk_string("0.000"),
-            Frame::bulk_string("Aggregation time"),
-            Frame::bulk_string(if pipeline == "Aggregate" {
-                format!("{elapsed_ms:.3}")
-            } else {
-                "0.000".to_string()
-            }),
-            Frame::bulk_string("Pipeline"),
-            Frame::Array(vec![Frame::bulk_string(pipeline.to_string())]),
-        ]),
-    ])
+fn fulltext_profile_frame(
+    result: Frame,
+    elapsed_ms: f64,
+    pipeline: &str,
+    limited: bool,
+) -> Frame {
+    let elapsed = format!("{elapsed_ms:.3}");
+    let mut profile = vec![
+        Frame::bulk_string("Total profile time"),
+        Frame::bulk_string(elapsed.clone()),
+        Frame::bulk_string("Pipeline"),
+        Frame::Array(vec![Frame::bulk_string(pipeline.to_string())]),
+    ];
+    if !limited {
+        profile.push(Frame::bulk_string("Result processors profile"));
+        profile.push(Frame::Array(vec![Frame::Array(vec![
+            Frame::bulk_string("Type"),
+            Frame::bulk_string(pipeline.to_string()),
+            Frame::bulk_string("Time"),
+            Frame::bulk_string(elapsed),
+        ])]));
+    }
+    Frame::Array(vec![result, Frame::Array(profile)])
 }
 
 fn parse_fulltext_aggregate_reducer(
@@ -82,12 +77,13 @@ fn parse_fulltext_aggregate_reducer(
         _ => return Err(Error::msg("ERR unsupported aggregate reducer")),
     };
     let arg_count = parse_usize_arg(frame, *idx + 2, "ERR invalid reducer argument count")?;
-    *idx += 3;
-    if *idx + arg_count > frame.arg_len() {
-        return Err(Error::msg("ERR syntax error"));
-    }
+    let start = (*idx)
+        .checked_add(3)
+        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+    let end = checked_count_end(frame, start, arg_count)?;
+    *idx = start;
     let mut args = Vec::with_capacity(arg_count);
-    for _ in 0..arg_count {
+    while *idx < end {
         args.push(arg(frame, *idx, "ERR invalid reducer argument")?);
         *idx += 1;
     }
@@ -137,13 +133,16 @@ fn parse_schema_fields(frame: &Frame, mut idx: usize) -> Result<Vec<FullTextFiel
                 };
                 let attr_count =
                     parse_usize_arg(frame, idx + 2, "ERR invalid VECTOR attribute count")?;
-                let attr_start = idx + 3;
-                if attr_count % 2 != 0 || attr_start + attr_count > frame.arg_len() {
+                let attr_start = idx
+                    .checked_add(3)
+                    .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                if attr_count % 2 != 0 {
                     return Err(Error::msg("ERR syntax error"));
                 }
+                let attr_end = checked_count_end(frame, attr_start, attr_count)?;
                 let mut attributes = Vec::with_capacity(attr_count / 2);
                 let mut attr_idx = attr_start;
-                while attr_idx < attr_start + attr_count {
+                while attr_idx < attr_end {
                     attributes.push((
                         upper_arg(frame, attr_idx)?,
                         arg(frame, attr_idx + 1, "ERR invalid VECTOR attribute")?,
@@ -154,7 +153,7 @@ fn parse_schema_fields(frame: &Frame, mut idx: usize) -> Result<Vec<FullTextFiel
                     algorithm,
                     attributes,
                 });
-                idx += 2 + attr_count;
+                idx = attr_end - 1;
                 FullTextFieldKind::Vector
             }
             _ => return Err(Error::msg("ERR invalid schema field type")),
@@ -269,8 +268,8 @@ fn default_fulltext_search_options() -> FullTextSearchOptions {
         language: None,
         payload: None,
         scorer: FullTextScorer::Bm25Std,
-        summarize: false,
-        highlight: false,
+        summarize: None,
+        highlight: None,
         explain_score: false,
         params: HashMap::new(),
         dialect: 2,
@@ -286,6 +285,13 @@ fn parse_usize_arg(frame: &Frame, idx: usize, error: &str) -> Result<usize, Erro
     arg(frame, idx, error)?
         .parse::<usize>()
         .map_err(|_| Error::msg(error.to_string()))
+}
+
+fn checked_count_end(frame: &Frame, start: usize, count: usize) -> Result<usize, Error> {
+    start
+        .checked_add(count)
+        .filter(|end| *end <= frame.arg_len())
+        .ok_or_else(|| Error::msg("ERR syntax error"))
 }
 
 fn parse_u64_arg(frame: &Frame, idx: usize, error: &str) -> Result<u64, Error> {
@@ -329,19 +335,83 @@ fn parse_search_bound_arg(
     }
 }
 
-fn skip_search_display_options(frame: &Frame, mut idx: usize) -> usize {
+fn parse_search_summarize_options(
+    frame: &Frame,
+    mut idx: usize,
+) -> Result<(FullTextSummarizeOptions, usize), Error> {
+    let mut options = FullTextSummarizeOptions::default();
     while idx < frame.arg_len() {
-        match upper_arg(frame, idx).unwrap_or_default().as_str() {
+        match upper_arg(frame, idx)?.as_str() {
             "FIELDS" => {
-                let count =
-                    parse_usize_arg(frame, idx + 1, "ERR invalid FIELDS count").unwrap_or(0);
-                idx = (idx + 2 + count).min(frame.arg_len());
+                let count = parse_usize_arg(frame, idx + 1, "ERR invalid FIELDS count")?;
+                let start = idx
+                    .checked_add(2)
+                    .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                let end = checked_count_end(frame, start, count)?;
+                if count == 0 {
+                    return Err(Error::msg("ERR invalid FIELDS count"));
+                }
+                let mut fields = HashSet::with_capacity(count);
+                for field_idx in start..end {
+                    fields.insert(arg(frame, field_idx, "ERR invalid FIELDS field")?);
+                }
+                options.fields = Some(fields);
+                idx = end;
             }
-            "FRAGS" | "LEN" => idx = (idx + 2).min(frame.arg_len()),
-            "SEPARATOR" | "TAGS" => idx = (idx + 2).min(frame.arg_len()),
+            "FRAGS" => {
+                options.frags = parse_usize_arg(frame, idx + 1, "ERR invalid FRAGS count")?;
+                if options.frags == 0 {
+                    return Err(Error::msg("ERR invalid FRAGS count"));
+                }
+                idx += 2;
+            }
+            "LEN" => {
+                options.len = parse_usize_arg(frame, idx + 1, "ERR invalid LEN")?;
+                if options.len == 0 {
+                    return Err(Error::msg("ERR invalid LEN"));
+                }
+                idx += 2;
+            }
+            "SEPARATOR" => {
+                options.separator = arg(frame, idx + 1, "ERR invalid SEPARATOR")?;
+                idx += 2;
+            }
             _ => break,
         }
     }
-    idx
+    Ok((options, idx))
 }
 
+fn parse_search_highlight_options(
+    frame: &Frame,
+    mut idx: usize,
+) -> Result<(FullTextHighlightOptions, usize), Error> {
+    let mut options = FullTextHighlightOptions::default();
+    while idx < frame.arg_len() {
+        match upper_arg(frame, idx)?.as_str() {
+            "FIELDS" => {
+                let count = parse_usize_arg(frame, idx + 1, "ERR invalid FIELDS count")?;
+                let start = idx
+                    .checked_add(2)
+                    .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                let end = checked_count_end(frame, start, count)?;
+                if count == 0 {
+                    return Err(Error::msg("ERR invalid FIELDS count"));
+                }
+                let mut fields = HashSet::with_capacity(count);
+                for field_idx in start..end {
+                    fields.insert(arg(frame, field_idx, "ERR invalid FIELDS field")?);
+                }
+                options.fields = Some(fields);
+                idx = end;
+            }
+            "TAGS" => {
+                options.open_tag = arg(frame, idx + 1, "ERR invalid opening TAG")?;
+                options.close_tag = arg(frame, idx + 2, "ERR invalid closing TAG")?;
+                idx += 3;
+            }
+            _ => break,
+        }
+    }
+    Ok((options, idx))
+}

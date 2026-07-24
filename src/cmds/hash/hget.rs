@@ -27,7 +27,7 @@ impl Hget {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get(&self.key, &self.field) {
+        match db.hash_get_bytes(&self.key, &self.field) {
             Ok(Some(value)) => Ok(Frame::bulk_string(value)),
             Ok(None) => Ok(Frame::Null),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -35,7 +35,7 @@ impl Hget {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.hash_get_async(&self.key, &self.field).await {
+        match db.hash_get_bytes_async(&self.key, &self.field).await {
             Ok(Some(value)) => Ok(Frame::bulk_string(value)),
             Ok(None) => Ok(Frame::Null),
             Err(err) => Ok(Frame::Error(err.to_string())),

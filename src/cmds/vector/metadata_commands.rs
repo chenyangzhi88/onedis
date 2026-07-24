@@ -182,11 +182,13 @@ impl VRandMember {
             ));
         }
         let count = if frame.arg_len() == 3 {
-            Some(
-                arg(&frame, 2, "ERR invalid vector count")?
-                    .parse::<i64>()
-                    .map_err(|_| Error::msg("ERR invalid vector count"))?,
-            )
+            let count = arg(&frame, 2, "ERR invalid vector count")?
+                .parse::<i64>()
+                .map_err(|_| Error::msg("ERR invalid vector count"))?;
+            let response_count = usize::try_from(count.unsigned_abs())
+                .map_err(|_| Error::msg("ERR invalid vector count"))?;
+            validate_vector_response_count(response_count, 1)?;
+            Some(count)
         } else {
             None
         };
@@ -197,17 +199,14 @@ impl VRandMember {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        Ok(redis_vrandmember_frame(
-            db.vector_ids(&self.key)?,
-            self.count,
-        ))
+        redis_vrandmember_frame(db.vector_random_ids(&self.key, self.count)?, self.count)
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        Ok(redis_vrandmember_frame(
-            db.vector_ids_async(&self.key).await?,
+        redis_vrandmember_frame(
+            db.vector_random_ids_async(&self.key, self.count).await?,
             self.count,
-        ))
+        )
     }
 }
 
@@ -230,45 +229,18 @@ impl VLinks {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let element = db
-            .vector_element(&self.key, &self.element)?
-            .ok_or_else(|| Error::msg("ERR vector element does not exist"))?;
-        let results = db.vector_search(
-            &self.key,
-            &element.vector,
-            VectorSearchOptions {
-                k: 17,
-                filter: None,
-                with_scores: false,
-                with_attrs: Vec::new(),
-                ef: None,
-                offset: 0,
-                limit: Some(17),
-            },
-        )?;
-        Ok(redis_vlinks_frame(results, &self.element, self.with_scores))
+        Ok(match db.vector_links(&self.key, &self.element)? {
+            Some(layers) => redis_vlinks_frame(layers, self.with_scores),
+            None => Frame::Null,
+        })
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let element = db
-            .vector_element_async(&self.key, &self.element)
-            .await?
-            .ok_or_else(|| Error::msg("ERR vector element does not exist"))?;
-        let results = db
-            .vector_search_async(
-                &self.key,
-                &element.vector,
-                VectorSearchOptions {
-                    k: 17,
-                    filter: None,
-                    with_scores: false,
-                    with_attrs: Vec::new(),
-                    ef: None,
-                    offset: 0,
-                    limit: Some(17),
-                },
-            )
-            .await?;
-        Ok(redis_vlinks_frame(results, &self.element, self.with_scores))
+        Ok(
+            match db.vector_links_async(&self.key, &self.element).await? {
+                Some(layers) => redis_vlinks_frame(layers, self.with_scores),
+                None => Frame::Null,
+            },
+        )
     }
 }

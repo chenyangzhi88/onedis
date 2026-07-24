@@ -1,12 +1,16 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::common::validate_entry_count,
+    frame::{Frame, MAX_FRAME_BYTES},
+    store::db::Db,
+};
 
 pub struct Zrange {
     key: String,
     range: ZrangeBounds,
     reverse: bool,
-    limit: Option<(usize, usize)>,
+    limit: Option<(i64, i64)>,
     withscores: bool,
 }
 
@@ -17,9 +21,9 @@ enum ZrangeBounds {
 }
 
 #[derive(Clone, Copy)]
-struct ScoreBound {
-    value: f64,
-    inclusive: bool,
+pub(crate) struct ScoreBound {
+    pub(crate) value: f64,
+    pub(crate) inclusive: bool,
 }
 
 #[derive(Clone)]
@@ -80,10 +84,10 @@ impl Zrange {
                         return Err(Error::msg("ERR syntax error"));
                     }
                     let offset = args[idx + 1]
-                        .parse::<usize>()
+                        .parse::<i64>()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
                     let count = args[idx + 2]
-                        .parse::<usize>()
+                        .parse::<i64>()
                         .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
                     limit = Some((offset, count));
                     idx += 3;
@@ -94,6 +98,11 @@ impl Zrange {
 
         if limit.is_some() && !(by_score || by_lex) {
             return Err(Error::msg("ERR syntax error"));
+        }
+        if let Some((_, count)) = limit
+            && count >= 0
+        {
+            validate_entry_count(count as u64, withscores)?;
         }
 
         let range = if by_score {
@@ -142,10 +151,7 @@ impl Zrange {
                     if self.reverse {
                         entries.reverse();
                     }
-                    if let Some((offset, count)) = self.limit {
-                        entries = entries.into_iter().skip(offset).take(count).collect();
-                    }
-                    entries
+                    apply_limit(entries, self.limit)
                 }),
             ZrangeBounds::Lex(min, max) => {
                 db.zset_range_by_lex(&self.key, &min, &max)
@@ -153,15 +159,12 @@ impl Zrange {
                         if self.reverse {
                             entries.reverse();
                         }
-                        if let Some((offset, count)) = self.limit {
-                            entries = entries.into_iter().skip(offset).take(count).collect();
-                        }
-                        entries
+                        apply_limit(entries, self.limit)
                     })
             }
         };
         match result {
-            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores))),
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -180,10 +183,7 @@ impl Zrange {
                     if self.reverse {
                         entries.reverse();
                     }
-                    if let Some((offset, count)) = self.limit {
-                        entries = entries.into_iter().skip(offset).take(count).collect();
-                    }
-                    entries
+                    apply_limit(entries, self.limit)
                 }),
             ZrangeBounds::Lex(min, max) => db
                 .zset_range_by_lex_async(&self.key, &min, &max)
@@ -192,20 +192,17 @@ impl Zrange {
                     if self.reverse {
                         entries.reverse();
                     }
-                    if let Some((offset, count)) = self.limit {
-                        entries = entries.into_iter().skip(offset).take(count).collect();
-                    }
-                    entries
+                    apply_limit(entries, self.limit)
                 }),
         };
         match result {
-            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores))),
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 }
 
-fn parse_score_bound(input: &str) -> Result<ScoreBound, Error> {
+pub(crate) fn parse_score_bound(input: &str) -> Result<ScoreBound, Error> {
     let (value, inclusive) = if let Some(value) = input.strip_prefix('(') {
         (value, false)
     } else {
@@ -220,20 +217,54 @@ fn parse_score_bound(input: &str) -> Result<ScoreBound, Error> {
     Ok(ScoreBound { value, inclusive })
 }
 
-fn score_in_range(score: f64, min: ScoreBound, max: ScoreBound) -> bool {
+pub(crate) fn score_in_range(score: f64, min: ScoreBound, max: ScoreBound) -> bool {
     (score > min.value || (min.inclusive && score == min.value))
         && (score < max.value || (max.inclusive && score == max.value))
 }
 
-pub(crate) fn flatten_entries(entries: Vec<(String, f64)>, withscores: bool) -> Vec<Frame> {
-    let mut frames = Vec::new();
+pub(crate) fn apply_limit<T>(entries: Vec<T>, limit: Option<(i64, i64)>) -> Vec<T> {
+    let Some((offset, count)) = limit else {
+        return entries;
+    };
+    if offset < 0 || count == 0 {
+        return Vec::new();
+    }
+    let Ok(offset) = usize::try_from(offset) else {
+        return Vec::new();
+    };
+    let entries = entries.into_iter().skip(offset);
+    if count < 0 {
+        entries.collect()
+    } else {
+        entries.take(count as usize).collect()
+    }
+}
+
+pub(crate) fn flatten_entries(
+    entries: Vec<(String, f64)>,
+    withscores: bool,
+) -> Result<Vec<Frame>, Error> {
+    validate_entry_count(entries.len() as u64, withscores)?;
+    let mut frames =
+        Vec::with_capacity(entries.len().saturating_mul(if withscores { 2 } else { 1 }));
+    let mut bytes = 32usize;
     for (member, score) in entries {
+        let score = score.to_string();
+        bytes = bytes
+            .checked_add(
+                member
+                    .len()
+                    .saturating_add(if withscores { score.len() } else { 0 })
+                    .saturating_add(if withscores { 64 } else { 32 }),
+            )
+            .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+            .ok_or_else(|| Error::msg("ERR response exceeds configured limit"))?;
         frames.push(Frame::bulk_string(member));
         if withscores {
-            frames.push(Frame::bulk_string(score.to_string()));
+            frames.push(Frame::bulk_string(score));
         }
     }
-    frames
+    Ok(frames)
 }
 
 pub(crate) fn parse_lex_bound(input: &str) -> Result<LexBound, Error> {

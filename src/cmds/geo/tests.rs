@@ -298,6 +298,23 @@ fn geo_parser_validation_and_math_helpers_cover_error_edges() {
         parse_err(&[
             "geosearch",
             "g",
+            "frommember",
+            "m",
+            "byradius",
+            "1",
+            "m",
+            "withdist",
+            "withhash",
+            "withcoord",
+            "count",
+            "200000",
+        ])
+        .contains("response limit")
+    );
+    assert!(
+        parse_err(&[
+            "geosearch",
+            "g",
             "fromlonlat",
             "0",
             "0",
@@ -350,6 +367,47 @@ fn geo_parser_validation_and_math_helpers_cover_error_edges() {
         ])
         .contains("integer")
     );
+    assert!(
+        parse_err(&[
+            "geosearch",
+            "g",
+            "fromlonlat",
+            "0",
+            "0",
+            "byradius",
+            "1",
+            "m",
+            "any"
+        ])
+        .contains("requires COUNT")
+    );
+    assert!(
+        parse_err(&[
+            "geosearch",
+            "g",
+            "fromlonlat",
+            "0",
+            "0",
+            "byradius",
+            "1e308",
+            "km"
+        ])
+        .contains("valid float")
+    );
+    assert!(
+        parse_err(&[
+            "georadius",
+            "g",
+            "0",
+            "0",
+            "1",
+            "m",
+            "store",
+            "dst",
+            "withdist"
+        ])
+        .contains("not compatible")
+    );
     assert!(parse_err(&["georadius", "g", "0"]).contains("wrong number"));
     assert!(parse_err(&["georadiusbymember", "g", "m"]).contains("wrong number"));
     assert!(parse_err(&["geosearchstore", "dst", "g"]).contains("syntax"));
@@ -368,6 +426,67 @@ fn geo_parser_validation_and_math_helpers_cover_error_edges() {
     let decoded = decode_score(score);
     assert!(distance_m((13.361389, 38.115556), decoded) < 1.0);
     assert_eq!(redis_geohash(13.361389, 38.115556).len(), 11);
+
+    let binary_key = Frame::Array(vec![
+        Frame::bulk_string("GEOADD".to_string()),
+        Frame::BulkString(vec![0xff]),
+        Frame::bulk_string("0".to_string()),
+        Frame::bulk_string("0".to_string()),
+        Frame::bulk_string("member".to_string()),
+    ]);
+    assert!(Command::parse_from_frame(binary_key).is_err());
+}
+
+#[test]
+fn geo_count_orders_by_distance_and_any_stops_after_enough_matches() {
+    let db = test_db();
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "geoadd", "ordered", "-10", "-10", "far", "0.1", "0.1", "near",
+            ],
+        ),
+        Frame::Integer(2)
+    ));
+
+    let nearest = array(apply(
+        &db,
+        &[
+            "geosearch",
+            "ordered",
+            "fromlonlat",
+            "0",
+            "0",
+            "byradius",
+            "2000",
+            "km",
+            "count",
+            "1",
+        ],
+    ));
+    assert!(
+        matches!(nearest.as_slice(), [Frame::BulkString(member)] if member.as_slice() == b"near")
+    );
+
+    let any = array(apply(
+        &db,
+        &[
+            "geosearch",
+            "ordered",
+            "fromlonlat",
+            "0",
+            "0",
+            "byradius",
+            "2000",
+            "km",
+            "count",
+            "1",
+            "any",
+            "asc",
+        ],
+    ));
+    assert_eq!(any.len(), 1);
 }
 
 #[test]

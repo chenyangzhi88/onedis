@@ -22,7 +22,7 @@ pub(crate) use onedis_server::command_executor::CommandExecutor;
 pub(crate) use onedis_server::frame::Frame;
 pub(crate) use onedis_server::network::connection::Connection;
 pub(crate) use onedis_server::network::session::Session;
-pub(crate) use onedis_server::network::session_manager::SessionManager;
+pub(crate) use onedis_server::network::session_manager::{ClientListFilter, SessionManager};
 pub(crate) use onedis_server::server::Handler;
 pub(crate) use onedis_server::store::db::{Db, Structure};
 pub(crate) use onedis_server::store::db_manager::DatabaseManager;

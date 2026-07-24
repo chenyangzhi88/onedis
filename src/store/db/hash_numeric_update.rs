@@ -2,10 +2,14 @@ use super::*;
 
 impl Db {
     pub fn hash_set_nx(&self, key: &str, field: &str, value: &str) -> Result<bool, Error> {
+        self.hash_set_nx_bytes(key, field, value.as_bytes())
+    }
+
+    pub fn hash_set_nx_bytes(&self, key: &str, field: &str, value: &[u8]) -> Result<bool, Error> {
         if self.hash_exists(key, field)? {
             return Ok(false);
         }
-        self.hash_set(key, field, value)
+        self.hash_set_bytes(key, field, value)
     }
 
     pub async fn hash_set_nx_async(
@@ -13,6 +17,16 @@ impl Db {
         key: &str,
         field: &str,
         value: &str,
+    ) -> Result<bool, Error> {
+        self.hash_set_nx_bytes_async(key, field, value.as_bytes())
+            .await
+    }
+
+    pub async fn hash_set_nx_bytes_async(
+        &self,
+        key: &str,
+        field: &str,
+        value: &[u8],
     ) -> Result<bool, Error> {
         let _write_guard = self.set_write_lock(key).lock().await;
         for _ in 0..64 {
@@ -44,7 +58,7 @@ impl Db {
             if meta.is_none() {
                 batch.put(&key_bytes, &encode_hash_meta(0, version));
             }
-            batch.put(&field_key, value.as_bytes());
+            batch.put(&field_key, value);
             if meta.is_some() {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
@@ -52,11 +66,13 @@ impl Db {
                 CompareCondition::from_observed(&observed_meta),
                 CompareCondition::from_observed(&observed_field),
             ];
+            self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             if self
                 .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
                 .await?
             {
                 self.changes.fetch_add(1, Ordering::Relaxed);
+                self.fulltext_request_refresh(key)?;
                 return Ok(true);
             }
         }
@@ -65,8 +81,18 @@ impl Db {
 
     /// 按整数增量更新 hash field，返回更新后的值。
     pub fn hash_increment_by(&self, key: &str, field: &str, increment: i64) -> Result<i64, Error> {
-        let current = match self.hash_get(key, field)? {
-            Some(value) => value
+        let meta = self.hash_expire_ms(key)?;
+        let version = match meta {
+            Some((_, version)) => version,
+            None => self.next_persisted_version(),
+        };
+        let current_value = match meta {
+            Some(_) => self.hash_live_field_value(key, version, field),
+            None => None,
+        };
+        let current = match current_value.as_deref() {
+            Some(value) => std::str::from_utf8(value)
+                .map_err(|_| Error::msg("ERR hash value is not an integer"))?
                 .parse::<i64>()
                 .map_err(|_| Error::msg("ERR hash value is not an integer"))?,
             None => 0,
@@ -74,7 +100,22 @@ impl Db {
         let next = current
             .checked_add(increment)
             .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
-        self.hash_set(key, field, &next.to_string())?;
+
+        let mut batch = WriteBatch::new();
+        if meta.is_none() {
+            batch.put(&self.mk(key), &encode_hash_meta(0, version));
+        }
+        batch.put(
+            &hash_field_key(self.db_index, key, version, field),
+            next.to_string().as_bytes(),
+        );
+        if current_value.is_none() {
+            batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+        }
+        self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+        self.write_batch_if_not_empty(&batch);
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.fulltext_request_refresh(key)?;
         Ok(next)
     }
 
@@ -122,18 +163,20 @@ impl Db {
                 batch.put(&key_bytes, &encode_hash_meta(0, version));
             }
             batch.put(&field_key, next.to_string().as_bytes());
-            if meta.is_some() {
+            if raw_field.is_none() {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
             let conditions = [
                 CompareCondition::from_observed(&observed_meta),
                 CompareCondition::from_observed(&observed_field),
             ];
+            self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             if self
                 .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
                 .await?
             {
                 self.changes.fetch_add(1, Ordering::Relaxed);
+                self.fulltext_request_refresh(key)?;
                 return Ok(next);
             }
         }
@@ -146,9 +189,19 @@ impl Db {
         field: &str,
         increment: f64,
     ) -> Result<String, Error> {
-        let current = match self.hash_get(key, field)? {
+        let meta = self.hash_expire_ms(key)?;
+        let version = match meta {
+            Some((_, version)) => version,
+            None => self.next_persisted_version(),
+        };
+        let current_value = match meta {
+            Some(_) => self.hash_live_field_value(key, version, field),
+            None => None,
+        };
+        let current = match current_value.as_deref() {
             Some(value) => {
-                let parsed = value
+                let parsed = std::str::from_utf8(value)
+                    .map_err(|_| Error::msg("ERR hash value is not a float"))?
                     .parse::<f64>()
                     .map_err(|_| Error::msg("ERR hash value is not a float"))?;
                 if !parsed.is_finite() {
@@ -163,7 +216,21 @@ impl Db {
             return Err(Error::msg("ERR increment would produce NaN or Infinity"));
         }
         let formatted = crate::cmds::string::incrbyfloat::IncrbyFloat::format_float(next);
-        self.hash_set(key, field, &formatted)?;
+        let mut batch = WriteBatch::new();
+        if meta.is_none() {
+            batch.put(&self.mk(key), &encode_hash_meta(0, version));
+        }
+        batch.put(
+            &hash_field_key(self.db_index, key, version, field),
+            formatted.as_bytes(),
+        );
+        if current_value.is_none() {
+            batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+        }
+        self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+        self.write_batch_if_not_empty(&batch);
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.fulltext_request_refresh(key)?;
         Ok(formatted)
     }
 
@@ -220,18 +287,20 @@ impl Db {
                 batch.put(&key_bytes, &encode_hash_meta(0, version));
             }
             batch.put(&field_key, formatted.as_bytes());
-            if meta.is_some() {
+            if raw_field.is_none() {
                 batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
             }
             let conditions = [
                 CompareCondition::from_observed(&observed_meta),
                 CompareCondition::from_observed(&observed_field),
             ];
+            self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             if self
                 .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
                 .await?
             {
                 self.changes.fetch_add(1, Ordering::Relaxed);
+                self.fulltext_request_refresh(key)?;
                 return Ok(formatted);
             }
         }

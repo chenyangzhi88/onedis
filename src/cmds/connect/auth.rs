@@ -9,18 +9,23 @@ pub struct Auth {
 
 impl Auth {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let args = frame.get_args();
-        if args.len() != 2 && args.len() != 3 {
+        let arg_len = frame.arg_len();
+        if arg_len != 2 && arg_len != 3 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'auth' command",
             ));
         }
 
-        let username = (args.len() == 3).then(|| args[1].to_string());
-        let requirepass = args
-            .last()
-            .expect("AUTH argument length was validated")
-            .to_string();
+        let username = if arg_len == 3 {
+            Some(frame.get_arg(1).ok_or_else(|| {
+                Error::msg("ERR username and password must be valid UTF-8 strings")
+            })?)
+        } else {
+            None
+        };
+        let requirepass = frame
+            .get_arg(arg_len - 1)
+            .ok_or_else(|| Error::msg("ERR username and password must be valid UTF-8 strings"))?;
         Ok(Auth {
             username,
             requirepass,

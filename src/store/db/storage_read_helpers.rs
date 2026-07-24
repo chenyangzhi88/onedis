@@ -50,6 +50,70 @@ impl Db {
         rows
     }
 
+    pub async fn scan_string_prefix_bounded_async(
+        &self,
+        key_prefix: &str,
+        limit: usize,
+        max_field_bytes: usize,
+        max_total_bytes: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>, Error> {
+        let prefix = main_key(self.db_index, key_prefix);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let db = self.shared_task_view();
+        let candidates = tokio::task::spawn_blocking(move || {
+            let mut keys = Vec::with_capacity(limit.min(1024));
+            let mut key_bytes = 0usize;
+            db.store
+                .scan_range_raw_visit(&prefix, upper, limit, |raw_key, _| {
+                    let Some(bytes) =
+                        logical_main_key_from_raw_key(db.key_layout, db.db_index, raw_key)
+                    else {
+                        return true;
+                    };
+                    if bytes.len() > max_field_bytes {
+                        return true;
+                    }
+                    let Some(next_bytes) = key_bytes.checked_add(bytes.len()) else {
+                        return false;
+                    };
+                    if next_bytes > max_total_bytes {
+                        return false;
+                    }
+                    let Ok(key) = String::from_utf8(bytes) else {
+                        return true;
+                    };
+                    key_bytes = next_bytes;
+                    keys.push(key);
+                    true
+                });
+            keys
+        })
+        .await
+        .map_err(|error| Error::msg(format!("wasm scan worker task failed: {error}")))?;
+        let mut rows = Vec::with_capacity(candidates.len().min(1024));
+        let mut total_bytes = 0usize;
+        for key in candidates {
+            let Ok(Some(value)) = self.get_string_bytes_async(&key).await else {
+                continue;
+            };
+            if key.len() > max_field_bytes || value.len() > max_field_bytes {
+                continue;
+            }
+            let Some(next_total) = total_bytes
+                .checked_add(key.len())
+                .and_then(|bytes| bytes.checked_add(value.len()))
+            else {
+                break;
+            };
+            if next_total > max_total_bytes {
+                break;
+            }
+            total_bytes = next_total;
+            rows.push((key, value));
+        }
+        Ok(rows)
+    }
+
     pub(in crate::store::db) fn read_hash_fields(
         &self,
         key: &str,

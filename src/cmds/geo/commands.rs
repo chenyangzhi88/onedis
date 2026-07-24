@@ -6,13 +6,13 @@ impl Geoadd {
             ));
         }
 
-        let key = frame.get_arg(1).unwrap();
+        let key = text_arg(&frame, 1)?;
         let mut nx = false;
         let mut xx = false;
         let mut ch = false;
         let mut idx = 2;
         while idx < frame.arg_len() {
-            match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+            match text_arg(&frame, idx)?.to_ascii_uppercase().as_str() {
                 "NX" => nx = true,
                 "XX" => xx = true,
                 "CH" => ch = true,
@@ -31,10 +31,10 @@ impl Geoadd {
 
         let mut items = Vec::new();
         while idx < frame.arg_len() {
-            let lon = parse_f(&frame.get_arg(idx).unwrap())?;
-            let lat = parse_f(&frame.get_arg(idx + 1).unwrap())?;
+            let lon = parse_f(&text_arg(&frame, idx)?)?;
+            let lat = parse_f(&text_arg(&frame, idx + 1)?)?;
             validate_coord(lon, lat)?;
-            items.push((lon, lat, frame.get_arg(idx + 2).unwrap()));
+            items.push((lon, lat, text_arg(&frame, idx + 2)?));
             idx += 3;
         }
         Ok(Self {
@@ -47,67 +47,49 @@ impl Geoadd {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let mut unique = std::collections::HashMap::new();
-        for (lon, lat, member) in self.items {
-            unique.insert(member, (lon, lat));
-        }
-        let mut writes = Vec::new();
-        let mut changed = 0usize;
-        let mut added = 0usize;
-        for (member, (lon, lat)) in unique {
-            let score = encode_score(lon, lat);
-            let previous = db.zset_score(&self.key, &member)?;
-            if self.nx && previous.is_some() {
-                continue;
-            }
-            if self.xx && previous.is_none() {
-                continue;
-            }
-            if previous.is_none() {
-                added += 1;
-                changed += 1;
-            } else if previous != Some(score as f64) {
-                changed += 1;
-            }
-            writes.push((score as f64, member));
-        }
-
-        if !writes.is_empty() {
-            db.zset_add(&self.key, &writes)?;
-        }
-        Ok(Frame::Integer(if self.ch { changed } else { added } as i64))
+        let writes = self
+            .items
+            .into_iter()
+            .map(|(lon, lat, member)| (encode_score(lon, lat) as f64, member))
+            .collect::<Vec<_>>();
+        let outcome = db.zset_add_with_options(
+            &self.key,
+            &writes,
+            ZsetAddOptions {
+                nx: self.nx,
+                xx: self.xx,
+                ..ZsetAddOptions::default()
+            },
+        )?;
+        Ok(Frame::Integer(if self.ch {
+            outcome.changed
+        } else {
+            outcome.added
+        } as i64))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let mut unique = std::collections::HashMap::new();
-        for (lon, lat, member) in self.items {
-            unique.insert(member, (lon, lat));
-        }
-        let mut writes = Vec::new();
-        let mut changed = 0usize;
-        let mut added = 0usize;
-        for (member, (lon, lat)) in unique {
-            let score = encode_score(lon, lat);
-            let previous = db.zset_score_async(&self.key, &member).await?;
-            if self.nx && previous.is_some() {
-                continue;
-            }
-            if self.xx && previous.is_none() {
-                continue;
-            }
-            if previous.is_none() {
-                added += 1;
-                changed += 1;
-            } else if previous != Some(score as f64) {
-                changed += 1;
-            }
-            writes.push((score as f64, member));
-        }
-
-        if !writes.is_empty() {
-            db.zset_add_async(&self.key, &writes).await?;
-        }
-        Ok(Frame::Integer(if self.ch { changed } else { added } as i64))
+        let writes = self
+            .items
+            .into_iter()
+            .map(|(lon, lat, member)| (encode_score(lon, lat) as f64, member))
+            .collect::<Vec<_>>();
+        let outcome = db
+            .zset_add_with_options_async(
+                &self.key,
+                &writes,
+                ZsetAddOptions {
+                    nx: self.nx,
+                    xx: self.xx,
+                    ..ZsetAddOptions::default()
+                },
+            )
+            .await?;
+        Ok(Frame::Integer(if self.ch {
+            outcome.changed
+        } else {
+            outcome.added
+        } as i64))
     }
 }
 
@@ -118,11 +100,14 @@ impl Geopos {
                 "ERR wrong number of arguments for 'geopos' command",
             ));
         }
+        if frame.arg_len() - 2 > (MAX_FRAME_NODES - 1) / 3 {
+            return Err(Error::msg("ERR response exceeds configured limit"));
+        }
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
+            key: text_arg(&frame, 1)?,
             members: (2..frame.arg_len())
-                .map(|i| frame.get_arg(i).unwrap())
-                .collect(),
+                .map(|i| text_arg(&frame, i))
+                .collect::<Result<_, _>>()?,
         })
     }
 
@@ -138,7 +123,7 @@ impl Geopos {
                 Err(err) => return Ok(Frame::Error(err.to_string())),
             }
         }
-        Ok(Frame::Array(frames))
+        bounded_geo_frame(Frame::Array(frames))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
@@ -153,7 +138,7 @@ impl Geopos {
                 Err(err) => return Ok(Frame::Error(err.to_string())),
             }
         }
-        Ok(Frame::Array(frames))
+        bounded_geo_frame(Frame::Array(frames))
     }
 }
 
@@ -164,12 +149,16 @@ impl Geodist {
                 "ERR wrong number of arguments for 'geodist' command",
             ));
         }
-        let unit = frame.get_arg(4).unwrap_or_else(|| "m".to_string());
+        let unit = if frame.arg_len() == 5 {
+            text_arg(&frame, 4)?
+        } else {
+            "m".to_string()
+        };
         unit_factor(&unit)?;
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
-            a: frame.get_arg(2).unwrap(),
-            b: frame.get_arg(3).unwrap(),
+            key: text_arg(&frame, 1)?,
+            a: text_arg(&frame, 2)?,
+            b: text_arg(&frame, 3)?,
             unit,
         })
     }
@@ -207,10 +196,10 @@ impl Geohash {
             ));
         }
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
+            key: text_arg(&frame, 1)?,
             members: (2..frame.arg_len())
-                .map(|i| frame.get_arg(i).unwrap())
-                .collect(),
+                .map(|i| text_arg(&frame, i))
+                .collect::<Result<_, _>>()?,
         })
     }
 
@@ -226,7 +215,7 @@ impl Geohash {
                 Err(err) => return Ok(Frame::Error(err.to_string())),
             }
         }
-        Ok(Frame::Array(frames))
+        bounded_geo_frame(Frame::Array(frames))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
@@ -241,7 +230,7 @@ impl Geohash {
                 Err(err) => return Ok(Frame::Error(err.to_string())),
             }
         }
-        Ok(Frame::Array(frames))
+        bounded_geo_frame(Frame::Array(frames))
     }
 }
 
@@ -259,13 +248,15 @@ impl Geosearch {
         let read_only_alias = frame
             .get_arg(0)
             .is_some_and(|name| name.eq_ignore_ascii_case("GEORADIUS_RO"));
-        let key = frame.get_arg(1).unwrap();
-        let lon = parse_f(&frame.get_arg(2).unwrap())?;
-        let lat = parse_f(&frame.get_arg(3).unwrap())?;
+        let key = text_arg(&frame, 1)?;
+        let lon = parse_f(&text_arg(&frame, 2)?)?;
+        let lat = parse_f(&text_arg(&frame, 3)?)?;
         validate_coord(lon, lat)?;
-        let unit = frame.get_arg(5).unwrap();
-        let radius = parse_non_negative_f(&frame.get_arg(4).unwrap())? * unit_factor(&unit)?;
+        let unit = text_arg(&frame, 5)?;
+        let radius = parse_distance(&text_arg(&frame, 4)?, &unit)?;
         let (options, store) = parse_search_options(&frame, 6, !read_only_alias, false)?;
+        validate_store_options(&options, &store)?;
+        validate_search_response_count(&options, store.is_some())?;
         Ok(Self {
             key,
             center: GeoCenter::Coord(lon, lat),
@@ -288,11 +279,13 @@ impl Geosearch {
         let read_only_alias = frame
             .get_arg(0)
             .is_some_and(|name| name.eq_ignore_ascii_case("GEORADIUSBYMEMBER_RO"));
-        let key = frame.get_arg(1).unwrap();
-        let member = frame.get_arg(2).unwrap();
-        let unit = frame.get_arg(4).unwrap();
-        let radius = parse_non_negative_f(&frame.get_arg(3).unwrap())? * unit_factor(&unit)?;
+        let key = text_arg(&frame, 1)?;
+        let member = text_arg(&frame, 2)?;
+        let unit = text_arg(&frame, 4)?;
+        let radius = parse_distance(&text_arg(&frame, 3)?, &unit)?;
         let (options, store) = parse_search_options(&frame, 5, !read_only_alias, false)?;
+        validate_store_options(&options, &store)?;
+        validate_search_response_count(&options, store.is_some())?;
         Ok(Self {
             key,
             center: GeoCenter::Member(member),
@@ -312,7 +305,7 @@ impl Geosearch {
                 if let Some(store) = &self.store {
                     return store_entries(db, store, &entries, self.shape.unit_factor());
                 }
-                Ok(Frame::Array(
+                bounded_geo_frame(Frame::Array(
                     entries
                         .into_iter()
                         .map(|entry| {
@@ -329,9 +322,10 @@ impl Geosearch {
         match search_entries_async(db, &self).await {
             Ok(entries) => {
                 if let Some(store) = &self.store {
-                    return store_entries_async(db, store, &entries, self.shape.unit_factor()).await;
+                    return store_entries_async(db, store, &entries, self.shape.unit_factor())
+                        .await;
                 }
-                Ok(Frame::Array(
+                bounded_geo_frame(Frame::Array(
                     entries
                         .into_iter()
                         .map(|entry| {

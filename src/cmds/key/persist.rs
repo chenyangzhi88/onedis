@@ -7,13 +7,14 @@ pub struct Persist {
 
 impl Persist {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        let key = frame.get_arg(1);
-        if frame.arg_len() != 2 || key.is_none() {
+        if frame.arg_len() != 2 {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'persist' command",
             ));
         }
-        let key_str = key.unwrap().to_string(); // 键
+        let key_str = frame
+            .get_arg(1)
+            .ok_or_else(|| Error::msg("ERR wrong number of arguments for 'persist' command"))?;
         Ok(Persist { key: key_str })
     }
 

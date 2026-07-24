@@ -143,19 +143,20 @@ impl Db {
             &encode_record(&doc)?,
         );
         if let Some(old_doc) = old_doc
-            && let Ok(old_attrs) = parse_attrs(&old_doc.attrs_json) {
-                delete_attr_index_entries_to_batch(
-                    &mut batch,
-                    &VectorAttrIndexContext {
-                        db_index: self.db_index,
-                        index,
-                        version,
-                        schema: &meta.schema,
-                        doc_id: &old_doc.id,
-                    },
-                    &old_attrs,
-                );
-            }
+            && let Ok(old_attrs) = parse_attrs(&old_doc.attrs_json)
+        {
+            delete_attr_index_entries_to_batch(
+                &mut batch,
+                &VectorAttrIndexContext {
+                    db_index: self.db_index,
+                    index,
+                    version,
+                    schema: &meta.schema,
+                    doc_id: &old_doc.id,
+                },
+                &old_attrs,
+            );
+        }
         put_attr_index_entries_to_batch(
             &mut batch,
             &VectorAttrIndexContext {
@@ -190,10 +191,8 @@ impl Db {
         let _key_write_guard = self.set_write_lock(index).lock().await;
         let index = index.to_string();
         let id = id.to_string();
-        self.run_blocking_store_task(move |db| {
-            db.vector_add(&index, &id, vector, attrs_json)
-        })
-        .await
+        self.run_blocking_store_task(move |db| db.vector_add(&index, &id, vector, attrs_json))
+            .await
     }
 
     pub fn vector_add_autocreate(
@@ -203,7 +202,7 @@ impl Db {
         vector: Vec<f32>,
         attrs_json: Option<String>,
         m: Option<usize>,
-        ef_runtime: Option<usize>,
+        ef_construction: Option<usize>,
     ) -> Result<bool, Error> {
         let existed = self.vector_element(index, id)?.is_some();
         match self.vector_add(index, id, vector.clone(), attrs_json.clone()) {
@@ -215,18 +214,18 @@ impl Db {
             index,
             VectorCreateOptions {
                 dim: vector.len(),
-                distance: "L2".to_string(),
+                distance: "COSINE".to_string(),
                 schema: Vec::new(),
                 segment_max_docs: None,
                 m,
-                ef_construction: None,
-                ef_runtime,
+                ef_construction,
+                ef_runtime: None,
                 initial_cap: None,
             },
-        )
-            && err.to_string() != "ERR vector index already exists" {
-                return Err(err);
-            }
+        ) && err.to_string() != "ERR vector index already exists"
+        {
+            return Err(err);
+        }
         self.vector_add(index, id, vector, attrs_json)?;
         Ok(true)
     }
@@ -238,13 +237,13 @@ impl Db {
         vector: Vec<f32>,
         attrs_json: Option<String>,
         m: Option<usize>,
-        ef_runtime: Option<usize>,
+        ef_construction: Option<usize>,
     ) -> Result<bool, Error> {
         let _key_write_guard = self.set_write_lock(index).lock().await;
         let index = index.to_string();
         let id = id.to_string();
         self.run_blocking_store_task(move |db| {
-            db.vector_add_autocreate(&index, &id, vector, attrs_json, m, ef_runtime)
+            db.vector_add_autocreate(&index, &id, vector, attrs_json, m, ef_construction)
         })
         .await
     }
@@ -255,7 +254,11 @@ impl Db {
         let _guard = write_lock
             .lock()
             .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (expire_ms, version, mut meta) = self.read_vector_meta(index)?;
+        let (expire_ms, version, mut meta) = match self.read_vector_meta(index) {
+            Ok(value) => value,
+            Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(0),
+            Err(err) => return Err(err),
+        };
         let mut batch = WriteBatch::new();
         let mut deleted = 0usize;
         let mut seen_ids = HashSet::new();

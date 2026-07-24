@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{cmds::sorted_set::zrange::flatten_entries, frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::{common::validate_entry_count, zrange::flatten_entries},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Zrandmember {
     key: String,
@@ -35,6 +39,9 @@ impl Zrandmember {
             }
             withscores = true;
         }
+        if let Some(count) = count {
+            validate_entry_count(count.unsigned_abs(), withscores)?;
+        }
         Ok(Self {
             key: args[1].clone(),
             count,
@@ -49,12 +56,12 @@ impl Zrandmember {
                     return Ok(Frame::Null);
                 };
                 if self.withscores {
-                    Ok(Frame::Array(flatten_entries(vec![(member, score)], true)))
+                    Ok(Frame::Array(flatten_entries(vec![(member, score)], true)?))
                 } else {
                     Ok(Frame::bulk_string(member))
                 }
             }
-            Ok(Some(entries)) => Ok(Frame::Array(flatten_entries(entries, self.withscores))),
+            Ok(Some(entries)) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Ok(None) if self.count.is_none() => Ok(Frame::Null),
             Ok(None) => Ok(Frame::Array(Vec::new())),
             Err(err) => Ok(Frame::Error(err.to_string())),
@@ -68,12 +75,12 @@ impl Zrandmember {
                     return Ok(Frame::Null);
                 };
                 if self.withscores {
-                    Ok(Frame::Array(flatten_entries(vec![(member, score)], true)))
+                    Ok(Frame::Array(flatten_entries(vec![(member, score)], true)?))
                 } else {
                     Ok(Frame::bulk_string(member))
                 }
             }
-            Ok(Some(entries)) => Ok(Frame::Array(flatten_entries(entries, self.withscores))),
+            Ok(Some(entries)) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Ok(None) if self.count.is_none() => Ok(Frame::Null),
             Ok(None) => Ok(Frame::Array(Vec::new())),
             Err(err) => Ok(Frame::Error(err.to_string())),

@@ -263,7 +263,7 @@ async fn wasm_registry_loads_and_calls_i64_function() {
             test_db(),
             "math",
             "add",
-            &["40".to_string(), "2".to_string()],
+            &[b"40".to_vec(), b"2".to_vec()],
             false,
         )
         .await
@@ -406,8 +406,14 @@ fn wasm_private_helpers_cover_argument_and_value_conversion_edges() {
 
     assert_eq!(
         split_nul_args(b"GET\0key\0\0bad-\xff"),
-        vec!["GET".to_string(), "key".to_string()]
+        Some(vec![
+            b"GET".to_vec(),
+            b"key".to_vec(),
+            Vec::new(),
+            b"bad-\xff".to_vec()
+        ])
     );
+    assert!(split_nul_args(&[0; WASM_HOST_MAX_CALL_ARGS + 2]).is_none());
 
     assert!(matches!(
         parse_wasm_arg("7", ValType::I32).unwrap(),
@@ -479,7 +485,7 @@ async fn wasm_call_and_scan_report_missing_function_argument_and_signature_error
     );
     assert!(
         registry
-            .call(test_db(), "math", "add", &["1".to_string()], false)
+            .call(test_db(), "math", "add", &[b"1".to_vec()], false)
             .await
             .is_err()
     );
@@ -489,7 +495,7 @@ async fn wasm_call_and_scan_report_missing_function_argument_and_signature_error
                 test_db(),
                 "math",
                 "add",
-                &["bad".to_string(), "2".to_string()],
+                &[b"bad".to_vec(), b"2".to_vec()],
                 false,
             )
             .await

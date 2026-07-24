@@ -178,9 +178,25 @@ fn ft_introspection_profile_search_and_info_counters() {
     assert_eq!(total(&profile[0]), Some(2));
     let profile_text = profile[1].to_string();
     assert!(profile_text.contains("Total profile time"));
-    assert!(profile_text.contains("Index lookup time"));
+    assert!(profile_text.contains("Result processors profile"));
+    assert!(!profile_text.contains("Index lookup time 0.000"));
     assert!(profile_text.contains("Pipeline"));
     assert!(profile_text.contains("Search"));
+
+    let limited = apply(
+        &db,
+        &[
+            "FT.PROFILE",
+            "idx",
+            "SEARCH",
+            "LIMITED",
+            "QUERY",
+            "fox",
+            "NOCONTENT",
+        ],
+    );
+    assert!(limited.to_string().contains("Total profile time"));
+    assert!(!limited.to_string().contains("Result processors profile"));
 
     let info = array(apply(&db, &["FT.INFO", "idx"]));
     assert!(matches!(

@@ -470,7 +470,7 @@ async fn copy_move_rename_and_remove_cover_complex_structure_namespaces() {
         vec!["left".to_string(), "right".to_string()]
     );
     assert!(
-        db0.rename_key_async("rename-target", "rename-target", false)
+        !db0.rename_key_async("rename-target", "rename-target", false)
             .await
             .unwrap()
     );

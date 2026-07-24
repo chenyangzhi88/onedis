@@ -11,10 +11,11 @@ use crate::{
         Db, FullTextAggregateLoadField, FullTextAggregateOptions, FullTextAggregateReducer,
         FullTextAggregateReducerKind, FullTextAggregateSortBy, FullTextAggregateStep,
         FullTextCreateOptions, FullTextFieldKind, FullTextFieldOptions, FullTextFieldSchema,
-        FullTextGeoShapeCoordinateSystem, FullTextIndexOptions, FullTextReturnField,
-        FullTextScorer, FullTextSearchBound, FullTextSearchGeoFilter, FullTextSearchNumericFilter,
-        FullTextSearchOptions, FullTextSortBy, FullTextSourceType, FullTextVectorAlgorithm,
-        FullTextVectorOptions,
+        FullTextGeoShapeCoordinateSystem, FullTextHighlightOptions, FullTextHybridCombine,
+        FullTextHybridOptions, FullTextIndexOptions, FullTextReturnField, FullTextScorer,
+        FullTextSearchBound, FullTextSearchGeoFilter, FullTextSearchNumericFilter,
+        FullTextSearchOptions, FullTextSortBy, FullTextSourceType, FullTextSpellcheckDictionary,
+        FullTextSummarizeOptions, FullTextVectorAlgorithm, FullTextVectorOptions,
     },
 };
 
@@ -30,7 +31,10 @@ pub struct FtSearch {
 }
 
 pub struct FtHybrid {
-    pub search: FtSearch,
+    pub index: String,
+    pub search_query: String,
+    pub vector_query: String,
+    pub options: FullTextHybridOptions,
 }
 
 pub struct FtAggregate {
@@ -53,10 +57,12 @@ pub enum FtCursor {
 
 pub struct FtProfile {
     target: FtProfileTarget,
+    limited: bool,
 }
 
 enum FtProfileTarget {
     Search(FtSearch),
+    Hybrid(FtHybrid),
     Aggregate(FtAggregate),
 }
 
@@ -85,6 +91,7 @@ pub struct FtDropIndex {
 
 pub struct FtAlter {
     pub index: String,
+    pub skip_initial_scan: bool,
     pub fields: Vec<FullTextFieldSchema>,
 }
 
@@ -117,8 +124,9 @@ pub struct FtSpellCheck {
     pub index: String,
     pub query: String,
     pub distance: usize,
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
+    pub include: Vec<FullTextSpellcheckDictionary>,
+    pub exclude: Vec<FullTextSpellcheckDictionary>,
+    pub dialect: Option<u8>,
 }
 
 pub enum FtSug {
@@ -127,7 +135,7 @@ pub enum FtSug {
         string: String,
         score: f64,
         incr: bool,
-        payload: Option<String>,
+        payload: Option<Vec<u8>>,
     },
     Get {
         key: String,
@@ -151,6 +159,7 @@ pub enum FtSyn {
         index: String,
         group: String,
         terms: Vec<String>,
+        skip_initial_scan: bool,
     },
     Dump {
         index: String,

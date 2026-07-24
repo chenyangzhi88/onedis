@@ -14,7 +14,14 @@ impl Watch {
             ));
         }
 
-        let keys = frame.get_args().into_iter().skip(1).collect();
+        let mut keys = Vec::with_capacity(frame.arg_len() - 1);
+        for index in 1..frame.arg_len() {
+            keys.push(
+                frame
+                    .get_arg(index)
+                    .ok_or_else(|| Error::msg("ERR invalid UTF-8 key"))?,
+            );
+        }
         Ok(Self { keys })
     }
 

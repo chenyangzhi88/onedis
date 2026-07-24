@@ -6,7 +6,7 @@ pub enum WasmCommand {
     Call {
         name: String,
         function: String,
-        args: Vec<String>,
+        args: Vec<Vec<u8>>,
         read_only: bool,
         command_name: &'static str,
     },

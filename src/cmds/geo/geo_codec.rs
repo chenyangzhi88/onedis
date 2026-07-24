@@ -113,5 +113,5 @@ fn distance_m(a: (f64, f64), b: (f64, f64)) -> f64 {
     let lat1 = a.1.to_radians();
     let lat2 = b.1.to_radians();
     let h = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * EARTH_RADIUS_M * h.sqrt().asin()
+    2.0 * EARTH_RADIUS_M * h.clamp(0.0, 1.0).sqrt().asin()
 }

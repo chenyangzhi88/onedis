@@ -1,6 +1,6 @@
 use crate::{
-    frame::Frame,
-    store::db::{Db, SetCondition, SetExpiration},
+    frame::{Frame, MAX_BULK_STRING_BYTES},
+    store::db::Db,
 };
 use anyhow::Error;
 
@@ -28,19 +28,19 @@ impl Append {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let mut value = db.get_string_bytes(&self.key)?.unwrap_or_default();
-        value
-            .try_reserve(self.val.len())
-            .map_err(|_| Error::msg("ERR string exceeds maximum allowed size"))?;
-        value.extend_from_slice(&self.val);
-        let len = value.len();
-        db.set_string_bytes(
-            self.key,
-            value,
-            SetExpiration::KeepTtl,
-            SetCondition::Always,
-            false,
-        )?;
+        let suffix = self.val;
+        let len = db.mutate_string_bytes(&self.key, |value, _| {
+            let required_len = value
+                .len()
+                .checked_add(suffix.len())
+                .filter(|len| *len <= MAX_BULK_STRING_BYTES)
+                .ok_or_else(|| Error::msg("ERR string exceeds maximum allowed size"))?;
+            value
+                .try_reserve(suffix.len())
+                .map_err(|_| Error::msg("ERR string exceeds maximum allowed size"))?;
+            value.extend_from_slice(&suffix);
+            Ok(required_len)
+        })?;
         Ok(Frame::Integer(len as i64))
     }
 
@@ -48,11 +48,16 @@ impl Append {
         let suffix = self.val;
         let len = db
             .mutate_string_bytes_async(&self.key, |value, _| {
+                let required_len = value
+                    .len()
+                    .checked_add(suffix.len())
+                    .filter(|len| *len <= MAX_BULK_STRING_BYTES)
+                    .ok_or_else(|| Error::msg("ERR string exceeds maximum allowed size"))?;
                 value
                     .try_reserve(suffix.len())
                     .map_err(|_| Error::msg("ERR string exceeds maximum allowed size"))?;
                 value.extend_from_slice(&suffix);
-                Ok(value.len())
+                Ok(required_len)
             })
             .await?;
         Ok(Frame::Integer(len as i64))

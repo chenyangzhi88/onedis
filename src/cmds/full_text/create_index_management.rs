@@ -22,12 +22,13 @@ impl FtCreate {
                 }
                 "PREFIX" => {
                     let count = parse_usize_arg(&frame, idx + 1, "ERR invalid PREFIX count")?;
-                    idx += 2;
-                    if idx + count > frame.arg_len() {
-                        return Err(Error::msg("ERR syntax error"));
-                    }
+                    let start = idx
+                        .checked_add(2)
+                        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                    let end = checked_count_end(&frame, start, count)?;
+                    idx = start;
                     prefixes.clear();
-                    for _ in 0..count {
+                    while idx < end {
                         prefixes.push(arg(&frame, idx, "ERR invalid PREFIX")?);
                         idx += 1;
                     }
@@ -104,12 +105,13 @@ impl FtCreate {
                 }
                 "STOPWORDS" => {
                     let count = parse_usize_arg(&frame, idx + 1, "ERR invalid STOPWORDS count")?;
-                    idx += 2;
-                    if idx + count > frame.arg_len() {
-                        return Err(Error::msg("ERR syntax error"));
-                    }
+                    let start = idx
+                        .checked_add(2)
+                        .ok_or_else(|| Error::msg("ERR syntax error"))?;
+                    let end = checked_count_end(&frame, start, count)?;
+                    idx = start;
                     let mut stopwords = Vec::with_capacity(count);
-                    for _ in 0..count {
+                    while idx < end {
                         stopwords.push(arg(&frame, idx, "ERR invalid STOPWORDS")?);
                         idx += 1;
                     }
@@ -199,21 +201,36 @@ impl FtAlter {
             ));
         }
         let index = arg(&frame, 1, "ERR invalid fulltext index")?;
-        if upper_arg(&frame, 2)?.as_str() != "SCHEMA" || upper_arg(&frame, 3)?.as_str() != "ADD" {
+        let skip_initial_scan =
+            upper_arg(&frame, 2)?.as_str() == "SKIPINITIALSCAN";
+        let schema_index = if skip_initial_scan { 3 } else { 2 };
+        if upper_arg(&frame, schema_index)?.as_str() != "SCHEMA"
+            || upper_arg(&frame, schema_index + 1)?.as_str() != "ADD"
+        {
             return Err(Error::msg("ERR syntax error"));
         }
         Ok(Self {
             index,
-            fields: parse_schema_fields(&frame, 4)?,
+            skip_initial_scan,
+            fields: parse_schema_fields(&frame, schema_index + 2)?,
         })
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        db.fulltext_alter(&self.index, self.fields)
+        db.fulltext_alter_with_options(
+            &self.index,
+            self.fields,
+            self.skip_initial_scan,
+        )
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        db.fulltext_alter_async(&self.index, self.fields).await
+        db.fulltext_alter_with_options_async(
+            &self.index,
+            self.fields,
+            self.skip_initial_scan,
+        )
+        .await
     }
 }
 
@@ -300,4 +317,3 @@ impl FtConfig {
         }
     }
 }
-

@@ -1,6 +1,6 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::listing::text_arg, frame::Frame, store::db::Db};
 
 pub struct Brpoplpush {
     pub(crate) source: String,
@@ -15,9 +15,7 @@ impl Brpoplpush {
                 "ERR wrong number of arguments for 'brpoplpush' command",
             ));
         }
-        let timeout_secs = frame
-            .get_arg(3)
-            .unwrap()
+        let timeout_secs = text_arg(&frame, 3)?
             .parse::<f64>()
             .map_err(|_| Error::msg("ERR timeout is not a float or out of range"))?;
         if !timeout_secs.is_finite() {
@@ -27,8 +25,8 @@ impl Brpoplpush {
             return Err(Error::msg("ERR timeout is negative"));
         }
         Ok(Self {
-            source: frame.get_arg(1).unwrap(),
-            destination: frame.get_arg(2).unwrap(),
+            source: text_arg(&frame, 1)?,
+            destination: text_arg(&frame, 2)?,
             timeout_secs,
         })
     }

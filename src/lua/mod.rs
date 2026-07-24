@@ -103,7 +103,7 @@ mod tests {
                     "#
                     .to_string(),
                     keys: vec!["k1".to_string()],
-                    args: vec!["arg1".to_string()],
+                    args: vec![b"arg1".to_vec()],
                     read_only: true,
                 },
             )
@@ -137,7 +137,7 @@ mod tests {
                         "redis.call('set', KEYS[1], ARGV[1]); return redis.call('get', KEYS[1])"
                             .to_string(),
                     keys: vec!["lua-key".to_string()],
-                    args: vec!["value".to_string()],
+                    args: vec![b"value".to_vec()],
                     read_only: false,
                 },
             )

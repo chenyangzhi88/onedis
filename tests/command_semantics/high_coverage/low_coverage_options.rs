@@ -214,7 +214,7 @@ async fn low_coverage_wrappers_cover_special_options_and_error_edges() {
     ));
     assert!(parse_err(&["HSETEX", "hh"]).contains("wrong"));
     assert!(parse_err(&["HSETEX", "hh", "FNX", "FXX", "FIELDS", "1", "a", "1"]).contains("syntax"));
-    assert!(parse_err(&["HSETEX", "hh", "EX", "0", "FIELDS", "1", "a", "1"]).contains("invalid"));
+    assert!(parse_err(&["HSETEX", "hh", "EX", "-1", "FIELDS", "1", "a", "1"]).contains("invalid"));
     assert!(parse_err(&["HSETEX", "hh", "FIELDS", "2", "a", "1"]).contains("syntax"));
     assert!(parse_err(&["HGETEX", "hh", "FIELDS", "bad", "a"]).contains("integer"));
     assert!(parse_err(&["HGETDEL", "hh", "a"]).contains("syntax"));

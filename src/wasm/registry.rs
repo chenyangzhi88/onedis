@@ -2,9 +2,16 @@ use super::*;
 
 pub struct WasmRegistry {
     engine: Engine,
-    modules: DashMap<String, Module>,
+    modules: DashMap<String, StoredWasmModule>,
+    module_cache_bytes: std::sync::Mutex<usize>,
     fuel_per_call: u64,
     max_memory_bytes: usize,
+}
+
+#[derive(Clone)]
+struct StoredWasmModule {
+    module: Module,
+    byte_len: usize,
 }
 
 impl WasmRegistry {
@@ -23,6 +30,7 @@ impl WasmRegistry {
         Self {
             engine,
             modules: DashMap::new(),
+            module_cache_bytes: std::sync::Mutex::new(0),
             fuel_per_call,
             max_memory_bytes,
         }
@@ -36,12 +44,39 @@ impl WasmRegistry {
         let module = Module::new(&self.engine, bytes)
             .map_err(|error| Error::msg(format!("ERR wasm compile failed: {error}")))?;
         validate_imports(&module)?;
-        self.modules.insert(name.to_string(), module);
+        let mut cache_bytes = self
+            .module_cache_bytes
+            .lock()
+            .map_err(|_| Error::msg("ERR wasm module cache lock poisoned"))?;
+        let previous_bytes = self.modules.get(name).map_or(0, |entry| entry.byte_len);
+        if previous_bytes == 0 && self.modules.len() >= MAX_WASM_MODULES {
+            return Err(Error::msg("ERR wasm module cache is full"));
+        }
+        let next_bytes = cache_bytes
+            .checked_sub(previous_bytes)
+            .and_then(|current| current.checked_add(bytes.len()))
+            .filter(|total| *total <= MAX_WASM_MODULE_CACHE_BYTES)
+            .ok_or_else(|| Error::msg("ERR wasm module cache is full"))?;
+        self.modules.insert(
+            name.to_string(),
+            StoredWasmModule {
+                module,
+                byte_len: bytes.len(),
+            },
+        );
+        *cache_bytes = next_bytes;
         Ok(())
     }
 
     pub fn delete(&self, name: &str) -> bool {
-        self.modules.remove(name).is_some()
+        let Ok(mut cache_bytes) = self.module_cache_bytes.lock() else {
+            return false;
+        };
+        let Some((_, removed)) = self.modules.remove(name) else {
+            return false;
+        };
+        *cache_bytes = cache_bytes.saturating_sub(removed.byte_len);
+        true
     }
 
     pub fn list(&self) -> Vec<String> {
@@ -59,13 +94,14 @@ impl WasmRegistry {
         db: Arc<Db>,
         name: &str,
         function: &str,
-        args: &[String],
+        args: &[Vec<u8>],
         read_only: bool,
     ) -> Result<Vec<WasmValue>> {
         let module = self
             .modules
             .get(name)
             .ok_or_else(|| Error::msg("ERR wasm module not found"))?
+            .module
             .clone();
         let mut store = Store::new(
             &self.engine,
@@ -88,11 +124,15 @@ impl WasmRegistry {
             .ok_or_else(|| Error::msg("ERR wasm function not found"))?;
         let func_type = func.ty(&store);
         let params = func_type.params().collect::<Vec<_>>();
-        let results = func_type.results();
+        let results = func_type.results().collect::<Vec<_>>();
+        if results.len() > WASM_MAX_RETURN_VALUES {
+            return Err(Error::msg("ERR wasm function has too many return values"));
+        }
         let inputs = prepare_call_inputs(&mut store, &instance, &params, args)?;
         let mut outputs = results
+            .iter()
             .map(|ty| {
-                Val::default_for_ty(&ty)
+                Val::default_for_ty(ty)
                     .ok_or_else(|| Error::msg("ERR wasm result type is not supported"))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -117,6 +157,7 @@ impl WasmRegistry {
             .modules
             .get(name)
             .ok_or_else(|| Error::msg("ERR wasm module not found"))?
+            .module
             .clone();
         let mut store = Store::new(
             &self.engine,
@@ -153,8 +194,16 @@ impl WasmRegistry {
             ));
         }
 
-        let rows = db.scan_string_prefix_async(prefix, limit).await;
+        let rows = db
+            .scan_string_prefix_bounded_async(
+                prefix,
+                limit,
+                WASM_SCAN_MAX_FIELD_BYTES,
+                MAX_FRAME_BYTES,
+            )
+            .await?;
         let mut matched = Vec::new();
+        let mut response_bytes = 16usize;
         for (key, value) in rows {
             if key.len() > WASM_SCAN_MAX_FIELD_BYTES || value.len() > WASM_SCAN_MAX_FIELD_BYTES {
                 continue;
@@ -176,6 +225,11 @@ impl WasmRegistry {
                 .await
                 .map_err(|error| Error::msg(format!("ERR wasm scan call failed: {error}")))?;
             if matches!(outputs[0], Val::I32(value) if value != 0) {
+                response_bytes = response_bytes
+                    .checked_add(key.len())
+                    .and_then(|bytes| bytes.checked_add(24))
+                    .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+                    .ok_or_else(|| Error::msg("ERR wasm scan response exceeds configured limit"))?;
                 matched.push(key);
             }
         }

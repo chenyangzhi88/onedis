@@ -1,7 +1,7 @@
 use anyhow::Error;
 
 use crate::{
-    cmds::stream::stream_entry_frame,
+    cmds::stream::{stream_reads_frame, text_arg, validate_count},
     frame::Frame,
     store::db::{Db, StreamId, StreamReadGroupStart},
 };
@@ -17,39 +17,30 @@ pub struct Xreadgroup {
 
 impl Xreadgroup {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        if frame.arg_len() < 7 || !frame.get_arg(1).unwrap().eq_ignore_ascii_case("GROUP") {
+        if frame.arg_len() < 7 || !text_arg(&frame, 1)?.eq_ignore_ascii_case("GROUP") {
             return Err(Error::msg("ERR syntax error"));
         }
-        let group = frame.get_arg(2).unwrap();
-        let consumer = frame.get_arg(3).unwrap();
+        let group = text_arg(&frame, 2)?;
+        let consumer = text_arg(&frame, 3)?;
         let mut count = None;
         let mut block_ms = None;
         let mut noack = false;
         let mut idx = 4;
         while idx < frame.arg_len() {
-            match frame.get_arg(idx).unwrap().to_ascii_uppercase().as_str() {
+            match text_arg(&frame, idx)?.to_ascii_uppercase().as_str() {
                 "COUNT" if idx + 1 < frame.arg_len() => {
-                    count = Some(
-                        frame
-                            .get_arg(idx + 1)
-                            .unwrap()
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                Error::msg("ERR value is not an integer or out of range")
-                            })?,
-                    );
+                    let parsed = text_arg(&frame, idx + 1)?
+                        .parse::<usize>()
+                        .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+                    validate_count(parsed)?;
+                    count = Some(parsed);
                     idx += 2;
                 }
                 "BLOCK" if idx + 1 < frame.arg_len() => {
-                    block_ms = Some(
-                        frame
-                            .get_arg(idx + 1)
-                            .unwrap()
-                            .parse::<u64>()
-                            .map_err(|_| {
-                                Error::msg("ERR value is not an integer or out of range")
-                            })?,
-                    );
+                    block_ms =
+                        Some(text_arg(&frame, idx + 1)?.parse::<u64>().map_err(|_| {
+                            Error::msg("ERR value is not an integer or out of range")
+                        })?);
                     idx += 2;
                 }
                 "NOACK" => {
@@ -70,8 +61,8 @@ impl Xreadgroup {
         let stream_count = remaining / 2;
         let mut streams = Vec::with_capacity(stream_count);
         for offset in 0..stream_count {
-            let key = frame.get_arg(idx + offset).unwrap();
-            let id_arg = frame.get_arg(idx + stream_count + offset).unwrap();
+            let key = text_arg(&frame, idx + offset)?;
+            let id_arg = text_arg(&frame, idx + stream_count + offset)?;
             let start = if id_arg == ">" {
                 StreamReadGroupStart::New
             } else {
@@ -100,17 +91,7 @@ impl Xreadgroup {
             self.noack,
         ) {
             Ok(streams) if streams.is_empty() => Ok(Frame::Null),
-            Ok(streams) => Ok(Frame::Array(
-                streams
-                    .into_iter()
-                    .map(|(key, entries)| {
-                        Frame::Array(vec![
-                            Frame::bulk_string(key),
-                            Frame::Array(entries.into_iter().map(stream_entry_frame).collect()),
-                        ])
-                    })
-                    .collect(),
-            )),
+            Ok(streams) => stream_reads_frame(streams),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
@@ -127,17 +108,7 @@ impl Xreadgroup {
             .await
         {
             Ok(streams) if streams.is_empty() => Ok(Frame::Null),
-            Ok(streams) => Ok(Frame::Array(
-                streams
-                    .into_iter()
-                    .map(|(key, entries)| {
-                        Frame::Array(vec![
-                            Frame::bulk_string(key),
-                            Frame::Array(entries.into_iter().map(stream_entry_frame).collect()),
-                        ])
-                    })
-                    .collect(),
-            )),
+            Ok(streams) => stream_reads_frame(streams),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

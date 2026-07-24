@@ -2,10 +2,12 @@ use std::{sync::Arc, time::Instant};
 
 use anyhow::{Error, Result};
 
-use crate::frame::Frame;
+use crate::frame::{Frame, MAX_ARRAY_ELEMENTS, MAX_FRAME_BYTES, MAX_FRAME_NODES};
 use crate::observability::metrics::{elapsed_us, global_metrics};
 use crate::store::db::Db;
 use crate::wasm::{WasmRegistry, WasmValue};
+
+const WASM_SCAN_MAX_ITEMS: usize = 100_000;
 
 mod apply;
 mod command_types;
@@ -87,7 +89,7 @@ mod tests {
             } => {
                 assert_eq!(name, "math");
                 assert_eq!(function, "add");
-                assert_eq!(args, vec!["1".to_string(), "2".to_string()]);
+                assert_eq!(args, vec![b"1".to_vec(), b"2".to_vec()]);
                 assert!(!read_only);
             }
             _ => panic!("expected WASM.CALL"),
@@ -183,10 +185,7 @@ mod tests {
             } => {
                 assert_eq!(name, "mod");
                 assert_eq!(function, "sum");
-                assert_eq!(
-                    args,
-                    vec!["k1".to_string(), "k2".to_string(), "a".to_string()]
-                );
+                assert_eq!(args, vec![b"k1".to_vec(), b"k2".to_vec(), b"a".to_vec()]);
                 assert!(read_only);
             }
             _ => panic!("expected FCALL_RO"),
@@ -226,7 +225,8 @@ mod tests {
             WasmValue::I64(2),
             WasmValue::F32(3.5),
             WasmValue::F64(4.5),
-        ]);
+        ])
+        .unwrap();
         let Frame::Array(items) = values else {
             panic!("expected value array");
         };
@@ -236,6 +236,33 @@ mod tests {
         );
         assert!(
             matches!(&items[3], Frame::Array(pair) if matches!(pair.as_slice(), [Frame::BulkString(kind), Frame::BulkString(value)] if kind == b"f64" && value == b"4.5"))
+        );
+    }
+
+    #[test]
+    fn wasm_parser_preserves_binary_call_arguments_and_bounds_scan_and_fcall() {
+        let command = WasmCommand::parse_from_frame(Frame::Array(vec![
+            Frame::bulk_string("WASM.CALL"),
+            Frame::bulk_string("mod"),
+            Frame::bulk_string("run"),
+            Frame::BulkString(vec![0, 0xff, 1]),
+        ]))
+        .unwrap();
+        assert!(matches!(
+            command,
+            WasmCommand::Call { args, .. } if args == vec![vec![0, 0xff, 1]]
+        ));
+
+        assert!(
+            WasmCommand::parse_from_frame(text_args(
+                &["WASM.SCAN", "mod", "filter", "", "100001",]
+            ))
+            .is_err()
+        );
+        let overflow = usize::MAX.to_string();
+        assert!(
+            WasmCommand::parse_from_frame(text_args(&["FCALL", "mod.run", overflow.as_str(),]))
+                .is_err()
         );
     }
 

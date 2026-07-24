@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
 use anyhow::{Error, Result};
 use mlua::{Lua, Table, Value, Variadic};
 
-use crate::frame::Frame;
+use crate::frame::{
+    Frame, MAX_ARRAY_ELEMENTS, MAX_ARRAY_NESTING_DEPTH, MAX_FRAME_BYTES, MAX_FRAME_NODES,
+};
 
 pub(super) fn command_frame_from_lua(lua: &Lua, args: Variadic<Value>) -> mlua::Result<Frame> {
     if args.is_empty() {
@@ -52,33 +56,93 @@ pub(super) fn frame_to_lua_value(lua: &Lua, frame: Frame) -> mlua::Result<Value>
 }
 
 pub(crate) fn lua_value_to_frame(value: Value) -> Result<Frame> {
+    let mut context = LuaFrameContext {
+        active_tables: HashSet::new(),
+        nodes: 0,
+        bytes: 0,
+    };
+    lua_value_to_frame_inner(value, &mut context, 0)
+}
+
+struct LuaFrameContext {
+    active_tables: HashSet<usize>,
+    nodes: usize,
+    bytes: usize,
+}
+
+fn lua_value_to_frame_inner(
+    value: Value,
+    context: &mut LuaFrameContext,
+    depth: usize,
+) -> Result<Frame> {
+    context.nodes = context
+        .nodes
+        .checked_add(1)
+        .filter(|nodes| *nodes <= MAX_FRAME_NODES)
+        .ok_or_else(lua_response_limit_error)?;
     match value {
         Value::Nil => Ok(Frame::Null),
         Value::Boolean(true) => Ok(Frame::Integer(1)),
         Value::Boolean(false) => Ok(Frame::Null),
         Value::Integer(value) => Ok(Frame::Integer(value)),
         Value::Number(value) => Ok(Frame::Integer(value as i64)),
-        Value::String(text) => Ok(Frame::BulkString(text.as_bytes().to_vec())),
-        Value::Table(table) => table_to_frame(table),
+        Value::String(text) => {
+            let bytes = text.as_bytes().to_vec();
+            context.bytes = context
+                .bytes
+                .checked_add(bytes.len().saturating_add(32))
+                .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+                .ok_or_else(lua_response_limit_error)?;
+            Ok(Frame::BulkString(bytes))
+        }
+        Value::Table(table) => table_to_frame(table, context, depth),
         _ => Ok(Frame::Null),
     }
 }
 
-fn table_to_frame(table: Table) -> Result<Frame> {
+fn table_to_frame(table: Table, context: &mut LuaFrameContext, depth: usize) -> Result<Frame> {
+    if depth >= MAX_ARRAY_NESTING_DEPTH {
+        return Err(lua_response_limit_error());
+    }
     if let Ok(err) = table.get::<String>("err") {
+        context.bytes = context
+            .bytes
+            .checked_add(err.len().saturating_add(32))
+            .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+            .ok_or_else(lua_response_limit_error)?;
         return Ok(Frame::Error(err));
     }
     if let Ok(ok) = table.get::<String>("ok") {
+        context.bytes = context
+            .bytes
+            .checked_add(ok.len().saturating_add(32))
+            .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+            .ok_or_else(lua_response_limit_error)?;
         if ok.eq_ignore_ascii_case("OK") {
             return Ok(Frame::Ok);
         }
         return Ok(Frame::SimpleString(ok));
     }
-    let len = table.len()? as usize;
+    let pointer = table.to_pointer() as usize;
+    if !context.active_tables.insert(pointer) {
+        return Err(Error::msg("ERR Lua table contains a cycle"));
+    }
+    let len = usize::try_from(table.len()?).map_err(|_| lua_response_limit_error())?;
+    if len > MAX_ARRAY_ELEMENTS {
+        context.active_tables.remove(&pointer);
+        return Err(lua_response_limit_error());
+    }
     let mut frames = Vec::with_capacity(len);
     for idx in 1..=len {
-        frames.push(lua_value_to_frame(table.get::<Value>(idx)?)?);
+        match lua_value_to_frame_inner(table.get::<Value>(idx)?, context, depth + 1) {
+            Ok(frame) => frames.push(frame),
+            Err(error) => {
+                context.active_tables.remove(&pointer);
+                return Err(error);
+            }
+        }
     }
+    context.active_tables.remove(&pointer);
     Ok(Frame::Array(frames))
 }
 
@@ -99,6 +163,10 @@ pub(crate) fn lua_error_to_anyhow(error: mlua::Error) -> Error {
 }
 
 pub(crate) fn format_lua_number(value: f64) -> String {
-    let text = format!("{value:.17}");
-    text.trim_end_matches('0').trim_end_matches('.').to_string()
+    let text = value.to_string();
+    if text == "-0" { "0".to_string() } else { text }
+}
+
+fn lua_response_limit_error() -> Error {
+    Error::msg("ERR Lua response exceeds configured limit")
 }

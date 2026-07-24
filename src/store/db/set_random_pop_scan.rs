@@ -261,25 +261,24 @@ impl Db {
         pattern_str: &str,
         count: usize,
     ) -> Result<(u64, Vec<String>), Error> {
-        let mut members = self.set_members(key)?;
-        if pattern_str != "*" {
-            members.retain(|member| pattern::is_match(member, pattern_str));
-        }
-
-        let start_index = cursor as usize;
-        let end_index = std::cmp::min(start_index + count, members.len());
-        let items = if start_index < members.len() {
-            members[start_index..end_index].to_vec()
-        } else {
-            Vec::new()
+        let Some(meta) = self.set_meta(key)? else {
+            return Ok((0, Vec::new()));
         };
-        let next_cursor = if end_index >= members.len() {
-            0
-        } else {
-            end_index as u64
-        };
-
-        Ok((next_cursor, items))
+        let prefix = set_member_prefix(self.db_index, key, meta.version);
+        let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+        let mut state = SetScanState::new(cursor, count);
+        self.store.scan_range_raw_visit(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            usize::MAX,
+            |member_key, _| {
+                let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
+                    return true;
+                };
+                state.visit(member, matcher.as_ref())
+            },
+        );
+        state.finish()
     }
 
     pub async fn set_scan_async(
@@ -289,24 +288,90 @@ impl Db {
         pattern_str: &str,
         count: usize,
     ) -> Result<(u64, Vec<String>), Error> {
-        let mut members = self.set_members_async(key).await?;
-        if pattern_str != "*" {
-            members.retain(|member| pattern::is_match(member, pattern_str));
+        let Some(meta) = self.set_meta_async(key).await? else {
+            return Ok((0, Vec::new()));
+        };
+        let prefix = set_member_prefix(self.db_index, key, meta.version);
+        let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+        let mut state = SetScanState::new(cursor, count);
+        self.store
+            .scan_range_raw_visit_async(
+                &prefix,
+                prefix_exclusive_upper_bound(&prefix),
+                usize::MAX,
+                |member_key, _| {
+                    let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
+                        return true;
+                    };
+                    state.visit(member, matcher.as_ref())
+                },
+            )
+            .await;
+        state.finish()
+    }
+}
+
+struct SetScanState {
+    cursor: u64,
+    position: u64,
+    count: usize,
+    bytes: usize,
+    members: Vec<String>,
+    stopped: bool,
+    error: Option<Error>,
+}
+
+impl SetScanState {
+    fn new(cursor: u64, count: usize) -> Self {
+        Self {
+            cursor,
+            position: 0,
+            count,
+            bytes: 32,
+            members: Vec::with_capacity(count.min(1024)),
+            stopped: false,
+            error: None,
         }
+    }
 
-        let start_index = cursor as usize;
-        let end_index = std::cmp::min(start_index + count, members.len());
-        let items = if start_index < members.len() {
-            members[start_index..end_index].to_vec()
-        } else {
-            Vec::new()
+    fn visit(&mut self, raw_member: &[u8], matcher: Option<&pattern::Matcher>) -> bool {
+        self.position = self.position.saturating_add(1);
+        if self.position <= self.cursor {
+            return true;
+        }
+        let Ok(member) = std::str::from_utf8(raw_member) else {
+            return true;
         };
-        let next_cursor = if end_index >= members.len() {
-            0
-        } else {
-            end_index as u64
-        };
+        if matcher.is_some_and(|matcher| !matcher.is_match(member)) {
+            return true;
+        }
+        let cost = member.len().saturating_add(32);
+        if self
+            .bytes
+            .checked_add(cost)
+            .is_none_or(|bytes| bytes > crate::frame::MAX_FRAME_BYTES)
+        {
+            if self.members.is_empty() {
+                self.error = Some(Error::msg("ERR response exceeds configured limit"));
+            } else {
+                self.position = self.position.saturating_sub(1);
+            }
+            self.stopped = true;
+            return false;
+        }
+        self.bytes += cost;
+        self.members.push(member.to_string());
+        if self.members.len() >= self.count {
+            self.stopped = true;
+            return false;
+        }
+        true
+    }
 
-        Ok((next_cursor, items))
+    fn finish(self) -> Result<(u64, Vec<String>), Error> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        Ok((if self.stopped { self.position } else { 0 }, self.members))
     }
 }

@@ -1,6 +1,7 @@
 use anyhow::Error;
 
 use crate::{
+    cmds::stream::text_arg,
     frame::Frame,
     store::db::{Db, StreamId},
 };
@@ -20,15 +21,13 @@ impl Xack {
         }
         let mut ids = Vec::with_capacity(frame.arg_len() - 3);
         for idx in 3..frame.arg_len() {
-            ids.push(
-                StreamId::parse(&frame.get_arg(idx).unwrap()).ok_or_else(|| {
-                    Error::msg("ERR Invalid stream ID specified as stream command argument")
-                })?,
-            );
+            ids.push(StreamId::parse(&text_arg(&frame, idx)?).ok_or_else(|| {
+                Error::msg("ERR Invalid stream ID specified as stream command argument")
+            })?);
         }
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
-            group: frame.get_arg(2).unwrap(),
+            key: text_arg(&frame, 1)?,
+            group: text_arg(&frame, 2)?,
             ids,
         })
     }

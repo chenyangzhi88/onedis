@@ -50,8 +50,13 @@ impl Sunionstore {
                 }
             }
         }
-        db.insert(destination, Structure::Set(result_set.clone()));
-        Ok(Frame::Integer(result_set.len() as i64))
+        let len = result_set.len();
+        if result_set.is_empty() {
+            db.delete_key(&destination);
+        } else {
+            db.insert(destination, Structure::Set(result_set));
+        }
+        Ok(Frame::Integer(len as i64))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {

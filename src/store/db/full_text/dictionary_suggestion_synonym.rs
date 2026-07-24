@@ -1,0 +1,391 @@
+use super::*;
+impl Db {
+    pub fn fulltext_dict_add(&self, dict: &str, terms: Vec<String>) -> Result<Frame, Error> {
+        let mut inserted = 0i64;
+        let mut batch = WriteBatch::new();
+        for term in terms {
+            let normalized = term.to_lowercase();
+            let key = fulltext_dict_term_key(self.db_index, dict, &normalized);
+            if self.store.get_raw(&key).is_none() {
+                inserted += 1;
+            }
+            batch.put(&key, normalized.as_bytes());
+        }
+        self.write_batch_if_not_empty(&batch);
+        Ok(Frame::Integer(inserted))
+    }
+
+    pub async fn fulltext_dict_add_async(
+        &self,
+        dict: &str,
+        terms: Vec<String>,
+    ) -> Result<Frame, Error> {
+        let dict = dict.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_dict_add(&dict, terms))
+            .await
+    }
+
+    pub fn fulltext_dict_del(&self, dict: &str, terms: Vec<String>) -> Result<Frame, Error> {
+        let mut deleted = 0i64;
+        let mut batch = WriteBatch::new();
+        for term in terms {
+            let key = fulltext_dict_term_key(self.db_index, dict, &term.to_lowercase());
+            if self.store.get_raw(&key).is_some() {
+                deleted += 1;
+                batch.delete(&key);
+            }
+        }
+        self.write_batch_if_not_empty(&batch);
+        Ok(Frame::Integer(deleted))
+    }
+
+    pub async fn fulltext_dict_del_async(
+        &self,
+        dict: &str,
+        terms: Vec<String>,
+    ) -> Result<Frame, Error> {
+        let dict = dict.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_dict_del(&dict, terms))
+            .await
+    }
+
+    pub fn fulltext_dict_dump(&self, dict: &str) -> Result<Frame, Error> {
+        Ok(Frame::Array(
+            self.fulltext_dict_terms(dict)?
+                .into_iter()
+                .map(Frame::bulk_string)
+                .collect(),
+        ))
+    }
+
+    pub async fn fulltext_dict_dump_async(&self, dict: &str) -> Result<Frame, Error> {
+        let dict = dict.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_dict_dump(&dict))
+            .await
+    }
+
+    pub fn fulltext_spellcheck(
+        &self,
+        index: &str,
+        query: &str,
+        distance: usize,
+        include: Vec<FullTextSpellcheckDictionary>,
+        exclude: Vec<FullTextSpellcheckDictionary>,
+    ) -> Result<Frame, Error> {
+        let index = self.resolve_fulltext_index(index)?;
+        let mut vocabulary = self.fulltext_index_vocabulary(&index)?;
+        for dictionary in include {
+            vocabulary.extend(self.fulltext_selected_dict_terms(&dictionary)?);
+        }
+        for dictionary in exclude {
+            for term in self.fulltext_selected_dict_terms(&dictionary)? {
+                vocabulary.remove(&term);
+            }
+        }
+        let mut out = Vec::new();
+        for token in fulltext_tokenize(query) {
+            if vocabulary.contains(&token) {
+                continue;
+            }
+            let mut suggestions = vocabulary
+                .iter()
+                .filter_map(|candidate| {
+                    let dist = fulltext_edit_distance(&token, candidate);
+                    if dist <= distance {
+                        Some((dist, candidate.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            suggestions
+                .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+            suggestions.truncate(5);
+            if suggestions.is_empty() {
+                continue;
+            }
+            out.push(Frame::Array(vec![
+                Frame::bulk_string("TERM"),
+                Frame::bulk_string(token),
+                Frame::Array(
+                    suggestions
+                        .into_iter()
+                        .map(|(dist, term)| {
+                            Frame::Array(vec![
+                                Frame::bulk_string(format_fulltext_spellcheck_score(dist)),
+                                Frame::bulk_string(term),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ]));
+        }
+        Ok(Frame::Array(out))
+    }
+
+    pub async fn fulltext_spellcheck_async(
+        &self,
+        index: &str,
+        query: &str,
+        distance: usize,
+        include: Vec<FullTextSpellcheckDictionary>,
+        exclude: Vec<FullTextSpellcheckDictionary>,
+    ) -> Result<Frame, Error> {
+        let index = index.to_string();
+        let query = query.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_spellcheck(&index, &query, distance, include, exclude)
+        })
+        .await
+    }
+
+    fn fulltext_selected_dict_terms(
+        &self,
+        dictionary: &FullTextSpellcheckDictionary,
+    ) -> Result<HashSet<String>, Error> {
+        let mut stored = self.fulltext_dict_terms(&dictionary.name)?;
+        if dictionary.terms.is_empty() {
+            return Ok(stored);
+        }
+        let selected = dictionary
+            .terms
+            .iter()
+            .map(|term| term.to_lowercase())
+            .collect::<HashSet<_>>();
+        stored.retain(|term| selected.contains(term));
+        Ok(stored)
+    }
+
+    pub fn fulltext_sugadd(
+        &self,
+        key: &str,
+        string: &str,
+        score: f64,
+        incr: bool,
+        payload: Option<Vec<u8>>,
+    ) -> Result<Frame, Error> {
+        if !score.is_finite() {
+            return Err(Error::msg("ERR invalid suggestion score"));
+        }
+        let storage_key = fulltext_suggest_key(self.db_index, key, string);
+        let existed = self.store.get_raw(&storage_key);
+        let old = existed
+            .as_ref()
+            .map(|raw| decode_record::<FullTextSuggestRecord>(raw))
+            .transpose()?;
+        let updated_score = if incr {
+            old.as_ref().map(|record| record.score).unwrap_or(0.0) + score
+        } else {
+            score
+        };
+        if !updated_score.is_finite() {
+            return Err(Error::msg("ERR invalid suggestion score"));
+        }
+        let record = FullTextSuggestRecord {
+            score: updated_score,
+            payload: payload.or_else(|| old.and_then(|record| record.payload)),
+        };
+        let mut batch = WriteBatch::new();
+        batch.put(&storage_key, &encode_record(&record)?);
+        self.write_batch_if_not_empty(&batch);
+        Ok(Frame::Integer(if existed.is_some() { 0 } else { 1 }))
+    }
+
+    pub async fn fulltext_sugadd_async(
+        &self,
+        key: &str,
+        string: &str,
+        score: f64,
+        incr: bool,
+        payload: Option<Vec<u8>>,
+    ) -> Result<Frame, Error> {
+        let key = key.to_string();
+        let string = string.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_sugadd(&key, &string, score, incr, payload)
+        })
+        .await
+    }
+
+    pub fn fulltext_sugget(
+        &self,
+        key: &str,
+        prefix: &str,
+        fuzzy: bool,
+        with_scores: bool,
+        with_payloads: bool,
+        max: usize,
+    ) -> Result<Frame, Error> {
+        let prefix_norm = prefix.to_lowercase();
+        let mut entries = Vec::new();
+        for (raw_key, raw) in self
+            .store
+            .scan_prefix_raw(&fulltext_suggest_prefix(self.db_index, key))
+        {
+            let Some(string) = fulltext_suggest_string_from_key(self.db_index, key, &raw_key)
+            else {
+                continue;
+            };
+            let string_norm = string.to_lowercase();
+            if !(string_norm.starts_with(&prefix_norm)
+                || fuzzy && fulltext_edit_distance(&prefix_norm, &string_norm) <= 1)
+            {
+                continue;
+            }
+            entries.push((string, decode_record::<FullTextSuggestRecord>(&raw)?));
+        }
+        entries.sort_by(|left, right| {
+            right
+                .1
+                .score
+                .partial_cmp(&left.1.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let mut out = Vec::new();
+        for (string, record) in entries.into_iter().take(max.max(1)) {
+            out.push(Frame::bulk_string(string));
+            if with_scores {
+                out.push(Frame::bulk_string(format_fulltext_suggestion_score(
+                    record.score,
+                )));
+            }
+            if with_payloads {
+                out.push(record.payload.map(Frame::BulkString).unwrap_or(Frame::Null));
+            }
+        }
+        Ok(Frame::Array(out))
+    }
+
+    pub async fn fulltext_sugget_async(
+        &self,
+        key: &str,
+        prefix: &str,
+        fuzzy: bool,
+        with_scores: bool,
+        with_payloads: bool,
+        max: usize,
+    ) -> Result<Frame, Error> {
+        let key = key.to_string();
+        let prefix = prefix.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_sugget(&key, &prefix, fuzzy, with_scores, with_payloads, max)
+        })
+        .await
+    }
+
+    pub fn fulltext_sugdel(&self, key: &str, string: &str) -> Result<Frame, Error> {
+        let storage_key = fulltext_suggest_key(self.db_index, key, string);
+        let existed = self.store.get_raw(&storage_key).is_some();
+        if existed {
+            let mut batch = WriteBatch::new();
+            batch.delete(&storage_key);
+            self.write_batch_if_not_empty(&batch);
+        }
+        Ok(Frame::Integer(i64::from(existed)))
+    }
+
+    pub async fn fulltext_sugdel_async(&self, key: &str, string: &str) -> Result<Frame, Error> {
+        let key = key.to_string();
+        let string = string.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_sugdel(&key, &string))
+            .await
+    }
+
+    pub fn fulltext_suglen(&self, key: &str) -> Result<Frame, Error> {
+        Ok(Frame::Integer(
+            self.store
+                .scan_prefix_raw(&fulltext_suggest_prefix(self.db_index, key))
+                .len() as i64,
+        ))
+    }
+
+    pub async fn fulltext_suglen_async(&self, key: &str) -> Result<Frame, Error> {
+        let key = key.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_suglen(&key))
+            .await
+    }
+
+    pub fn fulltext_synupdate(
+        &self,
+        index: &str,
+        group: &str,
+        terms: Vec<String>,
+        skip_initial_scan: bool,
+    ) -> Result<Frame, Error> {
+        let index = self.resolve_fulltext_index(index)?;
+        if terms.is_empty() {
+            return Err(Error::msg("ERR SYNUPDATE requires terms"));
+        }
+        let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, &index);
+        let _lifecycle_guard = lifecycle_lock
+            .write()
+            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+        let record = FullTextSynonymGroup {
+            terms: terms.into_iter().map(|term| term.to_lowercase()).collect(),
+        };
+        let mut batch = WriteBatch::new();
+        batch.put(
+            &fulltext_syn_key(self.db_index, &index, group),
+            &encode_record(&record)?,
+        );
+        self.write_batch_if_not_empty(&batch);
+        if skip_initial_scan {
+            if let Some(runtime) = self.fulltext_runtimes.get(self.db_index, &index) {
+                runtime
+                    .write()
+                    .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+                    .synonyms =
+                    load_fulltext_synonyms_from_store(&self.store, self.db_index, &index)?;
+            }
+        } else {
+            self.fulltext_rebuild_index(&index)?;
+        }
+        Ok(Frame::Ok)
+    }
+
+    pub async fn fulltext_synupdate_async(
+        &self,
+        index: &str,
+        group: &str,
+        terms: Vec<String>,
+        skip_initial_scan: bool,
+    ) -> Result<Frame, Error> {
+        let index = index.to_string();
+        let group = group.to_string();
+        self.run_blocking_store_task(move |db| {
+            db.fulltext_synupdate(&index, &group, terms, skip_initial_scan)
+        })
+        .await
+    }
+
+    pub fn fulltext_syndump(&self, index: &str) -> Result<Frame, Error> {
+        let index = self.resolve_fulltext_index(index)?;
+        let mut groups = Vec::new();
+        for (raw_key, raw) in self
+            .store
+            .scan_prefix_raw(&fulltext_syn_prefix(self.db_index, &index))
+        {
+            let Some(group) = fulltext_syn_group_from_key(self.db_index, &index, &raw_key) else {
+                continue;
+            };
+            let record = decode_record::<FullTextSynonymGroup>(&raw)?;
+            groups.push((group, record.terms));
+        }
+        groups.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut out = Vec::new();
+        for (group, terms) in groups {
+            out.push(Frame::bulk_string(group));
+            out.push(Frame::Array(
+                terms.into_iter().map(Frame::bulk_string).collect(),
+            ));
+        }
+        Ok(Frame::Array(out))
+    }
+
+    pub async fn fulltext_syndump_async(&self, index: &str) -> Result<Frame, Error> {
+        let index = index.to_string();
+        self.run_blocking_store_task(move |db| db.fulltext_syndump(&index))
+            .await
+    }
+}

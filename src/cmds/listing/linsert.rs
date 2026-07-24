@@ -1,6 +1,6 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{cmds::listing::text_arg, frame::Frame, store::db::Db};
 
 pub struct Linsert {
     key: String,
@@ -28,10 +28,10 @@ impl Linsert {
         };
 
         Ok(Self {
-            key: frame.get_arg(1).unwrap(),
+            key: text_arg(&frame, 1)?,
             before,
-            pivot: frame.get_arg(3).unwrap(),
-            element: frame.get_arg(4).unwrap(),
+            pivot: text_arg(&frame, 3)?,
+            element: text_arg(&frame, 4)?,
         })
     }
 

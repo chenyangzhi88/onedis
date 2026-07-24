@@ -12,6 +12,10 @@ impl Handler {
         if let Some(bytes) = self.try_apply_pubsub_or_monitor(&command).await? {
             return Ok(bytes);
         }
+        let command = match command {
+            Command::Echo(echo) => return Ok(echo.into_response_bytes()),
+            command => command,
+        };
         if let Command::Exec(_) = command {
             return self
                 .execute_transaction_async()
@@ -147,7 +151,7 @@ impl Handler {
                 let user = self.session.user().to_string();
                 let authorizer: crate::lua::LuaCommandAuthorizer =
                     Arc::new(move |command| session_manager.acl_allows(&user, command));
-                lua.apply_authorized(&db, authorizer)
+                lua.apply_authorized_async(&db, authorizer).await
             }
             _ => {
                 let db = self.session.get_db().clone();

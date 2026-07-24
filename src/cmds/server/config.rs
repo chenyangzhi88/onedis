@@ -1,7 +1,7 @@
 use anyhow::Error;
 use std::collections::HashSet;
 
-use crate::{args::ResolvedArgs, frame::Frame};
+use crate::{args::ResolvedArgs, frame::Frame, tools::pattern::Matcher};
 
 pub struct Config {
     subcommand: ConfigSubcommand,
@@ -70,11 +70,15 @@ fn config_help() -> Vec<Frame> {
 
 fn config_get(args: &ResolvedArgs, patterns: &[String]) -> Vec<Frame> {
     let entries = config_entries(args);
+    let patterns = patterns
+        .iter()
+        .map(|pattern| Matcher::new(pattern))
+        .collect::<Vec<_>>();
     let mut seen = HashSet::new();
     let mut result = Vec::new();
 
     for (name, value) in entries {
-        if patterns.iter().any(|pattern| glob_match(pattern, &name)) && seen.insert(name.clone()) {
+        if patterns.iter().any(|pattern| pattern.is_match(&name)) && seen.insert(name.clone()) {
             result.push(Frame::bulk_string(name));
             result.push(Frame::bulk_string(value));
         }
@@ -113,45 +117,6 @@ fn trim_trailing_zero(value: f64) -> String {
         }
     }
     text
-}
-
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern_chars: Vec<char> = pattern.chars().collect();
-    let text_chars: Vec<char> = text.chars().collect();
-    glob_match_impl(&pattern_chars, 0, &text_chars, 0)
-}
-
-fn glob_match_impl(pattern: &[char], pi: usize, text: &[char], ti: usize) -> bool {
-    if pi == pattern.len() {
-        return ti == text.len();
-    }
-
-    match pattern[pi] {
-        '*' => {
-            let mut next_ti = ti;
-            while next_ti <= text.len() {
-                if glob_match_impl(pattern, pi + 1, text, next_ti) {
-                    return true;
-                }
-                next_ti += 1;
-            }
-            false
-        }
-        '?' => {
-            if ti == text.len() {
-                false
-            } else {
-                glob_match_impl(pattern, pi + 1, text, ti + 1)
-            }
-        }
-        ch => {
-            if ti < text.len() && ch == text[ti] {
-                glob_match_impl(pattern, pi + 1, text, ti + 1)
-            } else {
-                false
-            }
-        }
-    }
 }
 
 #[cfg(test)]

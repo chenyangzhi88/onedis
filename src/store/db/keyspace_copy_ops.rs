@@ -18,7 +18,9 @@ impl Db {
             key: target_key,
         } = target;
         if source_db_index == target_db_index && source_key == target_key {
-            return Ok(false);
+            return Err(Error::msg(
+                "ERR source and destination objects are the same",
+            ));
         }
 
         let source_store = store.for_db_index(source_db_index);
@@ -91,7 +93,9 @@ impl Db {
             key: target_key,
         } = target;
         if source_db_index == target_db_index && source_key == target_key {
-            return Ok(false);
+            return Err(Error::msg(
+                "ERR source and destination objects are the same",
+            ));
         }
 
         let source_store = store.for_db_index(source_db_index);

@@ -37,6 +37,16 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
     assert!(parse_err(&["JSON.SET", "doc", "$", "1", "BAD"]).contains("syntax"));
     assert!(parse_err(&["JSON.GET"]).contains("wrong"));
     assert!(parse_err(&["JSON.TYPE", "doc", "$", "extra"]).contains("wrong"));
+    let invalid_path = Frame::Array(vec![
+        Frame::bulk_string("JSON.DEL".to_string()),
+        Frame::bulk_string("doc".to_string()),
+        Frame::BulkString(vec![0xff]),
+    ]);
+    assert!(Command::parse_from_frame(invalid_path).is_err());
+    assert!(matches!(
+        apply(&db, &["JSON.TYPE", "doc", "$"]),
+        Frame::SimpleString(kind) if kind == "object"
+    ));
 
     for idx in 0..7 {
         assert!(matches!(
@@ -94,11 +104,70 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
         apply_async(&db, &["COPY", "scan:0", "scan:copy", "REPLACE"]).await,
         Frame::Integer(1)
     ));
+    match onedis_server::command_dispatch::handle_command(&db, parse(&["COPY", "scan:0", "scan:0"]))
+    {
+        Err(error) => assert!(error.to_string().contains("same")),
+        Ok(_) => panic!("COPY with the same source and destination must fail"),
+    }
+    match onedis_server::command_dispatch::handle_command_async(
+        &db,
+        parse(&["COPY", "scan:0", "scan:0", "REPLACE"]),
+    )
+    .await
+    {
+        Err(error) => assert!(error.to_string().contains("same")),
+        Ok(_) => panic!("COPY with the same source and destination must fail"),
+    }
     assert!(parse_err(&["COPY", "a"]).contains("wrong"));
     assert!(parse_err(&["COPY", "a", "b", "DB"]).contains("syntax"));
     assert!(parse_err(&["COPY", "a", "b", "DB", "bad"]).contains("out of range"));
     assert!(parse_err(&["COPY", "a", "b", "REPLACE", "REPLACE"]).contains("syntax"));
     assert!(parse_err(&["COPY", "a", "b", "NOPE"]).contains("syntax"));
+
+    assert!(matches!(
+        apply(&db, &["HSET", "rename:hash", "f", "v"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(&db, &["PEXPIRE", "rename:hash", "60000"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(&db, &["RENAME", "rename:hash", "rename:target"]),
+        Frame::Ok
+    ));
+    assert!(matches!(
+        apply(&db, &["HGET", "rename:target", "f"]),
+        Frame::BulkString(value) if value == b"v"
+    ));
+    assert!(matches!(
+        apply(&db, &["PTTL", "rename:target"]),
+        Frame::Integer(ttl) if ttl > 0
+    ));
+    assert!(matches!(
+        apply(&db, &["RENAMENX", "rename:target", "rename:target"]),
+        Frame::Integer(0)
+    ));
+
+    assert!(matches!(
+        apply(&db, &["SET", "expire:opts", "v"]),
+        Frame::Ok
+    ));
+    assert!(matches!(
+        apply(&db, &["EXPIRE", "expire:opts", "100", "NX", "NX"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(&db, &["EXPIRE", "expire:opts", "200", "XX", "GT"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(&db, &["EXPIRE", "expire:opts", "50", "LT", "XX"]),
+        Frame::Integer(1)
+    ));
+    assert!(parse_err(&["EXPIRE", "expire:opts", "50", "GT", "LT"]).contains("not compatible"));
+    assert!(parse_err(&["EXPIRE", "expire:opts", "50", "NX", "GT"]).contains("not compatible"));
+    assert!(parse_err(&["SCAN", "0", "COUNT", "1000001"]).contains("response limit"));
 
     assert!(matches!(
         apply(&db, &["MOVE", "scan:1", "0"]),
@@ -160,7 +229,7 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "KILL", "ID", "123"]),
-        Frame::Ok
+        Frame::Integer(0)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "UNKNOWN"]),

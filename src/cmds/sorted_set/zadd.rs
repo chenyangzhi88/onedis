@@ -107,11 +107,11 @@ impl Zadd {
 
     fn response(&self, outcome: ZsetAddOutcome) -> Frame {
         if self.options.increment {
-            if outcome.applied {
-                Frame::bulk_string(outcome.score.unwrap().to_string())
-            } else {
-                Frame::Null
-            }
+            outcome
+                .score
+                .filter(|_| outcome.applied)
+                .map(|score| Frame::bulk_string(score.to_string()))
+                .unwrap_or(Frame::Null)
         } else if self.ch {
             Frame::Integer(outcome.changed as i64)
         } else {

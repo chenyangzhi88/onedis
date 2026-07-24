@@ -40,6 +40,15 @@ fn command(args: &[&str]) -> Command {
     .expect("failed to parse command")
 }
 
+fn command_bytes(args: &[&[u8]]) -> Command {
+    Command::parse_from_frame(Frame::Array(
+        args.iter()
+            .map(|arg| Frame::BulkString(arg.to_vec()))
+            .collect(),
+    ))
+    .expect("failed to parse command")
+}
+
 fn apply(db: &Db, args: &[&str]) -> Frame {
     onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
@@ -119,7 +128,41 @@ fn ft_dict_persists_and_feeds_spellcheck() {
         &reopened,
         &["FT.SPELLCHECK", "idx", "rediz", "TERMS", "INCLUDE", "terms"],
     );
-    assert!(spell.to_string().contains("redis"));
+    let spell_text = spell.to_string();
+    assert!(spell_text.contains("TERM rediz"));
+    assert!(spell_text.contains("redis"));
+
+    assert_eq!(
+        apply(&reopened, &["FT.DICTADD", "terms", "valkey"]).to_string(),
+        "1"
+    );
+    let unfiltered = apply(
+        &reopened,
+        &[
+            "FT.SPELLCHECK",
+            "idx",
+            "valkei",
+            "TERMS",
+            "INCLUDE",
+            "terms",
+        ],
+    );
+    assert!(unfiltered.to_string().contains("valkey"));
+    let filtered = apply(
+        &reopened,
+        &[
+            "FT.SPELLCHECK",
+            "idx",
+            "valkei",
+            "TERMS",
+            "INCLUDE",
+            "terms",
+            "search",
+            "DIALECT",
+            "4",
+        ],
+    );
+    assert!(!filtered.to_string().contains("valkey"));
 
     assert_eq!(
         apply(&reopened, &["FT.DICTDEL", "terms", "search"]).to_string(),
@@ -163,6 +206,31 @@ fn ft_suggest_scores_payloads_fuzzy_and_delete_work() {
     assert!(fuzzy.contains("redis"));
     assert_eq!(apply(&db, &["FT.SUGDEL", "ac", "redbird"]).to_string(), "1");
     assert_eq!(apply(&db, &["FT.SUGLEN", "ac"]).to_string(), "1");
+
+    let binary_payload = [0xff, 0x00, 0x01];
+    assert!(matches!(
+        onedis_server::command_dispatch::handle_command(
+            &db,
+            command_bytes(&[
+                b"FT.SUGADD",
+                b"binary",
+                b"value",
+                b"1",
+                b"PAYLOAD",
+                &binary_payload,
+            ]),
+        )
+        .unwrap(),
+        Frame::Integer(1)
+    ));
+    let binary = apply(&db, &["FT.SUGGET", "binary", "val", "WITHPAYLOADS"]);
+    let Frame::Array(binary) = binary else {
+        panic!("expected suggestion array");
+    };
+    let Some(Frame::BulkString(payload)) = binary.get(1) else {
+        panic!("expected binary suggestion payload");
+    };
+    assert_eq!(payload.as_slice(), binary_payload);
 }
 
 #[test]
@@ -202,4 +270,49 @@ fn ft_syn_updates_future_queries_and_dumps_groups() {
     assert!(dump.contains("g1"));
     assert!(dump.contains("quick"));
     assert!(dump.contains("fast"));
+}
+
+#[test]
+fn ft_syn_skip_initial_scan_only_affects_subsequent_writes() {
+    let (_dir, db) = make_db();
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "FT.CREATE",
+                "idx",
+                "ON",
+                "HASH",
+                "PREFIX",
+                "1",
+                "doc:",
+                "SCHEMA",
+                "body",
+                "TEXT"
+            ],
+        ),
+        Frame::Ok
+    ));
+    apply(&db, &["HSET", "doc:old", "body", "quick fox"]);
+    wait_total(&db, &["FT.SEARCH", "idx", "quick"], 1);
+
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "FT.SYNUPDATE",
+                "idx",
+                "g1",
+                "SKIPINITIALSCAN",
+                "quick",
+                "fast",
+            ],
+        ),
+        Frame::Ok
+    ));
+    assert_eq!(total(&apply(&db, &["FT.SEARCH", "idx", "fast"])), Some(0));
+
+    apply(&db, &["HSET", "doc:new", "body", "quick dog"]);
+    wait_total(&db, &["FT.SEARCH", "idx", "fast"], 1);
+    assert_eq!(total(&apply(&db, &["FT.SEARCH", "idx", "quick"])), Some(2));
 }

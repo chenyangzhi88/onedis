@@ -224,8 +224,393 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
     assert!(parse_err(&["LPOS", "list", "a", "RANK", "0"]).contains("RANK"));
     assert!(parse_err(&["SCAN", "0", "MATCH"]).contains("MATCH"));
     assert!(parse_err(&["SCAN", "0", "COUNT", "0"]).contains("syntax"));
-    assert!(parse_err(&["HSCAN", "h", "0", "COUNT"]).contains("COUNT"));
+    assert!(parse_err(&["HSCAN", "h", "0", "COUNT"]).contains("syntax"));
     assert!(parse_err(&["HSCAN", "h", "0", "COUNT", "0"]).contains("syntax"));
     assert!(parse_err(&["BLMPOP", "-1", "1", "list", "LEFT"]).contains("negative"));
     assert!(parse_err(&["MSET", "only-key"]).contains("wrong"));
+}
+
+#[tokio::test]
+async fn hash_commands_preserve_binary_values_ttls_and_bounded_scan_semantics() {
+    let db = test_db("command-semantics-hash-regressions");
+    let binary = vec![0, 0xff, b'\r', b'\n', 1, 2, 3];
+    let hset = Frame::Array(vec![
+        Frame::bulk_string("HSET"),
+        Frame::bulk_string("binary-hash"),
+        Frame::bulk_string("payload"),
+        Frame::BulkString(binary.clone()),
+    ]);
+    let command = Command::parse_from_frame(hset).unwrap();
+    assert!(matches!(
+        onedis_server::command_dispatch::handle_command(&db, command).unwrap(),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(&db, &["HGET", "binary-hash", "payload"]),
+        Frame::BulkString(value) if value == binary
+    ));
+    assert!(matches!(
+        apply(&db, &["HSTRLEN", "binary-hash", "payload"]),
+        Frame::Integer(7)
+    ));
+    assert!(matches!(
+        apply(&db, &["HVALS", "binary-hash"]),
+        Frame::Array(values)
+            if values.iter().any(|value| matches!(value, Frame::BulkString(bytes) if bytes == &binary))
+    ));
+    assert!(matches!(
+        apply(&db, &["HGETALL", "binary-hash"]),
+        Frame::Array(values)
+            if values.iter().any(|value| matches!(value, Frame::BulkString(bytes) if bytes == &binary))
+    ));
+    let hsetex = Frame::Array(vec![
+        Frame::bulk_string("HSETEX"),
+        Frame::bulk_string("binary-expiring-hash"),
+        Frame::bulk_string("PX"),
+        Frame::bulk_string("60000"),
+        Frame::bulk_string("FIELDS"),
+        Frame::bulk_string("1"),
+        Frame::bulk_string("payload"),
+        Frame::BulkString(binary.clone()),
+    ]);
+    let command = Command::parse_from_frame(hsetex).unwrap();
+    assert!(matches!(
+        onedis_server::command_dispatch::handle_command_async(&db, command)
+            .await
+            .unwrap(),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HGETDEL",
+                "binary-expiring-hash",
+                "FIELDS",
+                "1",
+                "payload"
+            ]
+        ),
+        Frame::Array(values)
+            if matches!(values.as_slice(), [Frame::BulkString(value)] if value == &binary)
+    ));
+
+    assert!(matches!(
+        apply(
+            &db,
+            &["HSET", "ttl-hash", "integer", "1", "float", "1.5"]
+        ),
+        Frame::Integer(2)
+    ));
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HPEXPIRE",
+                "ttl-hash",
+                "60000",
+                "FIELDS",
+                "2",
+                "integer",
+                "float"
+            ]
+        ),
+        Frame::Array(_)
+    ));
+    assert!(matches!(
+        apply(&db, &["HINCRBY", "ttl-hash", "integer", "2"]),
+        Frame::Integer(3)
+    ));
+    assert!(matches!(
+        apply_async(&db, &["HINCRBYFLOAT", "ttl-hash", "float", "0.5"]).await,
+        Frame::BulkString(value) if value == b"2"
+    ));
+    let ttls = array(apply(
+        &db,
+        &[
+            "HPTTL",
+            "ttl-hash",
+            "FIELDS",
+            "2",
+            "integer",
+            "float",
+        ],
+    ));
+    assert!(
+        ttls.iter()
+            .all(|ttl| matches!(ttl, Frame::Integer(value) if *value > 0))
+    );
+
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HSET",
+                "scan-hash",
+                "first",
+                "value-1",
+                "second",
+                "value-2"
+            ]
+        ),
+        Frame::Integer(2)
+    ));
+    let scan = array(apply(
+        &db,
+        &["HSCAN", "scan-hash", "0", "COUNT", "10", "NOVALUES"],
+    ));
+    let fields = array(scan[1].clone());
+    assert_eq!(fields.len(), 2);
+    assert!(fields.iter().all(
+        |field| matches!(field, Frame::BulkString(value) if value == b"first" || value == b"second")
+    ));
+    let malformed_pattern = apply(&db, &["HSCAN", "scan-hash", "0", "MATCH", "["]);
+    assert!(matches!(
+        malformed_pattern,
+        Frame::Array(values) if matches!(&values[1], Frame::Array(fields) if fields.is_empty())
+    ));
+
+    assert!(parse_err(&["HSCAN", "scan-hash", "bad"]).contains("invalid cursor"));
+    assert!(
+        parse_err(&["HSCAN", "scan-hash", "0", "COUNT", "500001"])
+            .contains("configured response limit")
+    );
+    assert!(
+        parse_err(&["HRANDFIELD", "scan-hash", "-9223372036854775808"])
+            .contains("configured response limit")
+    );
+    assert!(
+        parse_err(&[
+            "HSETEX",
+            "ttl-hash",
+            "EX",
+            "9223372036854775807",
+            "FIELDS",
+            "1",
+            "new",
+            "value",
+        ])
+        .contains("invalid expire")
+    );
+
+    assert!(matches!(
+        apply(&db, &["HSET", "delayed-expire", "field", "value"]),
+        Frame::Integer(1)
+    ));
+    let delayed = parse(&[
+        "HPEXPIRE",
+        "delayed-expire",
+        "50",
+        "FIELDS",
+        "1",
+        "field",
+    ]);
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    assert!(matches!(
+        onedis_server::command_dispatch::handle_command(&db, delayed).unwrap(),
+        Frame::Array(values) if matches!(values.as_slice(), [Frame::Integer(1)])
+    ));
+    assert_eq!(
+        bulk(apply(&db, &["HGET", "delayed-expire", "field"])),
+        "value"
+    );
+
+    assert!(matches!(
+        apply(&db, &["HPEXPIRE", "delayed-expire", "1", "FIELDS", "1", "field"]),
+        Frame::Array(_)
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(matches!(
+        apply(&db, &["HSET", "delayed-expire", "field", "new"]),
+        Frame::Integer(1)
+    ));
+
+    assert!(parse_err(&["HPEXPIRE", "ttl-hash", "-1", "FIELDS", "1", "integer"])
+        .contains("invalid expire"));
+
+    assert!(matches!(
+        apply(&db, &["HSET", "duplicate-getdel", "field", "value"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HGETDEL",
+                "duplicate-getdel",
+                "FIELDS",
+                "2",
+                "field",
+                "field",
+            ],
+        ),
+        Frame::Array(values)
+            if matches!(
+                values.as_slice(),
+                [Frame::BulkString(value), Frame::Null] if value == b"value"
+            )
+    ));
+
+    assert!(matches!(
+        apply(&db, &["HSET", "duplicate-expire", "field", "value"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HPEXPIRE",
+                "duplicate-expire",
+                "60000",
+                "NX",
+                "FIELDS",
+                "2",
+                "field",
+                "field",
+            ],
+        ),
+        Frame::Array(values)
+            if matches!(
+                values.as_slice(),
+                [Frame::Integer(1), Frame::Integer(0)]
+            )
+    ));
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HPEXPIREAT",
+                "duplicate-expire",
+                "1",
+                "NX",
+                "FIELDS",
+                "1",
+                "field",
+            ],
+        ),
+        Frame::Array(values) if matches!(values.as_slice(), [Frame::Integer(0)])
+    ));
+    assert_eq!(
+        bulk(apply(&db, &["HGET", "duplicate-expire", "field"])),
+        "value"
+    );
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HPERSIST",
+                "duplicate-expire",
+                "FIELDS",
+                "2",
+                "field",
+                "field",
+            ],
+        ),
+        Frame::Array(values)
+            if matches!(
+                values.as_slice(),
+                [Frame::Integer(1), Frame::Integer(-1)]
+            )
+    ));
+    assert!(matches!(
+        apply(
+            &db,
+            &[
+                "HPEXPIRE",
+                "duplicate-expire",
+                "0",
+                "FIELDS",
+                "2",
+                "field",
+                "field",
+            ],
+        ),
+        Frame::Array(values)
+            if matches!(
+                values.as_slice(),
+                [Frame::Integer(2), Frame::Integer(-2)]
+            )
+    ));
+    assert!(matches!(
+        apply(&db, &["EXISTS", "duplicate-expire"]),
+        Frame::Integer(0)
+    ));
+
+    assert!(matches!(
+        apply(&db, &["HSET", "past-getex", "field", "value"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply_async(
+            &db,
+            &[
+                "HGETEX",
+                "past-getex",
+                "PXAT",
+                "1",
+                "FIELDS",
+                "2",
+                "field",
+                "field",
+            ],
+        )
+        .await,
+        Frame::Array(values)
+            if matches!(
+                values.as_slice(),
+                [Frame::BulkString(value), Frame::Null] if value == b"value"
+            )
+    ));
+    assert!(matches!(
+        apply(&db, &["EXISTS", "past-getex"]),
+        Frame::Integer(0)
+    ));
+
+    assert!(matches!(
+        apply(&db, &["HSET", "past-setex", "keep", "value"]),
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply_async(
+            &db,
+            &[
+                "HSETEX",
+                "past-setex",
+                "PX",
+                "0",
+                "FIELDS",
+                "1",
+                "drop",
+                "value",
+            ],
+        )
+        .await,
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(&db, &["HEXISTS", "past-setex", "drop"]),
+        Frame::Integer(0)
+    ));
+    assert_eq!(bulk(apply(&db, &["HGET", "past-setex", "keep"])), "value");
+    assert!(matches!(
+        apply_async(
+            &db,
+            &[
+                "HSETEX",
+                "past-setex",
+                "PXAT",
+                "1",
+                "FIELDS",
+                "1",
+                "keep",
+                "replacement",
+            ],
+        )
+        .await,
+        Frame::Integer(1)
+    ));
+    assert!(matches!(
+        apply(&db, &["EXISTS", "past-setex"]),
+        Frame::Integer(0)
+    ));
 }

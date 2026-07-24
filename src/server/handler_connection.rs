@@ -9,8 +9,7 @@ impl Handler {
         stream: TcpStream,
         args: Arc<ResolvedArgs>,
     ) -> Self {
-        let args_ref = args.as_ref();
-        let certification = args_ref.requirepass.is_none();
+        let certification = session_manager.acl_user_is_nopass("default");
         let db = db_manager.get_db(0);
         let peer_addr = stream
             .peer_addr()
@@ -22,12 +21,13 @@ impl Handler {
             .unwrap_or_else(|_| "unknown:0".to_string());
         let connection = Connection::new(stream);
         let session = Session::new_with_addresses(certification, db, peer_addr, local_addr);
-        session_manager.create_session(&session);
+        let client_control = session_manager.create_session(&session);
         let metrics = crate::observability::metrics::global_metrics();
         metrics.connection_opened();
 
         Handler {
             session,
+            client_control,
             connection,
             session_manager,
             db_manager,
@@ -40,42 +40,28 @@ impl Handler {
     }
 
     pub fn login(&mut self, username: Option<&str>, input_requirepass: &str) -> Result<(), Error> {
-        if let Some(username) = username {
-            if username.eq_ignore_ascii_case("default")
-                && let Some(requirepass) = self.args.requirepass.as_deref()
-                && requirepass != input_requirepass
-            {
-                return Err(Error::msg(
-                    "WRONGPASS invalid username-password pair or user is disabled.",
-                ));
-            }
-            if self
-                .session_manager
-                .acl_authenticate(username, input_requirepass)
-            {
-                self.session.set_user(username.to_string());
-                self.session.set_certification(true);
-                self.session_manager.update_session(&self.session);
-                return Ok(());
-            }
+        let username = username.unwrap_or("default");
+        if username == "default" && self.session_manager.acl_user_is_nopass(username) {
+            return Err(Error::msg(
+                "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?",
+            ));
+        }
+        if !self
+            .session_manager
+            .acl_authenticate(username, input_requirepass)
+        {
             return Err(Error::msg(
                 "WRONGPASS invalid username-password pair or user is disabled.",
             ));
         }
-        if let Some(ref requirepass) = self.args.requirepass {
-            if requirepass == input_requirepass {
-                self.session.set_certification(true);
-                self.session_manager.update_session(&self.session);
-                return Ok(());
-            }
-            Err(Error::msg("ERR invalid password"))
-        } else {
-            Ok(())
-        }
+        self.session.set_user(username.to_string());
+        self.session.set_certification(true);
+        self.session_manager.update_session(&self.session);
+        Ok(())
     }
 
     pub fn change_db(&mut self, idx: usize) -> Result<(), Error> {
-        if self.args.databases - 1 < idx {
+        if idx >= self.args.databases {
             return Err(Error::msg("ERR DB index is out of range"));
         }
         self.session.set_current_db(idx);
@@ -92,7 +78,12 @@ impl Handler {
 
         loop {
             log::debug!("Waiting for bytes");
-            let bytes = match self.connection.read_bytes().await {
+            let read_result = tokio::select! {
+                biased;
+                _ = self.client_control.wait_killed() => return,
+                result = self.connection.read_bytes() => result,
+            };
+            let bytes = match read_result {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let message = error.to_string();
@@ -158,7 +149,11 @@ impl Handler {
                 frames_since_flush += 1;
                 if self.session.is_in_transaction() {
                     let command_name = frame.get_arg(0).unwrap_or_default().to_uppercase();
-                    if command_name != "EXEC" && command_name != "DISCARD" {
+                    if command_name != "EXEC"
+                        && command_name != "DISCARD"
+                        && command_name != "MULTI"
+                        && command_name != "WATCH"
+                    {
                         self.queue_transaction_frame(frame, &mut response_bytes);
                         continue;
                     }
@@ -182,9 +177,7 @@ impl Handler {
                 match command {
                     Command::Auth(_) => {}
                     _ => {
-                        if self.args.requirepass.is_some()
-                            && !self.session.get_certification()
-                        {
+                        if !self.session.get_certification() {
                             self.metrics.record_rejection("noauth");
                             self.metrics.record_command(
                                 command_name,
@@ -192,8 +185,7 @@ impl Handler {
                                 Some("noauth"),
                                 self.slow_command_threshold_us(),
                             );
-                            let frame =
-                                Frame::Error("NOAUTH Authentication required.".to_string());
+                            let frame = Frame::Error("NOAUTH Authentication required.".to_string());
                             response_bytes.extend(frame.as_bytes());
                             continue;
                         }
@@ -275,7 +267,11 @@ impl Handler {
                             close_after_reply = true;
                             break;
                         }
-                        response_bytes.extend(bytes);
+                        if response_bytes.is_empty() {
+                            response_bytes = bytes;
+                        } else {
+                            response_bytes.extend(bytes);
+                        }
                     }
                     Err(e) => {
                         self.metrics.record_command(
@@ -289,6 +285,10 @@ impl Handler {
                     }
                 }
                 self.session_manager.update_session(&self.session);
+                if self.client_control.is_killed() {
+                    close_after_reply = true;
+                    break;
+                }
                 if let Some(line) = self_monitor_line {
                     if !response_bytes.is_empty() {
                         let response = std::mem::take(&mut response_bytes);
@@ -336,10 +336,7 @@ impl Handler {
 
 impl Drop for Handler {
     fn drop(&mut self) {
-        if self
-            .session_manager
-            .remove_session(self.session.get_id())
-        {
+        if self.session_manager.remove_session(self.session.get_id()) {
             self.metrics.connection_closed();
         }
     }

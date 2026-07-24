@@ -262,6 +262,10 @@ fn ft_search_results_filters_keys_fields_sort_and_limit() {
     let result = array(apply(&db, &["FT.SEARCH", "idx", "*", "LIMIT", "0", "0"]));
     assert_eq!(integer(&result[0]), 3);
     assert_eq!(result.len(), 1);
+
+    let result = array(apply(&db, &["FT.SEARCH", "idx", "*", "RETURN", "0"]));
+    assert_eq!(integer(&result[0]), 3);
+    assert_eq!(result.len(), 4);
 }
 
 #[test]

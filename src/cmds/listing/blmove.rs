@@ -1,6 +1,10 @@
 use anyhow::Error;
 
-use crate::{cmds::listing::lmove::ListSide, frame::Frame, store::db::Db};
+use crate::{
+    cmds::listing::{lmove::ListSide, text_arg},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Blmove {
     pub(crate) source: String,
@@ -17,9 +21,7 @@ impl Blmove {
                 "ERR wrong number of arguments for 'blmove' command",
             ));
         }
-        let timeout_secs = frame
-            .get_arg(5)
-            .unwrap()
+        let timeout_secs = text_arg(&frame, 5)?
             .parse::<f64>()
             .map_err(|_| Error::msg("ERR timeout is not a float or out of range"))?;
         if !timeout_secs.is_finite() {
@@ -29,10 +31,10 @@ impl Blmove {
             return Err(Error::msg("ERR timeout is negative"));
         }
         Ok(Self {
-            source: frame.get_arg(1).unwrap(),
-            destination: frame.get_arg(2).unwrap(),
-            source_side: ListSide::parse(&frame.get_arg(3).unwrap())?,
-            destination_side: ListSide::parse(&frame.get_arg(4).unwrap())?,
+            source: text_arg(&frame, 1)?,
+            destination: text_arg(&frame, 2)?,
+            source_side: ListSide::parse(&text_arg(&frame, 3)?)?,
+            destination_side: ListSide::parse(&text_arg(&frame, 4)?)?,
             timeout_secs,
         })
     }

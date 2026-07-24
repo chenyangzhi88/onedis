@@ -60,25 +60,41 @@ pub(crate) fn parse_expire_condition(
     start_idx: usize,
     command_name: &str,
 ) -> Result<ExpireCondition, Error> {
-    let mut condition = ExpireCondition::Always;
+    let mut nx = false;
+    let mut xx = false;
+    let mut gt = false;
+    let mut lt = false;
     for option in args.iter().skip(start_idx) {
-        let next = match option.to_ascii_uppercase().as_str() {
-            "NX" => ExpireCondition::Nx,
-            "XX" => ExpireCondition::Xx,
-            "GT" => ExpireCondition::Gt,
-            "LT" => ExpireCondition::Lt,
+        match option.to_ascii_uppercase().as_str() {
+            "NX" => nx = true,
+            "XX" => xx = true,
+            "GT" => gt = true,
+            "LT" => lt = true,
             _ => {
                 return Err(Error::msg(format!(
                     "ERR unsupported option for '{command_name}' command"
                 )));
             }
-        };
-        if condition != ExpireCondition::Always {
-            return Err(Error::msg(format!(
-                "ERR NX, XX, GT, and LT options at the same time are not compatible for '{command_name}' command"
-            )));
         }
-        condition = next;
     }
-    Ok(condition)
+    if nx && (xx || gt || lt) {
+        return Err(Error::msg(format!(
+            "ERR NX and XX, GT or LT options at the same time are not compatible for '{command_name}' command"
+        )));
+    }
+    if gt && lt {
+        return Err(Error::msg(format!(
+            "ERR GT and LT options at the same time are not compatible for '{command_name}' command"
+        )));
+    }
+    Ok(match (nx, xx, gt, lt) {
+        (true, false, false, false) => ExpireCondition::Nx,
+        (false, true, true, false) => ExpireCondition::XxGt,
+        (false, true, false, true) => ExpireCondition::XxLt,
+        (false, true, false, false) => ExpireCondition::Xx,
+        (false, false, true, false) => ExpireCondition::Gt,
+        (false, false, false, true) => ExpireCondition::Lt,
+        (false, false, false, false) => ExpireCondition::Always,
+        _ => unreachable!("incompatible expiration options were rejected"),
+    })
 }

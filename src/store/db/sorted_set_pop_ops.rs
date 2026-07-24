@@ -25,6 +25,15 @@ impl Db {
         count: usize,
     ) -> Result<Vec<ZsetEntry>, Error> {
         let _write_guard = self.set_write_lock(key).lock().await;
+        self.zset_pop_async_unlocked(key, min, count).await
+    }
+
+    async fn zset_pop_async_unlocked(
+        &self,
+        key: &str,
+        min: bool,
+        count: usize,
+    ) -> Result<Vec<ZsetEntry>, Error> {
         let mut entries = self.zset_all_entries_async(key).await?;
         if !min {
             entries.reverse();
@@ -62,11 +71,22 @@ impl Db {
         min: bool,
         count: usize,
     ) -> Result<ZsetMultiPopResult, Error> {
+        let mut shards = keys
+            .iter()
+            .map(|key| set_write_lock_shard(self.db_index, key))
+            .collect::<Vec<_>>();
+        shards.sort_unstable();
+        shards.dedup();
+        let mut guards = Vec::with_capacity(shards.len());
+        for shard in shards {
+            guards.push(self.set_write_locks[shard].lock().await);
+        }
+
         for key in keys {
             if self.zset_card_async(key).await? == 0 {
                 continue;
             }
-            let entries = self.zset_pop_async(key, min, count).await?;
+            let entries = self.zset_pop_async_unlocked(key, min, count).await?;
             if !entries.is_empty() {
                 return Ok(Some((key.clone(), entries)));
             }

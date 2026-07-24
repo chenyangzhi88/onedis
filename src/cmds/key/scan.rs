@@ -1,4 +1,7 @@
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    frame::{Frame, MAX_ARRAY_ELEMENTS},
+    store::db::Db,
+};
 use anyhow::Error;
 
 pub struct Scan {
@@ -38,6 +41,9 @@ impl Scan {
                 if parsed == 0 {
                     return Err(Error::msg("ERR syntax error"));
                 }
+                if parsed > MAX_ARRAY_ELEMENTS as u64 {
+                    return Err(Error::msg("ERR COUNT exceeds configured response limit"));
+                }
                 count = Some(parsed);
                 i += 2;
             } else if arg == "TYPE" {
@@ -66,30 +72,8 @@ impl Scan {
         let count = usize::try_from(self.count.unwrap_or(10))
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
 
-        // 获取所有匹配的键
-        let mut matched_keys: Vec<String> = db.keys(&pattern);
-        if let Some(type_filter) = self.type_filter {
-            matched_keys.retain(|key| db.type_name_readonly(key) == type_filter);
-        }
-
-        // 根据游标确定返回的键
-        let start_index =
-            usize::try_from(self.cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
-        let end_index = start_index.saturating_add(count).min(matched_keys.len());
-
-        // 获取要返回的键
-        let keys_to_return = if start_index < matched_keys.len() {
-            matched_keys[start_index..end_index].to_vec()
-        } else {
-            vec![]
-        };
-
-        // 计算下一个游标
-        let next_cursor = if end_index >= matched_keys.len() {
-            0 // 如果已经遍历完所有键，返回0表示结束
-        } else {
-            end_index as u64 // 否则返回下一个位置作为游标
-        };
+        let (next_cursor, keys_to_return) =
+            db.scan_keys_page(self.cursor, &pattern, count, self.type_filter.as_deref())?;
 
         // 构造返回结果：第一个元素是游标，第二个元素是键数组
         let keys_frames: Vec<Frame> = keys_to_return.into_iter().map(Frame::bulk_string).collect();
@@ -105,29 +89,9 @@ impl Scan {
         let pattern = self.pattern.unwrap_or_else(|| "*".to_string());
         let count = usize::try_from(self.count.unwrap_or(10))
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
-        let mut matched_keys: Vec<String> = db.keys_async(&pattern).await;
-        if let Some(type_filter) = self.type_filter {
-            let mut filtered = Vec::with_capacity(matched_keys.len());
-            for key in matched_keys {
-                if db.type_name_readonly_async(&key).await == type_filter {
-                    filtered.push(key);
-                }
-            }
-            matched_keys = filtered;
-        }
-        let start_index =
-            usize::try_from(self.cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
-        let end_index = start_index.saturating_add(count).min(matched_keys.len());
-        let keys_to_return = if start_index < matched_keys.len() {
-            matched_keys[start_index..end_index].to_vec()
-        } else {
-            vec![]
-        };
-        let next_cursor = if end_index >= matched_keys.len() {
-            0
-        } else {
-            end_index as u64
-        };
+        let (next_cursor, keys_to_return) = db
+            .scan_keys_page_async(self.cursor, &pattern, count, self.type_filter.as_deref())
+            .await?;
         let keys_frames: Vec<Frame> = keys_to_return.into_iter().map(Frame::bulk_string).collect();
         Ok(Frame::Array(vec![
             Frame::bulk_string(next_cursor.to_string()),

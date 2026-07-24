@@ -58,7 +58,11 @@ impl Db {
         let _guard = write_lock
             .lock()
             .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (expire_ms, version, meta) = self.read_vector_meta(index)?;
+        let (expire_ms, version, meta) = match self.read_vector_meta(index) {
+            Ok(value) => value,
+            Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(false),
+            Err(err) => return Err(err),
+        };
         let key = vector_doc_key(self.db_index, index, version, id);
         let Some(raw) = self.store.get_raw(&key) else {
             return Ok(false);
@@ -79,17 +83,8 @@ impl Db {
             schema: &meta.schema,
             doc_id: &doc.id,
         };
-        delete_attr_index_entries_to_batch(
-            &mut batch,
-            &attr_context,
-            &old_attrs,
-        );
-        put_attr_index_entries_to_batch(
-            &mut batch,
-            &attr_context,
-            doc.doc_version,
-            &new_attrs,
-        )?;
+        delete_attr_index_entries_to_batch(&mut batch, &attr_context, &old_attrs);
+        put_attr_index_entries_to_batch(&mut batch, &attr_context, doc.doc_version, &new_attrs)?;
         doc.attrs_json = new_attrs_json;
         put_vector_marker_to_batch(
             &mut batch,

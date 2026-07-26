@@ -18,6 +18,10 @@ impl Db {
         options: VectorSearchOptions,
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let (_, version, meta) = self.read_vector_meta(index)?;
+        if options.ef.is_some_and(|ef| ef == 0 || ef > MAX_VECTOR_HNSW_EF) {
+            return Err(Error::msg("ERR invalid vector EF"));
+        }
+        TopKVectorResults::new(options.k, vector_search_memory_budget_bytes())?;
         validate_vector(query, meta.dim as usize)?;
         validate_vector_for_distance(query, meta.distance)?;
         let filters = options

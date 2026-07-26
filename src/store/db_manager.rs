@@ -13,9 +13,9 @@ use tokio::sync::Notify;
 
 use crate::{
     args::ResolvedArgs,
-    store::db::{Db, KeyMutationTracker},
+    store::db::{Db, KeyMutationTracker, VectorRuntimeRegistry},
     store::kv_store::KvStore,
-    store::ttl::{TYPE_HASH, TYPE_JSON, TtlConfig, TtlManager, VersionCounter},
+    store::ttl::{TYPE_HASH, TYPE_JSON, TYPE_VECTOR, TtlConfig, TtlManager, VersionCounter},
 };
 use common::types::options::{FileConfig, Options};
 
@@ -124,6 +124,7 @@ impl DatabaseManager {
         let version_counter = Arc::new(VersionCounter::new());
         let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
         let mutation_tracker = Arc::new(KeyMutationTracker::default());
+        let vector_runtimes = Arc::new(VectorRuntimeRegistry::default());
         let list_notify = Arc::new(Notify::new());
         let zset_notify = Arc::new(Notify::new());
         let stream_notify = Arc::new(Notify::new());
@@ -135,15 +136,25 @@ impl DatabaseManager {
 
         let mut dbs = Vec::new();
         for id in 0..args.databases {
-            let db = Arc::new(Db::new_with_mutation_tracker(
+            let db = Arc::new(Db::new_with_mutation_tracker_and_vector_runtimes(
                 id as u16,
                 store.clone(),
                 version_counter.clone(),
                 ttl_manager.clone(),
                 mutation_tracker.clone(),
+                vector_runtimes.clone(),
             ));
             dbs.push(db);
         }
+
+        let weak_vector_runtimes = Arc::downgrade(&vector_runtimes);
+        ttl_manager.set_expire_observer(Arc::new(move |db_index, key, type_tag, version| {
+            if type_tag == TYPE_VECTOR
+                && let Some(vector_runtimes) = weak_vector_runtimes.upgrade()
+            {
+                vector_runtimes.remove_expired(db_index, key, version);
+            }
+        }));
 
         let fulltext_dbs = dbs.iter().map(Arc::downgrade).collect::<Vec<Weak<Db>>>();
         ttl_manager.set_expire_hook(Arc::new(move |db_index, key, type_tag, batch| {

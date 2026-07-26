@@ -176,11 +176,12 @@ impl Db {
             Some(&self.ttl_manager),
         )?;
         if copied {
-            let raw_key = self.key_layout.main_key(target_db_index, target_key);
-            self.record_external_key_mutation(target_db_index, raw_key.clone());
+            let logical_key = target_key.as_bytes().to_vec();
+            self.record_external_key_mutation(target_db_index, logical_key.clone());
             if !self.store.is_transactional() {
-                self.non_transactional_view_for_db(target_db_index)
-                    .fulltext_reconcile_committed_keys(&[raw_key], false)?;
+                let target_db = self.non_transactional_view_for_db(target_db_index);
+                target_db.reconcile_vector_runtime_index(target_db_index, target_key);
+                target_db.fulltext_reconcile_committed_keys(&[logical_key], false)?;
             }
         }
         Ok(copied)
@@ -229,12 +230,14 @@ impl Db {
         )
         .await?;
         if copied {
-            let raw_key = self.key_layout.main_key(target_db_index, target_key);
-            self.record_external_key_mutation(target_db_index, raw_key.clone());
+            let logical_key = target_key.as_bytes().to_vec();
+            self.record_external_key_mutation(target_db_index, logical_key.clone());
             if !self.store.is_transactional() {
+                let target_key = target_key.to_string();
                 self.run_blocking_store_task(move |db| {
-                    db.non_transactional_view_for_db(target_db_index)
-                        .fulltext_reconcile_committed_keys(&[raw_key], false)
+                    let target_db = db.non_transactional_view_for_db(target_db_index);
+                    target_db.reconcile_vector_runtime_index(target_db_index, &target_key);
+                    target_db.fulltext_reconcile_committed_keys(&[logical_key], false)
                 })
                 .await?;
             }

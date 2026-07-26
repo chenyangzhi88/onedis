@@ -16,13 +16,19 @@ impl Db {
     }
 
     pub fn watch_version_snapshot(&self, key: &str) -> (u64, u64) {
-        self.mutation_tracker.enable();
+        self.mutation_tracker
+            .register_key(self.db_index, self.mk(key));
         self.expire_if_needed(key);
         let key_version = self
             .mutation_tracker
             .key_version(self.db_index, &self.mk(key));
         let db_version = self.mutation_tracker.db_version(self.db_index);
         (key_version, db_version)
+    }
+
+    pub fn release_watch(&self, key: &str) {
+        self.mutation_tracker
+            .unregister_key(self.db_index, &self.mk(key));
     }
 
     pub fn watch_version_changed(&self, key: &str, key_version: u64, db_version: u64) -> bool {

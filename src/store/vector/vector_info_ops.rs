@@ -39,7 +39,7 @@ impl Db {
             }
             Err(err) => return Err(err),
         };
-        let prefix = vector_doc_prefix(self.db_index, index, version);
+        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         let mut ids = self
             .store
             .scan_prefix_raw(&prefix)
@@ -61,7 +61,7 @@ impl Db {
             Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(()),
             Err(err) => return Err(err),
         };
-        let prefix = vector_doc_prefix(self.db_index, index, version);
+        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         let mut result = Ok(());
         self.store.scan_range_raw_visit(
             &prefix,
@@ -98,7 +98,7 @@ impl Db {
             }
             Err(err) => return Err(err),
         };
-        let prefix = vector_doc_prefix(self.db_index, index, version);
+        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         let mut ids = self
             .store
             .scan_prefix_raw_async(&prefix)
@@ -130,7 +130,7 @@ impl Db {
             }
             Err(err) => return Err(err),
         };
-        let prefix = vector_doc_prefix(self.db_index, index, version);
+        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         let upper = super::prefix_exclusive_upper_bound(&prefix);
         let mut random = VectorRandom::new();
 

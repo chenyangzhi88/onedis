@@ -239,24 +239,52 @@ pub(in crate::store::db) struct ListMeta {
 
 #[derive(Default)]
 pub struct KeyMutationTracker {
-    enabled: AtomicBool,
     clock: AtomicU64,
-    key_versions: DashMap<(u16, Vec<u8>), u64>,
+    key_versions: DashMap<(u16, Vec<u8>), WatchedKeyMutation>,
     db_versions: DashMap<u16, u64>,
 }
 
+#[derive(Clone, Copy)]
+struct WatchedKeyMutation {
+    version: u64,
+    watchers: usize,
+}
+
 impl KeyMutationTracker {
-    pub(in crate::store::db) fn enable(&self) {
-        self.enabled.store(true, Ordering::Release);
+    pub(in crate::store::db) fn register_key(&self, db_index: u16, key: Vec<u8>) {
+        match self.key_versions.entry((db_index, key)) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().watchers += 1;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(WatchedKeyMutation {
+                    version: self.clock.load(Ordering::Acquire),
+                    watchers: 1,
+                });
+            }
+        }
     }
 
-    pub(in crate::store::db) fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Acquire)
+    pub(in crate::store::db) fn unregister_key(&self, db_index: u16, key: &[u8]) {
+        let map_key = (db_index, key.to_vec());
+        if let Entry::Occupied(mut entry) = self.key_versions.entry(map_key) {
+            if entry.get().watchers > 1 {
+                entry.get_mut().watchers -= 1;
+            } else {
+                entry.remove();
+            }
+        }
     }
 
     pub(in crate::store::db) fn bump_key(&self, db_index: u16, key: Vec<u8>) {
-        let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
-        self.key_versions.insert((db_index, key), version);
+        if let Some(mut entry) = self.key_versions.get_mut(&(db_index, key)) {
+            let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
+            entry.version = version;
+        }
+    }
+
+    pub(in crate::store::db) fn has_watched_keys(&self) -> bool {
+        !self.key_versions.is_empty()
     }
 
     pub(in crate::store::db) fn bump_db(&self, db_index: u16) {
@@ -267,7 +295,7 @@ impl KeyMutationTracker {
     pub fn key_version(&self, db_index: u16, key: &[u8]) -> u64 {
         self.key_versions
             .get(&(db_index, key.to_vec()))
-            .map(|entry| *entry)
+            .map(|entry| entry.version)
             .unwrap_or(0)
     }
 
@@ -276,6 +304,11 @@ impl KeyMutationTracker {
             .get(&db_index)
             .map(|entry| *entry)
             .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(in crate::store::db) fn tracked_key_count(&self) -> usize {
+        self.key_versions.len()
     }
 }
 

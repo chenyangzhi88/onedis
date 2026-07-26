@@ -89,6 +89,32 @@ fn persist_removes_ttl_index_entry() {
     assert_eq!(db.ttl_millis("session"), -1);
 }
 
+#[test]
+fn sync_persist_does_not_resurrect_an_expired_key() {
+    let db = test_db();
+    db.insert_string("expired-persist".to_string(), "value".to_string(), Some(1));
+    sleep(Duration::from_millis(5));
+
+    assert!(!db.persist("expired-persist"));
+    assert!(!db.exists("expired-persist"));
+}
+
+#[tokio::test]
+async fn async_persist_does_not_resurrect_an_expired_key() {
+    let db = test_db();
+    db.insert_string_async(
+        "expired-persist-async".to_string(),
+        "value".to_string(),
+        Some(1),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    assert!(!db.persist_async("expired-persist-async").await);
+    assert!(!db.exists("expired-persist-async"));
+}
+
 #[tokio::test]
 async fn removing_the_last_collection_item_removes_its_ttl_index_entry() {
     let db = test_db();
@@ -156,7 +182,8 @@ fn transactional_copy_and_move_commit_cross_db_changes() {
         ttl_manager.clone(),
         tracker.clone(),
     );
-    let db1 = Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker);
+    let db1 =
+        Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker.clone());
 
     db0.insert_string_ref("copy-source", "copy-value");
     let copy_txn = db0.transactional_view().unwrap();
@@ -183,8 +210,8 @@ fn transactional_copy_and_move_commit_cross_db_changes() {
 }
 
 #[test]
-fn watch_key_versions_are_isolated_by_database() {
-    let root = test_root("onedis-watch-db-isolation-test");
+fn transactional_move_conflict_does_not_partially_commit_target_db() {
+    let root = test_root("onedis-cross-db-transaction-conflict-test");
     let db_path = root.join("db");
     let wal_dir = root.join("wal");
     std::fs::create_dir_all(&db_path).unwrap();
@@ -202,12 +229,77 @@ fn watch_key_versions_are_isolated_by_database() {
     );
     let db1 = Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker);
 
+    db1.insert_string_ref("source", "old");
+    let transaction = db1.transactional_view().unwrap();
+    assert!(transaction.move_key_to_db(0, "source").unwrap());
+
+    db1.insert_string_ref("source", "new");
+    assert!(transaction.commit_transaction().is_err());
+    assert_eq!(db0.get_string("source").unwrap(), None);
+    assert_eq!(db1.get_string("source").unwrap(), Some("new".to_string()));
+}
+
+#[test]
+fn watch_key_versions_are_isolated_by_database() {
+    let root = test_root("onedis-watch-db-isolation-test");
+    let db_path = root.join("db");
+    let wal_dir = root.join("wal");
+    std::fs::create_dir_all(&db_path).unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let store = KvStore::new(db_path, wal_dir, 1);
+    let version_counter = Arc::new(VersionCounter::new());
+    let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
+    let tracker = Arc::new(KeyMutationTracker::default());
+    let db0 = Db::new_with_mutation_tracker(
+        0,
+        store.clone(),
+        version_counter.clone(),
+        ttl_manager.clone(),
+        tracker.clone(),
+    );
+    let db1 =
+        Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker.clone());
+
     let (key_version, db_version) = db0.watch_version_snapshot("same-key");
     db1.insert_string_ref("same-key", "db-one");
     assert!(!db0.watch_version_changed("same-key", key_version, db_version));
 
     db0.insert_string_ref("same-key", "db-zero");
     assert!(db0.watch_version_changed("same-key", key_version, db_version));
+    db0.release_watch("same-key");
+    assert_eq!(tracker.tracked_key_count(), 0);
+}
+
+#[test]
+fn watch_tracker_only_retains_currently_watched_keys() {
+    let root = test_root("onedis-watch-tracker-lifecycle-test");
+    let db_path = root.join("db");
+    let wal_dir = root.join("wal");
+    std::fs::create_dir_all(&db_path).unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let store = KvStore::new(db_path, wal_dir, 1);
+    let version_counter = Arc::new(VersionCounter::new());
+    let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
+    let tracker = Arc::new(KeyMutationTracker::default());
+    let db = Db::new_with_mutation_tracker(0, store, version_counter, ttl_manager, tracker.clone());
+
+    for index in 0..128 {
+        db.insert_string_ref(&format!("before:{index}"), "value");
+    }
+    assert_eq!(tracker.tracked_key_count(), 0);
+
+    let snapshot = db.watch_version_snapshot("watched");
+    assert_eq!(tracker.tracked_key_count(), 1);
+    for index in 0..128 {
+        db.insert_string_ref(&format!("unrelated:{index}"), "value");
+    }
+    assert_eq!(tracker.tracked_key_count(), 1);
+    assert!(!db.watch_version_changed("watched", snapshot.0, snapshot.1));
+
+    db.insert_string_ref("watched", "changed");
+    assert!(db.watch_version_changed("watched", snapshot.0, snapshot.1));
+    db.release_watch("watched");
+    assert_eq!(tracker.tracked_key_count(), 0);
 }
 
 #[test]
@@ -226,6 +318,58 @@ fn ttl_rebuild_loads_persisted_ttl_namespace() {
 
     assert_eq!(rebuilt.index_size(), 1);
     assert!(recovered_counter.current() >= db.version_counter.current());
+}
+
+#[test]
+fn flushdb_does_not_remove_global_version_reservation() {
+    let root = test_root("onedis-flushdb-version-reservation-test");
+    let db_path = root.join("db");
+    let wal_dir = root.join("wal");
+    std::fs::create_dir_all(&db_path).unwrap();
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let store = KvStore::new(db_path, wal_dir, 1);
+    let version_counter = Arc::new(VersionCounter::new());
+    let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
+    let tracker = Arc::new(KeyMutationTracker::default());
+    let db0 = Db::new_with_mutation_tracker(
+        0,
+        store.clone(),
+        version_counter.clone(),
+        ttl_manager.clone(),
+        tracker.clone(),
+    );
+    let db1 = Db::new_with_mutation_tracker(
+        1,
+        store.clone(),
+        version_counter.clone(),
+        ttl_manager,
+        tracker,
+    );
+
+    db0.hash_set("db0-hash", "field", "value").unwrap();
+    db1.hash_set("db1-hash", "field", "value").unwrap();
+    let allocated = version_counter.current();
+    assert!(allocated >= 2);
+    db0.flushdb();
+    db0.insert_string_ref("after-flush", "value");
+    let reopened_db0 = Db::new(
+        0,
+        store.clone(),
+        version_counter.clone(),
+        TtlManager::new(store.clone(), TtlConfig::default()),
+    );
+    assert_eq!(
+        reopened_db0.get_string("after-flush").unwrap(),
+        Some("value".to_string())
+    );
+
+    let recovered = VersionCounter::new();
+    TtlManager::new(store, TtlConfig::default()).rebuild_from_store(2, &recovered);
+    assert!(recovered.current() >= allocated);
+    assert_eq!(
+        db1.hash_get("db1-hash", "field").unwrap(),
+        Some("value".to_string())
+    );
 }
 
 #[test]

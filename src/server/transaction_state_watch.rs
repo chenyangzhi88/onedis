@@ -35,6 +35,14 @@ impl Handler {
         let db_index = self.session.get_current_db();
         let db = self.session.get_db().clone();
         for key in keys {
+            if self
+                .session
+                .watched_keys()
+                .iter()
+                .any(|watched| watched.db_index == db_index && watched.key == key)
+            {
+                continue;
+            }
             let (key_version, db_version) = db.watch_version_snapshot(&key);
             self.session.watch_key(WatchedKey {
                 db_index,
@@ -47,12 +55,16 @@ impl Handler {
     }
 
     pub fn clear_watches(&mut self) {
-        self.session.clear_watches();
+        for watched in self.session.take_watches() {
+            self.db_manager
+                .get_db(watched.db_index)
+                .release_watch(&watched.key);
+        }
     }
 
     fn clear_transaction_and_watches(&mut self) {
         self.session.clear_transaction();
-        self.session.clear_watches();
+        self.clear_watches();
     }
 
     fn watched_keys_modified(&self) -> bool {

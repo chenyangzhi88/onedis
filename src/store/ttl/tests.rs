@@ -1,4 +1,5 @@
     use super::*;
+    use crate::store::db::Db;
     use std::sync::atomic::Ordering;
 
     fn test_store() -> KvStore {
@@ -75,6 +76,34 @@
         let upper = ttl_db_expire_upper_bound(0, 100);
         assert!(ttl_index_key(100, 0, "a") < upper);
         assert!(ttl_index_key(101, 0, "a") >= upper);
+    }
+
+    #[test]
+    fn ttl_config_rejects_zero_values() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                TtlManager::new(
+                    test_store(),
+                    TtlConfig {
+                        sweep_interval_ms: 0,
+                        batch_size: 1,
+                    },
+                )
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                TtlManager::new(
+                    test_store(),
+                    TtlConfig {
+                        sweep_interval_ms: 1,
+                        batch_size: 0,
+                    },
+                )
+            })
+            .is_err()
+        );
     }
 
     // -------------------------------------------------------- VersionCounter
@@ -183,8 +212,9 @@
 
     #[test]
     fn sub_key_in_range() {
-        let start = sub_key_range_start(0, &HASH_FIELD_NS, "k", 5);
-        let end = sub_key_range_end(0, &HASH_FIELD_NS, "k", 5);
+        let encoding = TtlKeyEncoding::current();
+        let start = sub_key_range_start(encoding, 0, &HASH_FIELD_NS, "k", 5);
+        let end = sub_key_range_end(encoding, 0, &HASH_FIELD_NS, "k", 5);
 
         // A sub-key for version 5 + field "abc" must be in [start, end)
         let mut mid = start.clone();
@@ -192,28 +222,64 @@
         assert!(mid >= start && mid < end);
 
         // Version 6 is out of range
-        let v6 = sub_key_range_start(0, &HASH_FIELD_NS, "k", 6);
+        let v6 = sub_key_range_start(encoding, 0, &HASH_FIELD_NS, "k", 6);
         assert!(v6 >= end);
+    }
+
+    #[test]
+    fn nul_key_owner_encoding_cannot_overlap_plain_key_range() {
+        let encoding = TtlKeyEncoding::current();
+        let plain_start = sub_key_range_start(encoding, 0, &HASH_FIELD_NS, "a", 1);
+        let plain_end = sub_key_range_end(encoding, 0, &HASH_FIELD_NS, "a", 1);
+        let mut nested_key = b"a\0".to_vec();
+        nested_key.extend_from_slice(&1u64.to_be_bytes());
+        nested_key.extend_from_slice(b"x");
+        let nested_key = String::from_utf8(nested_key).unwrap();
+        let nested_start =
+            sub_key_range_start(encoding, 0, &HASH_FIELD_NS, &nested_key, 2);
+
+        assert!(nested_start < plain_start || nested_start >= plain_end);
     }
 
     #[test]
     fn delete_batch_string_is_noop() {
         let mut batch = WriteBatch::new();
-        delete_sub_keys_to_batch(&mut batch, 0, "k", 1, TYPE_STRING);
+        delete_sub_keys_to_batch_with_encoding(
+            &mut batch,
+            TtlKeyEncoding::current(),
+            0,
+            "k",
+            1,
+            TYPE_STRING,
+        );
         assert_eq!(batch.count(), 0);
     }
 
     #[test]
     fn delete_batch_hash_one_range() {
         let mut batch = WriteBatch::new();
-        delete_sub_keys_to_batch(&mut batch, 0, "k", 1, TYPE_HASH);
+        delete_sub_keys_to_batch_with_encoding(
+            &mut batch,
+            TtlKeyEncoding::current(),
+            0,
+            "k",
+            1,
+            TYPE_HASH,
+        );
         assert_eq!(batch.count(), 2);
     }
 
     #[test]
     fn delete_batch_zset_two_ranges() {
         let mut batch = WriteBatch::new();
-        delete_sub_keys_to_batch(&mut batch, 0, "k", 1, TYPE_SORTED_SET);
+        delete_sub_keys_to_batch_with_encoding(
+            &mut batch,
+            TtlKeyEncoding::current(),
+            0,
+            "k",
+            1,
+            TYPE_SORTED_SET,
+        );
         assert_eq!(batch.count(), 2);
     }
 
@@ -228,7 +294,14 @@
         ];
         for (type_tag, expected_count) in cases {
             let mut batch = WriteBatch::new();
-            delete_sub_keys_to_batch(&mut batch, 2, "key", 9, type_tag);
+            delete_sub_keys_to_batch_with_encoding(
+                &mut batch,
+                TtlKeyEncoding::current(),
+                2,
+                "key",
+                9,
+                type_tag,
+            );
             assert_eq!(batch.count(), expected_count, "type_tag={type_tag}");
         }
     }
@@ -361,6 +434,162 @@
         assert_eq!(vc.current(), 30);
         assert!(!manager.sweep_once_async().await);
         assert_eq!(manager.stats().sweep_cycles.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn ttl_expire_observer_runs_only_after_committed_delete() {
+        let store = test_store();
+        let db_store = store.for_db_index(0);
+        let manager = TtlManager::new(store, TtlConfig::default());
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_from_hook = observed.clone();
+        manager.set_expire_observer(Arc::new(move |db_index, key, type_tag, version| {
+            observed_from_hook.lock().unwrap().push((
+                db_index,
+                key.to_string(),
+                type_tag,
+                version,
+            ));
+        }));
+        let expired = now_ms().saturating_sub(1);
+        db_store.put_raw(
+            &main_key(0, "vector-expired"),
+            &regular_meta(expired, 77, TYPE_VECTOR),
+        );
+        manager.add(expired, 0, "vector-expired".to_string());
+
+        assert!(!manager.sweep_once_async().await);
+        assert!(db_store.get_raw(&main_key(0, "vector-expired")).is_none());
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![(0, "vector-expired".to_string(), TYPE_VECTOR, 77)]
+        );
+    }
+
+    #[tokio::test]
+    async fn ttl_scan_is_deadline_bounded_and_rotates_between_databases() {
+        let store = test_store();
+        let db0_store = store.for_db_index(0);
+        let db1_store = store.for_db_index(1);
+        let manager = TtlManager::new(
+            store,
+            TtlConfig {
+                sweep_interval_ms: 10,
+                batch_size: 1,
+            },
+        );
+        let expired = now_ms().saturating_sub(1);
+        let future = now_ms().saturating_add(60_000);
+
+        for key in ["db0-a", "db0-b"] {
+            db0_store.put_raw(&main_key(0, key), &regular_meta(expired, 1, TYPE_STRING));
+            manager.add(expired, 0, key.to_string());
+        }
+        db0_store.put_raw(
+            &main_key(0, "db0-future"),
+            &regular_meta(future, 1, TYPE_STRING),
+        );
+        manager.add(future, 0, "db0-future".to_string());
+        db1_store.put_raw(
+            &main_key(1, "db1-expired"),
+            &regular_meta(expired, 1, TYPE_STRING),
+        );
+        manager.add(expired, 1, "db1-expired".to_string());
+
+        let first = manager.scan_expired_batch_async(expired, 1).await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].db_index, 0);
+
+        assert!(manager.sweep_once_async().await);
+        assert_eq!(db1_store.get_raw(&main_key(1, "db1-expired")), None);
+        assert_eq!(
+            db0_store.get_raw(&main_key(0, "db0-future")),
+            Some(regular_meta(future, 1, TYPE_STRING))
+        );
+    }
+
+    #[tokio::test]
+    async fn ttl_sweeper_drains_backlog_without_waiting_between_full_batches() {
+        let store = test_store();
+        let db0_store = store.for_db_index(0);
+        let manager = TtlManager::new(
+            store,
+            TtlConfig {
+                sweep_interval_ms: 100,
+                batch_size: 1,
+            },
+        );
+        let expired = now_ms().saturating_sub(1);
+        for key in ["backlog-a", "backlog-b", "backlog-c"] {
+            db0_store.put_raw(&main_key(0, key), &regular_meta(expired, 1, TYPE_STRING));
+            manager.add(expired, 0, key.to_string());
+        }
+
+        let sweeper = manager.start_sweeper();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        manager.shutdown();
+        sweeper.await.unwrap();
+
+        assert_eq!(manager.index_size(), 0);
+        for key in ["backlog-a", "backlog-b", "backlog-c"] {
+            assert_eq!(db0_store.get_raw(&main_key(0, key)), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn ttl_sweep_uses_the_persisted_legacy_key_layout() {
+        let store = test_store();
+        let db0_store = store.for_db_index(0);
+        db0_store.put_raw(b"\x80m\x00layout", b"db-prefixed-v1");
+        let versions = Arc::new(VersionCounter::new());
+        let manager = TtlManager::new(
+            store.clone(),
+            TtlConfig {
+                sweep_interval_ms: 10,
+                batch_size: 10,
+            },
+        );
+        let db = Db::new(0, store, versions, manager.clone());
+        db.insert_string("legacy".to_string(), "value".to_string(), Some(1));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert!(!manager.sweep_once_async().await);
+        let mut legacy_main_key = 0u16.to_be_bytes().to_vec();
+        legacy_main_key.extend_from_slice(b"legacy");
+        assert_eq!(db0_store.get_raw(&legacy_main_key), None);
+        assert_eq!(manager.index_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn ttl_sweep_of_plain_key_preserves_nul_key_subkeys() {
+        let store = test_store();
+        let versions = Arc::new(VersionCounter::new());
+        let manager = TtlManager::new(
+            store.clone(),
+            TtlConfig {
+                sweep_interval_ms: 10,
+                batch_size: 10,
+            },
+        );
+        let db = Db::new(0, store, versions.clone(), manager.clone());
+
+        db.hash_set("a", "field", "source").unwrap();
+        let source_version = versions.current();
+        let mut nested_key = b"a\0".to_vec();
+        nested_key.extend_from_slice(&source_version.to_be_bytes());
+        nested_key.extend_from_slice(b"x");
+        let nested_key = String::from_utf8(nested_key).unwrap();
+        db.hash_set(&nested_key, "field", "nested").unwrap();
+
+        assert!(db.expire("a".to_string(), 1));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(!manager.sweep_once_async().await);
+
+        assert_eq!(db.hash_get("a", "field").unwrap(), None);
+        assert_eq!(
+            db.hash_get(&nested_key, "field").unwrap(),
+            Some("nested".to_string())
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,38 @@
 type VectorRuntimeSegmentEntry = (u64, Vec<u8>, Vec<(String, u64)>);
 
 impl Db {
+    pub(in crate::store::db) fn reconcile_vector_runtime_index(
+        &self,
+        db_index: u16,
+        index: &str,
+    ) {
+        let store = self.store.non_transactional_view().for_db_index(db_index);
+        let current_version = store
+            .get_raw(&self.key_layout.main_key(db_index, index))
+            .and_then(|raw| decode_meta_header(&raw))
+            .filter(|header| header.type_tag == TYPE_VECTOR)
+            .map(|header| header.version);
+        self.vector_runtimes
+            .retain_index_version(db_index, index, current_version);
+    }
+
+    pub(in crate::store::db) fn reconcile_vector_runtimes_for_batch(&self, batch: &WriteBatch) {
+        let (keys, dbs) = super::collect_logical_mutations(self.key_layout, self.db_index, batch);
+        if dbs.contains(&self.db_index) {
+            self.vector_runtimes.remove_db(self.db_index);
+            return;
+        }
+        let mut seen = HashSet::new();
+        for key in keys {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if let Ok(index) = std::str::from_utf8(&key) {
+                self.reconcile_vector_runtime_index(self.db_index, index);
+            }
+        }
+    }
+
     fn vector_runtime_segment_entries(
         &self,
         index: &str,
@@ -33,7 +65,7 @@ impl Db {
 
     fn read_vector_meta(&self, index: &str) -> Result<(u64, u64, VectorIndexMeta), Error> {
         self.expire_if_needed(index);
-        let Some(raw) = self.store.get_raw(&main_key(self.db_index, index)) else {
+        let Some(raw) = self.store.get_raw(&self.mk(index)) else {
             return Err(Error::msg("ERR vector index does not exist"));
         };
         let header = decode_meta_header(&raw).ok_or_else(|| Error::msg("Type parsing error"))?;
@@ -42,18 +74,41 @@ impl Db {
         }
         let Some(meta_raw) =
             self.store
-                .get_raw(&vector_meta_key(self.db_index, index, header.version))
+                .get_raw(&vector_meta_key(
+                    self.key_layout,
+                    self.db_index,
+                    index,
+                    header.version,
+                ))
         else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
-        Ok((
-            header.expire_ms,
-            header.version,
-            decode_record::<VectorIndexMeta>(&meta_raw)?,
-        ))
+        let meta = decode_record::<VectorIndexMeta>(&meta_raw)?;
+        validate_vector_meta_config(&meta)?;
+        Ok((header.expire_ms, header.version, meta))
     }
 
     fn ensure_vector_runtime(
+        &self,
+        index: &str,
+        version: u64,
+        meta: &VectorIndexMeta,
+    ) -> Result<(), Error> {
+        if self
+            .vector_runtimes
+            .get(self.db_index, index, version)
+            .is_some()
+        {
+            return Ok(());
+        }
+        let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
+        let _guard = write_lock
+            .lock()
+            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
+        self.ensure_vector_runtime_unlocked(index, version, meta)
+    }
+
+    fn ensure_vector_runtime_unlocked(
         &self,
         index: &str,
         version: u64,
@@ -80,7 +135,7 @@ impl Db {
                 segments,
             ))),
         );
-        let prefix = vector_doc_prefix(self.db_index, index, version);
+        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         let mut docs = Vec::new();
         for (_, raw) in self.store.scan_prefix_raw(&prefix) {
             docs.push(decode_record::<VectorDocRecord>(&raw)?);
@@ -96,7 +151,7 @@ impl Db {
         version: u64,
         meta: &VectorIndexMeta,
     ) -> Result<(Vec<VectorSegmentRuntime>, u64, u64), Error> {
-        let prefix = vector_segment_prefix(self.db_index, index, version);
+        let prefix = vector_segment_prefix(self.key_layout, self.db_index, index, version);
         let mut segments = Vec::new();
         for (_, raw) in self.store.scan_prefix_raw(&prefix) {
             let segment = decode_record::<VectorSegmentMeta>(&raw)?;
@@ -135,7 +190,7 @@ impl Db {
         self.expire_if_needed_async(index).await;
         let Some(raw) = self
             .store
-            .get_raw_async(&main_key(self.db_index, index))
+            .get_raw_async(&self.mk(index))
             .await
         else {
             return Err(Error::msg("ERR vector index does not exist"));
@@ -146,15 +201,18 @@ impl Db {
         }
         let Some(meta_raw) = self
             .store
-            .get_raw_async(&vector_meta_key(self.db_index, index, header.version))
+            .get_raw_async(&vector_meta_key(
+                self.key_layout,
+                self.db_index,
+                index,
+                header.version,
+            ))
             .await
         else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
-        Ok((
-            header.expire_ms,
-            header.version,
-            decode_record::<VectorIndexMeta>(&meta_raw)?,
-        ))
+        let meta = decode_record::<VectorIndexMeta>(&meta_raw)?;
+        validate_vector_meta_config(&meta)?;
+        Ok((header.expire_ms, header.version, meta))
     }
 }

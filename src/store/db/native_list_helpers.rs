@@ -9,62 +9,66 @@ impl Db {
             if meta.expire_ms == 0 || now_ms() < meta.expire_ms {
                 return Ok(Some(meta));
             }
-            let mut batch = WriteBatch::new();
-            batch.delete(&key_bytes);
-            delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_LIST);
-            self.ttl_manager
-                .remove_known_to_batch(&mut batch, meta.expire_ms, self.db_index, key);
-            self.write_batch_if_not_empty(&batch);
             self.list_meta_cache.remove(&key_bytes);
-            return Ok(None);
-        }
-        let Some(raw) = self.store.get_raw(&key_bytes) else {
-            return Ok(None);
-        };
-        if let Some(header) = decode_meta_header(&raw)
-            && header.expire_ms > 0
-            && now_ms() >= header.expire_ms
-        {
-            let mut batch = WriteBatch::new();
-            batch.delete(&key_bytes);
-            delete_sub_keys_to_batch(
-                &mut batch,
-                self.db_index,
-                key,
-                header.version,
-                header.type_tag,
-            );
-            self.ttl_manager.remove_known_to_batch(
-                &mut batch,
-                header.expire_ms,
-                self.db_index,
-                key,
-            );
-            self.write_batch_if_not_empty(&batch);
-            return Ok(None);
         }
 
-        if let Some(meta) = decode_list_meta(&raw) {
-            self.cache_list_meta_if_non_transactional(key, meta);
-            return Ok(Some(meta));
-        }
-
-        let Some((_, version, structure)) = decode_entry(&raw) else {
-            return Err(Error::msg("Failed to decode list metadata"));
-        };
-        match structure {
-            Structure::List(list) => {
-                let meta = ListMeta {
-                    expire_ms: decode_expire_ms(&raw),
-                    version,
-                    head: 0,
-                    tail: list.len() as i64,
-                };
-                self.cache_list_meta_if_non_transactional(key, meta);
-                Ok(Some(meta))
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value().map(|value| value.as_ref()) else {
+                return Ok(None);
+            };
+            if let Some(header) = decode_meta_header(raw)
+                && header.expire_ms > 0
+                && now_ms() >= header.expire_ms
+            {
+                let mut batch = WriteBatch::new();
+                batch.delete(&key_bytes);
+                delete_sub_keys_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    key,
+                    header.version,
+                    header.type_tag,
+                );
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    header.expire_ms,
+                    self.db_index,
+                    key,
+                );
+                if self.compare_and_write_batch_if_not_empty(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )? {
+                    self.list_meta_cache.remove(&key_bytes);
+                    return Ok(None);
+                }
+                continue;
             }
-            _ => Err(Error::msg(WRONG_TYPE_ERROR)),
+
+            if let Some(meta) = decode_list_meta(raw) {
+                self.cache_list_meta_if_non_transactional(key, meta);
+                return Ok(Some(meta));
+            }
+
+            let Some((_, version, structure)) = decode_entry(raw) else {
+                return Err(Error::msg("Failed to decode list metadata"));
+            };
+            match structure {
+                Structure::List(list) => {
+                    let meta = ListMeta {
+                        expire_ms: decode_expire_ms(raw),
+                        version,
+                        head: 0,
+                        tail: list.len() as i64,
+                    };
+                    self.cache_list_meta_if_non_transactional(key, meta);
+                    return Ok(Some(meta));
+                }
+                _ => return Err(Error::msg(WRONG_TYPE_ERROR)),
+            }
         }
+        Err(Error::msg("ERR list metadata read conflict"))
     }
 
     pub(in crate::store::db) async fn list_meta_async(
@@ -78,62 +82,69 @@ impl Db {
             if meta.expire_ms == 0 || now_ms() < meta.expire_ms {
                 return Ok(Some(meta));
             }
-            let mut batch = WriteBatch::new();
-            batch.delete(&key_bytes);
-            delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_LIST);
-            self.ttl_manager
-                .remove_known_to_batch(&mut batch, meta.expire_ms, self.db_index, key);
-            self.write_batch_if_not_empty_async(&batch).await;
             self.list_meta_cache.remove(&key_bytes);
-            return Ok(None);
-        }
-        let Some(raw) = self.store.get_raw_async(&key_bytes).await else {
-            return Ok(None);
-        };
-        if let Some(header) = decode_meta_header(&raw)
-            && header.expire_ms > 0
-            && now_ms() >= header.expire_ms
-        {
-            let mut batch = WriteBatch::new();
-            batch.delete(&key_bytes);
-            delete_sub_keys_to_batch(
-                &mut batch,
-                self.db_index,
-                key,
-                header.version,
-                header.type_tag,
-            );
-            self.ttl_manager.remove_known_to_batch(
-                &mut batch,
-                header.expire_ms,
-                self.db_index,
-                key,
-            );
-            self.write_batch_if_not_empty_async(&batch).await;
-            return Ok(None);
         }
 
-        if let Some(meta) = decode_list_meta(&raw) {
-            self.cache_list_meta_if_non_transactional(key, meta);
-            return Ok(Some(meta));
-        }
-
-        let Some((_, version, structure)) = decode_entry(&raw) else {
-            return Err(Error::msg("Failed to decode list metadata"));
-        };
-        match structure {
-            Structure::List(list) => {
-                let meta = ListMeta {
-                    expire_ms: decode_expire_ms(&raw),
-                    version,
-                    head: 0,
-                    tail: list.len() as i64,
-                };
-                self.cache_list_meta_if_non_transactional(key, meta);
-                Ok(Some(meta))
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value().map(|value| value.as_ref()) else {
+                return Ok(None);
+            };
+            if let Some(header) = decode_meta_header(raw)
+                && header.expire_ms > 0
+                && now_ms() >= header.expire_ms
+            {
+                let mut batch = WriteBatch::new();
+                batch.delete(&key_bytes);
+                delete_sub_keys_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    key,
+                    header.version,
+                    header.type_tag,
+                );
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    header.expire_ms,
+                    self.db_index,
+                    key,
+                );
+                if self
+                    .compare_and_write_batch_if_not_empty_async(
+                        &[CompareCondition::from_observed(&observed)],
+                        &batch,
+                    )
+                    .await?
+                {
+                    self.list_meta_cache.remove(&key_bytes);
+                    return Ok(None);
+                }
+                continue;
             }
-            _ => Err(Error::msg(WRONG_TYPE_ERROR)),
+
+            if let Some(meta) = decode_list_meta(raw) {
+                self.cache_list_meta_if_non_transactional(key, meta);
+                return Ok(Some(meta));
+            }
+
+            let Some((_, version, structure)) = decode_entry(raw) else {
+                return Err(Error::msg("Failed to decode list metadata"));
+            };
+            match structure {
+                Structure::List(list) => {
+                    let meta = ListMeta {
+                        expire_ms: decode_expire_ms(raw),
+                        version,
+                        head: 0,
+                        tail: list.len() as i64,
+                    };
+                    self.cache_list_meta_if_non_transactional(key, meta);
+                    return Ok(Some(meta));
+                }
+                _ => return Err(Error::msg(WRONG_TYPE_ERROR)),
+            }
         }
+        Err(Error::msg("ERR list metadata read conflict"))
     }
 
     pub(in crate::store::db) fn resolve_list_index(

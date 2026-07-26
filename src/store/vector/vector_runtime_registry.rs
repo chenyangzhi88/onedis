@@ -118,10 +118,39 @@ impl VectorRuntimeRegistry {
 
     fn remove(&self, db_index: u16, index: &str, version: u64) {
         self.indexes.remove(&Self::key(db_index, index, version));
-        self.write_locks.remove(&VectorWriteLockKey {
+        self.cleanup_write_lock_if_idle(db_index, index);
+    }
+
+    fn retain_index_version(&self, db_index: u16, index: &str, version: Option<u64>) {
+        self.indexes.retain(|key, _| {
+            key.db_index != db_index
+                || key.index != index
+                || version.is_some_and(|version| key.version == version)
+        });
+        if version.is_none() {
+            self.cleanup_write_lock_if_idle(db_index, index);
+        }
+    }
+
+    fn cleanup_write_lock_if_idle(&self, db_index: u16, index: &str) {
+        let key = VectorWriteLockKey {
             db_index,
             index: index.to_string(),
-        });
+        };
+        if let dashmap::mapref::entry::Entry::Occupied(entry) = self.write_locks.entry(key)
+            && Arc::strong_count(entry.get()) == 1
+        {
+            entry.remove();
+        }
+    }
+
+    pub(crate) fn remove_expired(
+        &self,
+        db_index: u16,
+        index: &str,
+        version: u64,
+    ) {
+        self.remove(db_index, index, version);
     }
 
     pub(crate) fn remove_db(&self, db_index: u16) {

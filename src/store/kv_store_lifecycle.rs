@@ -40,6 +40,10 @@ impl KvStore {
         }
     }
 
+    pub(crate) fn global_metadata_view(&self) -> Self {
+        self.non_transactional_view().for_table(Self::ROOT_TABLE)
+    }
+
     fn db_table_name(db_index: u16) -> String {
         format!("onedis_db_{db_index}")
     }
@@ -87,13 +91,22 @@ impl KvStore {
         let txns = guard
             .as_mut()
             .expect("attempted to use transaction after completion");
+        let shared_snapshot = txns
+            .values()
+            .next()
+            .map(|transaction| transaction.snapshot().clone());
         let txn = match txns.entry(self.table_name.to_string()) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
-                self.table
-                    .begin_transaction()
-                    .expect("failed to begin kv_engine schemaless transaction"),
-            ),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(
+                    self.table
+                        .begin_transaction_opt(SchemalessTransactionOptions {
+                            snapshot: shared_snapshot,
+                            ..SchemalessTransactionOptions::default()
+                        })
+                        .expect("failed to begin kv_engine schemaless transaction"),
+                )
+            }
         };
         Some(action(txn))
     }
@@ -106,10 +119,8 @@ impl KvStore {
             let mut guard = txn_context.txns.lock().expect("transaction mutex poisoned");
             guard.take().unwrap_or_default()
         };
-        for (_, txn) in txns {
-            txn.commit()
-                .map_err(|err| anyhow::Error::msg(err.to_string()))?;
-        }
+        SchemalessTransaction::commit_many(txns.into_values().collect())
+            .map_err(|err| anyhow::Error::msg(err.to_string()))?;
         Ok(())
     }
 
@@ -134,11 +145,9 @@ impl KvStore {
             let mut guard = txn_context.txns.lock().expect("transaction mutex poisoned");
             guard.take().unwrap_or_default()
         };
-        for (_, txn) in txns {
-            txn.commit_async()
-                .await
-                .map_err(|err| anyhow::Error::msg(err.to_string()))?;
-        }
+        SchemalessTransaction::commit_many_async(txns.into_values().collect())
+            .await
+            .map_err(|err| anyhow::Error::msg(err.to_string()))?;
         Ok(())
     }
 

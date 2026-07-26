@@ -8,6 +8,7 @@ struct TtlEntry {
     expire_ms: u64,
     db_index: u16,
     key: String,
+    key_encoding: TtlKeyEncoding,
 }
 
 // ============================================================================
@@ -33,6 +34,19 @@ impl Default for TtlConfig {
     }
 }
 
+impl TtlConfig {
+    fn validate(&self) {
+        assert!(
+            self.sweep_interval_ms > 0,
+            "TTL sweep_interval_ms must be greater than zero"
+        );
+        assert!(
+            self.batch_size > 0,
+            "TTL batch_size must be greater than zero"
+        );
+    }
+}
+
 /// Runtime counters for monitoring / debugging.
 pub struct TtlStats {
     pub keys_expired: AtomicU64,
@@ -46,10 +60,12 @@ pub struct TtlStats {
 /// the tokio runtime is available, then register expirations with [`TtlManager::add`].
 pub struct TtlManager {
     db_count: AtomicU32,
+    next_db: AtomicU32,
     store: KvStore,
     config: TtlConfig,
     notify: tokio::sync::Notify,
     shutdown: AtomicBool,
     stats: TtlStats,
     expire_hook: RwLock<Option<Arc<ExpireHook>>>,
+    expire_observer: RwLock<Option<Arc<ExpireObserver>>>,
 }

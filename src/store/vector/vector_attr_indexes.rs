@@ -15,6 +15,7 @@ fn indexed_filter_field<'a>(
 }
 
 struct VectorAttrIndexContext<'a> {
+    layout: KeyEncodingLayout,
     db_index: u16,
     index: &'a str,
     version: u64,
@@ -37,6 +38,7 @@ fn put_attr_index_entries_to_batch(
                 for tag in tag_values(value)? {
                     batch.put(
                         &vector_tag_key(
+                            context.layout,
                             context.db_index,
                             context.index,
                             context.version,
@@ -52,6 +54,7 @@ fn put_attr_index_entries_to_batch(
                 if let Some(number) = value.as_f64() {
                     batch.put(
                         &vector_numeric_key(
+                            context.layout,
                             context.db_index,
                             context.index,
                             context.version,
@@ -83,6 +86,7 @@ fn delete_attr_index_entries_to_batch(
                 if let Ok(tags) = tag_values(value) {
                     for tag in tags {
                         batch.delete(&vector_tag_key(
+                            context.layout,
                             context.db_index,
                             context.index,
                             context.version,
@@ -96,6 +100,7 @@ fn delete_attr_index_entries_to_batch(
             VectorFieldKind::Numeric => {
                 if let Some(number) = value.as_f64() {
                     batch.delete(&vector_numeric_key(
+                        context.layout,
                         context.db_index,
                         context.index,
                         context.version,

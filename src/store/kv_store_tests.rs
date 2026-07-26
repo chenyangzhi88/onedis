@@ -264,6 +264,47 @@ mod tests {
         assert_eq!(store.get_raw(b"async:txn"), Some(b"value".to_vec()));
     }
 
+    #[test]
+    fn multi_table_transaction_conflict_is_atomic() {
+        let store = test_store();
+        let db0 = store.for_db_index(0);
+        let db1 = store.for_db_index(1);
+        db1.put_raw(b"source", b"old");
+
+        let transaction = db1.begin_transaction().unwrap();
+        let target = transaction.for_db_index(0);
+        assert_eq!(transaction.get_raw(b"source"), Some(b"old".to_vec()));
+        target.put_raw(b"target", b"old");
+        transaction.delete_key(b"source");
+
+        db1.put_raw(b"source", b"new");
+        assert!(transaction.commit_transaction().is_err());
+        assert_eq!(db0.get_raw(b"target"), None);
+        assert_eq!(db1.get_raw(b"source"), Some(b"new".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn multi_table_transaction_async_commit_is_atomic() {
+        let store = test_store();
+        let db0 = store.for_db_index(0);
+        let db1 = store.for_db_index(1);
+        db1.put_raw(b"source", b"old");
+
+        let transaction = db1.begin_transaction().unwrap();
+        let target = transaction.for_db_index(0);
+        assert_eq!(
+            transaction.get_raw_async(b"source").await,
+            Some(b"old".to_vec())
+        );
+        target.put_raw(b"target", b"old");
+        transaction.delete_key(b"source");
+
+        db1.put_raw(b"source", b"new");
+        assert!(transaction.commit_transaction_async().await.is_err());
+        assert_eq!(db0.get_raw(b"target"), None);
+        assert_eq!(db1.get_raw(b"source"), Some(b"new".to_vec()));
+    }
+
     #[tokio::test]
     async fn transaction_async_scans_visits_delete_range_and_compare_write_are_isolated_until_commit()
      {

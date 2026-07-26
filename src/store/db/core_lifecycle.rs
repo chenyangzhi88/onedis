@@ -26,6 +26,24 @@ impl Db {
         ttl_manager: Arc<TtlManager>,
         mutation_tracker: Arc<KeyMutationTracker>,
     ) -> Self {
+        Self::new_with_mutation_tracker_and_vector_runtimes(
+            db_index,
+            store,
+            version_counter,
+            ttl_manager,
+            mutation_tracker,
+            Arc::new(VectorRuntimeRegistry::default()),
+        )
+    }
+
+    pub(crate) fn new_with_mutation_tracker_and_vector_runtimes(
+        db_index: u16,
+        store: KvStore,
+        version_counter: Arc<VersionCounter>,
+        ttl_manager: Arc<TtlManager>,
+        mutation_tracker: Arc<KeyMutationTracker>,
+        vector_runtimes: Arc<VectorRuntimeRegistry>,
+    ) -> Self {
         let store = store.for_db_index(db_index);
         // The layout marker describes the table itself, not a user transaction.
         // Initialize it through the durable table view before the transactional
@@ -44,7 +62,7 @@ impl Db {
             counter_cache_epoch: Arc::new(AtomicU64::new(0)),
             list_meta_cache: Arc::new(DashMap::new()),
             list_meta_cache_maybe_non_empty: Arc::new(AtomicBool::new(false)),
-            vector_runtimes: Arc::new(VectorRuntimeRegistry::default()),
+            vector_runtimes,
             fulltext_runtimes: Arc::new(FullTextRuntimeRegistry::default()),
             set_write_locks: Arc::new(std::array::from_fn(|_| tokio::sync::Mutex::new(()))),
             mutation_tracker,
@@ -147,7 +165,7 @@ impl Db {
         version_counter.next_reserved(|high_water| {
             let mut batch = WriteBatch::new();
             reserve_version_high_water_to_batch(&mut batch, high_water);
-            store.write_batch_direct(&batch);
+            store.global_metadata_view().write_batch_direct(&batch);
         })
     }
 
@@ -159,7 +177,10 @@ impl Db {
             .next_reserved_async(|high_water| async move {
                 let mut batch = WriteBatch::new();
                 reserve_version_high_water_to_batch(&mut batch, high_water);
-                store.write_batch_direct_async(batch).await;
+                store
+                    .global_metadata_view()
+                    .write_batch_direct_async(batch)
+                    .await;
             })
             .await
     }
@@ -171,7 +192,10 @@ impl Db {
             return Ok(());
         }
         self.store.commit_transaction()?;
-        self.publish_mutations(keys.clone(), dbs);
+        self.publish_mutations(keys.clone(), dbs.clone());
+        for db_index in dbs {
+            self.vector_runtimes.remove_db(db_index);
+        }
         if let Err(err) = self.reconcile_committed_keys(&keys) {
             // The storage transaction is already durable and cannot be rolled
             // back here. Keep Redis transaction semantics truthful and let the
@@ -192,7 +216,10 @@ impl Db {
             return Ok(());
         }
         self.store.commit_transaction_async().await?;
-        self.publish_mutations(keys.clone(), dbs);
+        self.publish_mutations(keys.clone(), dbs.clone());
+        for db_index in dbs {
+            self.vector_runtimes.remove_db(db_index);
+        }
         let reconcile_keys = keys.clone();
         if let Err(err) = self
             .run_blocking_store_task(move |db| db.reconcile_committed_keys(&reconcile_keys))
@@ -210,6 +237,11 @@ impl Db {
         }
         for (db_index, keys) in keys_by_db {
             let direct_db = self.non_transactional_view_for_db(db_index);
+            for key in &keys {
+                if let Ok(index) = std::str::from_utf8(key) {
+                    direct_db.reconcile_vector_runtime_index(db_index, index);
+                }
+            }
             // The current DB shares this view's runtime registry, so an
             // immediate refresh is safe. Cross-DB mutations leave the durable
             // outbox for that DB's maintenance/search path instead of

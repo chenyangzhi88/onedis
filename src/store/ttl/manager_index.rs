@@ -17,7 +17,6 @@ impl TtlManager {
         self.db_count
             .fetch_max(db_index as u32 + 1, Ordering::AcqRel);
         batch.put(&ttl_index_key(expire_ms, db_index, key), TTL_INDEX_VALUE);
-        self.notify.notify_one();
     }
 
     pub fn remove(&self, db_index: u16, key: &str) {
@@ -78,7 +77,14 @@ impl TtlManager {
             }
         }
 
+        if let Some(raw) = self.store.get_raw(VERSION_COUNTER_KEY)
+            && raw.len() == 8
+        {
+            version_counter.observe(u64::from_be_bytes(raw[0..8].try_into().unwrap()));
+        }
         for db_idx in 0..num_dbs.max(1) {
+            // Compatibility with releases that persisted the reservation in
+            // the DB table that happened to allocate a new block.
             if let Some(raw) = self.store_for_db(db_idx).get_raw(VERSION_COUNTER_KEY)
                 && raw.len() == 8
             {
@@ -90,6 +96,17 @@ impl TtlManager {
                     version_counter.observe(version);
                 }
             }
+            let owner_prefix = crate::store::db::version_owner_prefix(db_idx);
+            for (owner_key, _) in self
+                .store_for_db(db_idx)
+                .scan_prefix_raw(&owner_prefix)
+            {
+                if let Some(suffix) = owner_key.strip_prefix(owner_prefix.as_slice())
+                    && suffix.len() == 8
+                {
+                    version_counter.observe(u64::from_be_bytes(suffix.try_into().unwrap()));
+                }
+            }
         }
 
         let max_version = version_counter.current();
@@ -97,9 +114,7 @@ impl TtlManager {
             let mut batch = WriteBatch::new();
             reserve_version_high_water_to_batch(&mut batch, max_version);
             if batch.count() > 0 {
-                for db_idx in 0..num_dbs.max(1) {
-                    self.store_for_db(db_idx).write_batch(&batch);
-                }
+                self.store.write_batch(&batch);
             }
         }
 
@@ -126,7 +141,14 @@ impl TtlManager {
             }
         }
 
+        if let Some(raw) = self.store.get_raw_async(VERSION_COUNTER_KEY).await
+            && raw.len() == 8
+        {
+            version_counter.observe(u64::from_be_bytes(raw[0..8].try_into().unwrap()));
+        }
         for db_idx in 0..num_dbs.max(1) {
+            // Compatibility with releases that persisted the reservation in
+            // the DB table that happened to allocate a new block.
             if let Some(raw) = self
                 .store_for_db(db_idx)
                 .get_raw_async(VERSION_COUNTER_KEY)
@@ -145,6 +167,18 @@ impl TtlManager {
                     version_counter.observe(version);
                 }
             }
+            let owner_prefix = crate::store::db::version_owner_prefix(db_idx);
+            for (owner_key, _) in self
+                .store_for_db(db_idx)
+                .scan_prefix_raw_async(&owner_prefix)
+                .await
+            {
+                if let Some(suffix) = owner_key.strip_prefix(owner_prefix.as_slice())
+                    && suffix.len() == 8
+                {
+                    version_counter.observe(u64::from_be_bytes(suffix.try_into().unwrap()));
+                }
+            }
         }
 
         let max_version = version_counter.current();
@@ -152,9 +186,7 @@ impl TtlManager {
             let mut batch = WriteBatch::new();
             reserve_version_high_water_to_batch(&mut batch, max_version);
             if batch.count() > 0 {
-                for db_idx in 0..num_dbs.max(1) {
-                    self.store_for_db(db_idx).write_batch_async(&batch).await;
-                }
+                self.store.write_batch_async(&batch).await;
             }
         }
 

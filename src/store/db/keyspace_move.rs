@@ -236,15 +236,17 @@ impl Db {
             Some(&self.ttl_manager),
         )?;
         if moved {
-            let source_raw_key = self.key_layout.main_key(self.db_index, key);
-            let target_raw_key = self.key_layout.main_key(target_db_index, key);
-            self.record_external_key_mutation(self.db_index, source_raw_key.clone());
-            self.record_external_key_mutation(target_db_index, target_raw_key.clone());
+            let logical_key = key.as_bytes().to_vec();
+            self.record_external_key_mutation(self.db_index, logical_key.clone());
+            self.record_external_key_mutation(target_db_index, logical_key.clone());
             if !self.store.is_transactional() {
-                self.non_transactional_view()
-                    .fulltext_reconcile_committed_keys(&[source_raw_key], true)?;
-                self.non_transactional_view_for_db(target_db_index)
-                    .fulltext_reconcile_committed_keys(&[target_raw_key], false)?;
+                let source_db = self.non_transactional_view();
+                source_db.reconcile_vector_runtime_index(self.db_index, key);
+                source_db
+                    .fulltext_reconcile_committed_keys(std::slice::from_ref(&logical_key), true)?;
+                let target_db = self.non_transactional_view_for_db(target_db_index);
+                target_db.reconcile_vector_runtime_index(target_db_index, key);
+                target_db.fulltext_reconcile_committed_keys(&[logical_key], false)?;
             }
         }
         Ok(moved)
@@ -290,16 +292,21 @@ impl Db {
         )
         .await?;
         if moved {
-            let source_raw_key = self.key_layout.main_key(self.db_index, key);
-            let target_raw_key = self.key_layout.main_key(target_db_index, key);
-            self.record_external_key_mutation(self.db_index, source_raw_key.clone());
-            self.record_external_key_mutation(target_db_index, target_raw_key.clone());
+            let logical_key = key.as_bytes().to_vec();
+            self.record_external_key_mutation(self.db_index, logical_key.clone());
+            self.record_external_key_mutation(target_db_index, logical_key.clone());
             if !self.store.is_transactional() {
+                let key = key.to_string();
                 self.run_blocking_store_task(move |db| {
-                    db.non_transactional_view()
-                        .fulltext_reconcile_committed_keys(&[source_raw_key], true)?;
-                    db.non_transactional_view_for_db(target_db_index)
-                        .fulltext_reconcile_committed_keys(&[target_raw_key], false)
+                    let source_db = db.non_transactional_view();
+                    source_db.reconcile_vector_runtime_index(db.db_index, &key);
+                    source_db.fulltext_reconcile_committed_keys(
+                        std::slice::from_ref(&logical_key),
+                        true,
+                    )?;
+                    let target_db = db.non_transactional_view_for_db(target_db_index);
+                    target_db.reconcile_vector_runtime_index(target_db_index, &key);
+                    target_db.fulltext_reconcile_committed_keys(&[logical_key], false)
                 })
                 .await?;
             }

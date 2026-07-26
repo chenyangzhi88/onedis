@@ -27,9 +27,31 @@ struct DistInnerProduct;
 
 impl Distance<f32> for DistInnerProduct {
     fn eval(&self, left: &[f32], right: &[f32]) -> f32 {
-        let dot = left.iter().zip(right).map(|(a, b)| a * b).sum::<f32>();
-        1.0 / (1.0 + dot.exp())
+        let dot = left
+            .iter()
+            .zip(right)
+            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+            .sum::<f64>();
+        (-dot) as f32
     }
+}
+
+fn hnsw_vector(distance: VectorDistance, vector: &[f32]) -> Vec<f32> {
+    if distance != VectorDistance::Cosine {
+        return vector.to_vec();
+    }
+    let norm = vector
+        .iter()
+        .map(|value| {
+            let value = f64::from(*value);
+            value * value
+        })
+        .sum::<f64>()
+        .sqrt();
+    vector
+        .iter()
+        .map(|value| (f64::from(*value) / norm) as f32)
+        .collect()
 }
 
 impl HnswGraph {
@@ -78,7 +100,7 @@ impl HnswGraph {
             // VLINKS and small-graph searches nondeterministic.
             self.rebuild_backend();
         } else {
-            self.backend.insert(&vector, pos);
+            self.backend.insert(&hnsw_vector(self.distance, &vector), pos);
         }
         Ok(())
     }
@@ -96,7 +118,8 @@ impl HnswGraph {
                 continue;
             }
             self.id_to_pos.insert(node.id.clone(), pos);
-            self.backend.insert(&node.vector, pos);
+            self.backend
+                .insert(&hnsw_vector(self.distance, &node.vector), pos);
         }
     }
 
@@ -124,8 +147,9 @@ impl HnswGraph {
                     && allow_doc_ids.is_none_or(|allow_doc_ids| allow_doc_ids.contains(&node.id))
             })
         };
+        let backend_query = hnsw_vector(self.distance, query);
         let neighbours = self.backend.search(
-            query,
+            &backend_query,
             limit,
             ef.max(limit),
             allow_doc_ids.map(|_| &filter as &dyn hnsw_rs::filter::FilterT),
@@ -237,6 +261,16 @@ impl HnswGraph {
     }
 
     fn from_snapshot(snapshot: HnswGraphSnapshot) -> Result<Self, Error> {
+        if snapshot.dim == 0
+            || snapshot.dim as usize > MAX_VECTOR_DIMENSIONS
+            || snapshot.m == 0
+            || snapshot.m > 256
+            || snapshot.ef_construction < snapshot.m
+            || snapshot.ef_construction as usize > MAX_VECTOR_HNSW_EF
+            || snapshot.nodes.len() > MAX_VECTOR_INITIAL_CAP
+        {
+            return Err(Error::msg("ERR invalid persisted vector graph"));
+        }
         let mut graph = HnswGraph::new(
             snapshot.dim as usize,
             snapshot.distance,

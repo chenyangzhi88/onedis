@@ -20,17 +20,33 @@ impl Db {
         self.expire_if_needed(&key);
         let key_bytes = self.mk(&key);
         let expire_ms = now_ms().saturating_add(ttl);
-        if let Some(raw) = self.store.get_raw(&key_bytes)
-            && let Some(header) = decode_meta_header(&raw)
-        {
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return false;
+            };
+            let Some(header) = decode_meta_header(raw) else {
+                return false;
+            };
+            if header.expire_ms > 0 && now_ms() >= header.expire_ms {
+                self.expire_if_needed(&key);
+                continue;
+            }
             if !Self::expire_condition_matches(header.expire_ms, expire_ms, condition) {
                 return false;
             }
+            let mut batch = WriteBatch::new();
             if ttl == 0 {
-                return self.remove_internal(&key, false).is_some();
-            }
-            if let Some(patched) = patch_meta_expire_ms(&raw, expire_ms) {
-                let mut batch = WriteBatch::new();
+                if let Err(error) =
+                    self.append_expiration_delete_to_batch(&mut batch, &key, &key_bytes, header)
+                {
+                    log::error!("failed to enqueue immediate expiration for {key}: {error}");
+                    return false;
+                }
+            } else {
+                let Some(patched) = patch_meta_expire_ms(raw, expire_ms) else {
+                    return false;
+                };
                 batch.put(&key_bytes, &patched);
                 if header.expire_ms > 0 && header.expire_ms != expire_ms {
                     self.ttl_manager.remove_known_to_batch(
@@ -42,10 +58,25 @@ impl Db {
                 }
                 self.ttl_manager
                     .add_to_batch(&mut batch, expire_ms, self.db_index, &key);
-                self.write_batch_if_not_empty(&batch);
-                return true;
+            }
+            match self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            ) {
+                Ok(true) => {
+                    if ttl == 0 {
+                        self.refresh_after_expiration_delete(&key, header.type_tag);
+                    }
+                    return true;
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    log::error!("failed to update expiration for {key}: {error}");
+                    return false;
+                }
             }
         }
+        log::warn!("gave up updating expiration for repeatedly modified key {key}");
         false
     }
 
@@ -77,57 +108,20 @@ impl Db {
             let Some(header) = decode_meta_header(raw) else {
                 return false;
             };
+            if header.expire_ms > 0 && now_ms() >= header.expire_ms {
+                self.expire_if_needed_async(&key).await;
+                continue;
+            }
             if !Self::expire_condition_matches(header.expire_ms, expire_ms, condition) {
                 return false;
             }
             if ttl == 0 {
                 let mut batch = WriteBatch::new();
-                batch.delete(&key_bytes);
-                self.ttl_manager.remove_known_to_batch(
-                    &mut batch,
-                    header.expire_ms,
-                    self.db_index,
-                    &key,
-                );
-                delete_sub_keys_to_batch(
-                    &mut batch,
-                    self.db_index,
-                    &key,
-                    header.version,
-                    header.type_tag,
-                );
-                if header.type_tag == TYPE_JSON {
-                    delete_json_nodes_to_batch_async(
-                        &self.store,
-                        &mut batch,
-                        self.db_index,
-                        &key,
-                        header.version,
-                    )
-                    .await;
-                }
-                match header.type_tag {
-                    TYPE_HASH => {
-                        if let Err(error) =
-                            self.fulltext_enqueue_hash_delete_to_batch(&mut batch, &key)
-                        {
-                            log::error!(
-                                "failed to enqueue fulltext delete for expired {key}: {error}"
-                            );
-                            return false;
-                        }
-                    }
-                    TYPE_JSON => {
-                        if let Err(error) =
-                            self.fulltext_enqueue_json_delete_to_batch(&mut batch, &key)
-                        {
-                            log::error!(
-                                "failed to enqueue fulltext JSON delete for expired {key}: {error}"
-                            );
-                            return false;
-                        }
-                    }
-                    _ => {}
+                if let Err(error) =
+                    self.append_expiration_delete_to_batch(&mut batch, &key, &key_bytes, header)
+                {
+                    log::error!("failed to enqueue immediate expiration for {key}: {error}");
+                    return false;
                 }
                 match self
                     .compare_and_write_batch_if_not_empty_async(
@@ -137,16 +131,7 @@ impl Db {
                     .await
                 {
                     Ok(true) => {
-                        let refresh = match header.type_tag {
-                            TYPE_HASH => self.fulltext_request_refresh(&key),
-                            TYPE_JSON => self.fulltext_request_json_refresh(&key),
-                            _ => Ok(()),
-                        };
-                        if let Err(error) = refresh {
-                            log::error!(
-                                "failed to refresh fulltext immediate expiration for {key}: {error}"
-                            );
-                        }
+                        self.refresh_after_expiration_delete(&key, header.type_tag);
                         return true;
                     }
                     Ok(false) => continue,
@@ -210,21 +195,41 @@ impl Db {
      * 移除过期时间（PERSIST 命令）
      */
     pub fn persist(&self, key: &str) -> bool {
+        self.expire_if_needed(key);
         let key_bytes = self.mk(key);
-        if let Some(raw) = self.store.get_raw(&key_bytes) {
-            let raw = raw.clone();
-            let expire_ms = decode_expire_ms(&raw);
-            if expire_ms > 0
-                && let Some(patched) = patch_meta_expire_ms(&raw, 0)
-            {
-                let mut batch = WriteBatch::new();
-                batch.put(&key_bytes, &patched);
-                self.ttl_manager
-                    .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
-                self.write_batch_if_not_empty(&batch);
-                return true;
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return false;
+            };
+            let expire_ms = decode_expire_ms(raw);
+            if expire_ms == 0 {
+                return false;
+            }
+            if now_ms() >= expire_ms {
+                self.expire_if_needed(key);
+                continue;
+            }
+            let Some(patched) = patch_meta_expire_ms(raw, 0) else {
+                return false;
+            };
+            let mut batch = WriteBatch::new();
+            batch.put(&key_bytes, &patched);
+            self.ttl_manager
+                .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
+            match self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            ) {
+                Ok(true) => return true,
+                Ok(false) => continue,
+                Err(error) => {
+                    log::error!("failed to persist key {key}: {error}");
+                    return false;
+                }
             }
         }
+        log::warn!("gave up persisting repeatedly modified key {key}");
         false
     }
 
@@ -236,6 +241,7 @@ impl Db {
     async fn persist_async_unlocked(&self, key: &str) -> bool {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
+            self.expire_if_needed_async(key).await;
             let observed = self.store.get_raw_observed_async(&key_bytes).await;
             let Some(raw) = observed.value() else {
                 return false;
@@ -243,6 +249,10 @@ impl Db {
             let expire_ms = decode_expire_ms(raw);
             if expire_ms == 0 {
                 return false;
+            }
+            if now_ms() >= expire_ms {
+                self.expire_if_needed_async(key).await;
+                continue;
             }
             let Some(patched) = patch_meta_expire_ms(raw, 0) else {
                 return false;

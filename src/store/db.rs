@@ -15,8 +15,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::kv_store::{CompareCondition, KvStore, ObservedRawValue};
 use super::ttl::{
-    TYPE_HASH, TYPE_JSON, TYPE_LIST, TYPE_SET, TYPE_SORTED_SET, TYPE_STREAM, TYPE_STRING,
-    TYPE_VECTOR, TtlManager, VersionCounter, decode_meta_header, patch_meta_expire_ms,
+    MetaHeader, TYPE_HASH, TYPE_JSON, TYPE_LIST, TYPE_SET, TYPE_SORTED_SET, TYPE_STREAM,
+    TYPE_STRING, TYPE_VECTOR, TtlManager, VersionCounter, decode_meta_header, patch_meta_expire_ms,
     reserve_version_high_water_to_batch,
 };
 use crate::{observability::metrics::global_metrics, tools::pattern};
@@ -128,6 +128,7 @@ use collection_key_codec::*;
 use hash_key_codec::*;
 use json_value_codec::*;
 use key_encoding::*;
+pub(crate) use key_encoding::{TtlKeyEncoding, ttl_key_encoding_for_store};
 use list_helpers::*;
 use stream_key_codec::*;
 use types::*;
@@ -137,6 +138,7 @@ use value_runtime_helpers::*;
 
 pub use types::*;
 pub use value_entry_codec::decode_string_bytes_slice;
+pub(crate) use version_owner_gc::version_owner_prefix;
 
 pub struct Db {
     db_index: u16,

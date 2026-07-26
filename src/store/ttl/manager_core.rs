@@ -1,7 +1,9 @@
 impl TtlManager {
     pub fn new(store: KvStore, config: TtlConfig) -> Arc<Self> {
+        config.validate();
         Arc::new(Self {
             db_count: AtomicU32::new(1),
+            next_db: AtomicU32::new(0),
             store,
             config,
             notify: tokio::sync::Notify::new(),
@@ -12,6 +14,7 @@ impl TtlManager {
                 sweep_cycles: AtomicU64::new(0),
             },
             expire_hook: RwLock::new(None),
+            expire_observer: RwLock::new(None),
         })
     }
 
@@ -21,6 +24,14 @@ impl TtlManager {
             .write()
             .expect("ttl expire hook lock poisoned");
         *guard = Some(hook);
+    }
+
+    pub fn set_expire_observer(&self, observer: Arc<ExpireObserver>) {
+        let mut guard = self
+            .expire_observer
+            .write()
+            .expect("ttl expire observer lock poisoned");
+        *guard = Some(observer);
     }
 
     pub fn stats(&self) -> &TtlStats {

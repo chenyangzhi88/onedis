@@ -7,7 +7,13 @@ impl Db {
         };
         let Some(raw) = self
             .store
-            .get_raw(&vector_doc_key(self.db_index, index, version, id))
+            .get_raw(&vector_doc_key(
+                self.key_layout,
+                self.db_index,
+                index,
+                version,
+                id,
+            ))
         else {
             return Ok(None);
         };
@@ -33,7 +39,13 @@ impl Db {
         };
         let Some(raw) = self
             .store
-            .get_raw_async(&vector_doc_key(self.db_index, index, version, id))
+            .get_raw_async(&vector_doc_key(
+                self.key_layout,
+                self.db_index,
+                index,
+                version,
+                id,
+            ))
             .await
         else {
             return Ok(None);
@@ -63,7 +75,7 @@ impl Db {
             Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(false),
             Err(err) => return Err(err),
         };
-        let key = vector_doc_key(self.db_index, index, version, id);
+        let key = vector_doc_key(self.key_layout, self.db_index, index, version, id);
         let Some(raw) = self.store.get_raw(&key) else {
             return Ok(false);
         };
@@ -77,6 +89,7 @@ impl Db {
         let old_attrs = parse_attrs(&doc.attrs_json)?;
         let mut batch = WriteBatch::new();
         let attr_context = VectorAttrIndexContext {
+            layout: self.key_layout,
             db_index: self.db_index,
             index,
             version,
@@ -88,6 +101,7 @@ impl Db {
         doc.attrs_json = new_attrs_json;
         put_vector_marker_to_batch(
             &mut batch,
+            self.key_layout,
             self.db_index,
             index,
             expire_ms,

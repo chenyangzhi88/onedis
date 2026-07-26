@@ -10,7 +10,7 @@ pub(in crate::store::db) struct VersionOwner {
     key: Vec<u8>,
 }
 
-pub(in crate::store::db) fn version_owner_prefix(db_index: u16) -> Vec<u8> {
+pub(crate) fn version_owner_prefix(db_index: u16) -> Vec<u8> {
     let mut key = internal_prefix(db_index);
     key.extend_from_slice(&VERSION_OWNER_NAMESPACE);
     key

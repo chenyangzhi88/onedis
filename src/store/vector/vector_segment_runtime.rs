@@ -135,6 +135,7 @@ impl VectorRuntime {
                     .graph
                     .search(query, limit, ef.max(limit), allow_doc_ids)?,
             );
+            candidates = reduce_vector_candidates(candidates, candidate_limit)?;
         }
         if self.active.len() > 0 {
             let limit = candidate_limit.min(self.active.len());
@@ -142,8 +143,9 @@ impl VectorRuntime {
                 self.active
                     .search(query, limit, ef.max(limit), allow_doc_ids)?,
             );
+            candidates = reduce_vector_candidates(candidates, candidate_limit)?;
         }
-        reduce_vector_candidates(candidates, candidate_limit)
+        Ok(candidates)
     }
 
     fn freeze_active(&mut self) -> Option<(VectorSegmentMeta, HnswGraphSnapshot)> {

@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BinaryHeap, HashMap, HashSet},
     hash::{BuildHasher, Hash, Hasher},
     sync::{
         Arc, Mutex, RwLock,
@@ -20,10 +20,10 @@ use hnsw_rs::{
 use serde_json::Value as JsonValue;
 
 use super::{
-    Db, Structure, TYPE_VECTOR, VECTOR_DOC_NAMESPACE, VECTOR_GRAPH_NAMESPACE,
+    Db, KeyEncodingLayout, Structure, TYPE_VECTOR, VECTOR_DOC_NAMESPACE, VECTOR_GRAPH_NAMESPACE,
     VECTOR_META_NAMESPACE, VECTOR_NUMERIC_NAMESPACE, VECTOR_SEGMENT_NAMESPACE,
     VECTOR_TAG_NAMESPACE, Vector, VectorLinkLayers, VectorObservabilitySnapshot, WRONG_TYPE_ERROR,
-    decode_meta_header, encode_entry, main_key, sub_key_range_start_bytes,
+    decode_meta_header, encode_entry,
 };
 use crate::observability::metrics::{elapsed_us, global_metrics};
 
@@ -32,6 +32,11 @@ const DEFAULT_HNSW_M: u32 = 16;
 const DEFAULT_HNSW_EF_CONSTRUCTION: u32 = 64;
 const DEFAULT_HNSW_EF_RUNTIME: u32 = 64;
 const DEFAULT_HNSW_MAX_LAYER: usize = 16;
+const MAX_VECTOR_DIMENSIONS: usize = 65_536;
+const MAX_VECTOR_INITIAL_CAP: usize = 1_000_000;
+const MAX_VECTOR_HNSW_EF: usize = 1_000_000;
+const DEFAULT_VECTOR_SEARCH_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_VECTOR_EXACT_SCAN_LIMIT: usize = 1_000_000;
 
 include!("vector/types_runtime.rs");
 

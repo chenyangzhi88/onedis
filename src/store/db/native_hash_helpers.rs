@@ -89,21 +89,36 @@ impl Db {
         field: &str,
     ) -> bool {
         let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-        let Some(raw) = self.store.get_raw(&expire_key) else {
-            return true;
-        };
-        let Some(expire_ms) = decode_u64_be(&raw) else {
-            return true;
-        };
-        if expire_ms == 0 || now_ms() < expire_ms {
-            return true;
-        }
+        let field_key = hash_field_key(self.db_index, key, version, field);
+        for _ in 0..64 {
+            let observed_expire = self.store.get_raw_observed(&expire_key);
+            let Some(raw) = observed_expire.value() else {
+                return true;
+            };
+            let Some(expire_ms) = decode_u64_be(raw) else {
+                return true;
+            };
+            if expire_ms == 0 || now_ms() < expire_ms {
+                return true;
+            }
 
-        let mut batch = WriteBatch::new();
-        batch.delete(&hash_field_key(self.db_index, key, version, field));
-        batch.delete(&expire_key);
-        self.write_batch_if_not_empty(&batch);
-        false
+            let observed_field = self.store.get_raw_observed(&field_key);
+            let mut batch = WriteBatch::new();
+            batch.delete(&field_key);
+            batch.delete(&expire_key);
+            match self.compare_and_write_batch_if_not_empty(
+                &[
+                    CompareCondition::from_observed(&observed_expire),
+                    CompareCondition::from_observed(&observed_field),
+                ],
+                &batch,
+            ) {
+                Ok(true) => return false,
+                Ok(false) => continue,
+                Err(_) => return true,
+            }
+        }
+        true
     }
 
     pub(in crate::store::db) async fn hash_field_is_live_async(
@@ -113,21 +128,39 @@ impl Db {
         field: &str,
     ) -> bool {
         let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-        let Some(raw) = self.store.get_raw_async(&expire_key).await else {
-            return true;
-        };
-        let Some(expire_ms) = decode_u64_be(&raw) else {
-            return true;
-        };
-        if expire_ms == 0 || now_ms() < expire_ms {
-            return true;
-        }
+        let field_key = hash_field_key(self.db_index, key, version, field);
+        for _ in 0..64 {
+            let observed_expire = self.store.get_raw_observed_async(&expire_key).await;
+            let Some(raw) = observed_expire.value() else {
+                return true;
+            };
+            let Some(expire_ms) = decode_u64_be(raw) else {
+                return true;
+            };
+            if expire_ms == 0 || now_ms() < expire_ms {
+                return true;
+            }
 
-        let mut batch = WriteBatch::new();
-        batch.delete(&hash_field_key(self.db_index, key, version, field));
-        batch.delete(&expire_key);
-        self.write_batch_if_not_empty_async(&batch).await;
-        false
+            let observed_field = self.store.get_raw_observed_async(&field_key).await;
+            let mut batch = WriteBatch::new();
+            batch.delete(&field_key);
+            batch.delete(&expire_key);
+            match self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[
+                        CompareCondition::from_observed(&observed_expire),
+                        CompareCondition::from_observed(&observed_field),
+                    ],
+                    &batch,
+                )
+                .await
+            {
+                Ok(true) => return false,
+                Ok(false) => continue,
+                Err(_) => return true,
+            }
+        }
+        true
     }
 
     pub(in crate::store::db) fn hash_live_field_value(

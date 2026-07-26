@@ -336,6 +336,7 @@ impl Handler {
 
 impl Drop for Handler {
     fn drop(&mut self) {
+        self.clear_watches();
         if self.session_manager.remove_session(self.session.get_id()) {
             self.metrics.connection_closed();
         }

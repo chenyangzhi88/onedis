@@ -4,7 +4,7 @@ pub(in crate::store::db) fn stream_entry_prefix(db_index: u16, key: &str, versio
     let mut prefix = Vec::with_capacity(2 + STREAM_ENTRY_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_ENTRY_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -14,7 +14,7 @@ pub(in crate::store::db) fn stream_group_prefix(db_index: u16, key: &str, versio
     let mut prefix = Vec::with_capacity(2 + STREAM_GROUP_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_GROUP_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -24,7 +24,7 @@ pub(in crate::store::db) fn stream_pel_prefix(db_index: u16, key: &str, version:
     let mut prefix = Vec::with_capacity(2 + STREAM_PEL_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_PEL_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -38,7 +38,7 @@ pub(in crate::store::db) fn stream_consumer_prefix(
     let mut prefix = Vec::with_capacity(2 + STREAM_CONSUMER_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&STREAM_CONSUMER_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix

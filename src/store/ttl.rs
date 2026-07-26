@@ -15,7 +15,7 @@
 //! │                           │  └──────────────────────────┘  │ │
 //! │                           └────────────────────────────────┘ │
 //! │  ┌──────────────────────────────────────────────────────┐    │
-//! │  │  Notify — wake sweeper on short-TTL inserts          │    │
+//! │  │  Notify — wake sweeper during shutdown               │    │
 //! │  └──────────────────────────────────────────────────────┘    │
 //! └──────────────────────────────────────────────────────────────┘
 //! ```
@@ -30,9 +30,9 @@
 //!   (1) meta key still exists, (2) stored expire_ms matches the index entry.
 //!   This eliminates all races with user DEL / PERSIST / re-EXPIRE commands.
 //!
-//! - **Version-based DeleteRange**: Sub-keys are prefixed with a monotonic
-//!   version, enabling O(1) bulk cleanup via a single DeleteRange per
-//!   namespace instead of scan + individual delete.
+//! - **Version-based DeleteRange**: Sub-keys are prefixed with an unambiguous
+//!   owner component and a monotonic version, enabling O(1) bulk cleanup via a
+//!   single DeleteRange per namespace instead of scan + individual delete.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -44,6 +44,7 @@ use log::{debug, info};
 
 use super::kv_store::KvStore;
 use crate::observability::metrics::{elapsed_us, global_metrics};
+use crate::store::db::{TtlKeyEncoding, ttl_key_encoding_for_store};
 
 include!("ttl/constants.rs");
 include!("ttl/meta_header.rs");

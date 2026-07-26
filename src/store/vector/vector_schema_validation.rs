@@ -19,7 +19,7 @@ fn vector_segment_max_docs() -> u64 {
     std::env::var("ONEDIS_VECTOR_SEGMENT_MAX_DOCS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
+        .filter(|value| *value > 0 && *value <= MAX_VECTOR_INITIAL_CAP as u64)
         .unwrap_or(DEFAULT_VECTOR_SEGMENT_MAX_DOCS)
 }
 
@@ -29,6 +29,30 @@ fn normalize_hnsw_m(value: Option<usize>) -> Result<usize, Error> {
         return Err(Error::msg("ERR invalid vector HNSW M"));
     }
     Ok(m)
+}
+
+fn validate_vector_meta_config(meta: &VectorIndexMeta) -> Result<(), Error> {
+    if meta.dim == 0 || meta.dim as usize > MAX_VECTOR_DIMENSIONS {
+        return Err(Error::msg("ERR invalid persisted vector dimension"));
+    }
+    if meta.m == 0 || meta.m > 256 {
+        return Err(Error::msg("ERR invalid persisted vector HNSW M"));
+    }
+    if meta.ef_construction < meta.m || meta.ef_construction as usize > MAX_VECTOR_HNSW_EF {
+        return Err(Error::msg(
+            "ERR invalid persisted vector EF_CONSTRUCTION",
+        ));
+    }
+    if meta.ef_runtime == 0 || meta.ef_runtime as usize > MAX_VECTOR_HNSW_EF {
+        return Err(Error::msg("ERR invalid persisted vector EF_RUNTIME"));
+    }
+    if meta.initial_cap == 0 || meta.initial_cap > MAX_VECTOR_INITIAL_CAP as u64 {
+        return Err(Error::msg("ERR invalid persisted vector INITIAL_CAP"));
+    }
+    if meta.segment_max_docs == 0 || meta.segment_max_docs > MAX_VECTOR_INITIAL_CAP as u64 {
+        return Err(Error::msg("ERR invalid persisted vector segment size"));
+    }
+    validate_schema(&meta.schema)
 }
 
 fn validate_schema(schema: &[VectorFieldSchema]) -> Result<(), Error> {
@@ -52,12 +76,42 @@ fn validate_vector(vector: &[f32], dim: usize) -> Result<(), Error> {
 }
 
 fn validate_vector_for_distance(vector: &[f32], distance: VectorDistance) -> Result<(), Error> {
-    if distance == VectorDistance::Cosine
-        && vector.iter().map(|value| value * value).sum::<f32>() == 0.0
-    {
-        return Err(Error::msg("ERR zero norm vector for cosine distance"));
+    let norm_squared = vector
+        .iter()
+        .map(|value| {
+            let value = f64::from(*value);
+            value * value
+        })
+        .sum::<f64>();
+    match distance {
+        VectorDistance::Cosine if norm_squared == 0.0 => {
+            return Err(Error::msg("ERR zero norm vector for cosine distance"));
+        }
+        VectorDistance::L2 if norm_squared > f64::from(f32::MAX) / 4.0 => {
+            return Err(Error::msg("ERR vector magnitude is too large for L2 distance"));
+        }
+        VectorDistance::Ip if norm_squared > f64::from(f32::MAX) => {
+            return Err(Error::msg("ERR vector magnitude is too large for IP distance"));
+        }
+        _ => {}
     }
     Ok(())
+}
+
+fn vector_search_memory_budget_bytes() -> usize {
+    std::env::var("ONEDIS_VECTOR_SEARCH_MEMORY_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_VECTOR_SEARCH_MEMORY_BUDGET_BYTES)
+}
+
+fn vector_exact_scan_limit() -> usize {
+    std::env::var("ONEDIS_VECTOR_EXACT_SCAN_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_VECTOR_EXACT_SCAN_LIMIT)
 }
 
 fn parse_attrs(attrs_json: &str) -> Result<JsonValue, Error> {

@@ -191,6 +191,10 @@ impl Session {
         self.watched_keys.clear();
     }
 
+    pub fn take_watches(&mut self) -> Vec<WatchedKey> {
+        std::mem::take(&mut self.watched_keys)
+    }
+
     pub fn set_name(&mut self, name: Option<String>) {
         self.name = name;
     }

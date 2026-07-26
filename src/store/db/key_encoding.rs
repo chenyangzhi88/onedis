@@ -41,7 +41,7 @@ pub(in crate::store::db) fn trace_lrange_sample() -> Option<u64> {
     (count <= 20 || count.is_multiple_of(1000)).then_some(count)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(in crate::store::db) enum KeyEncodingLayout {
     /// Legacy on-disk format used before kv-engine tables carried DB isolation.
     DbPrefixedV1,
@@ -53,6 +53,20 @@ pub(in crate::store::db) enum KeyEncodingLayout {
 pub(in crate::store::db) const KEY_ENCODING_LAYOUT_META_KEY: &[u8] = b"\x80m\x00layout";
 pub(in crate::store::db) const DB_PREFIXED_V1_LAYOUT_VALUE: &[u8] = b"db-prefixed-v1";
 pub(in crate::store::db) const TABLE_LOCAL_V2_LAYOUT_VALUE: &[u8] = b"table-local-v2";
+const NUL_KEY_ENCODING_MARKER: u8 = 0xff;
+
+/// Append the logical owner component used by versioned sub-keys.
+///
+/// Existing UTF-8 keys without NUL bytes retain their on-disk encoding. Keys
+/// containing NUL use a marker byte that can never occur in valid UTF-8,
+/// followed by a length prefix, so the owner boundary is unambiguous.
+pub(in crate::store) fn append_versioned_sub_key_owner(out: &mut Vec<u8>, key: &[u8]) {
+    if key.contains(&0) {
+        out.push(NUL_KEY_ENCODING_MARKER);
+        out.extend_from_slice(&(key.len() as u64).to_be_bytes());
+    }
+    out.extend_from_slice(key);
+}
 
 impl KeyEncodingLayout {
     pub(in crate::store::db) const CURRENT: Self = Self::TableLocalV2;
@@ -105,28 +119,14 @@ impl KeyEncodingLayout {
         key: &[u8],
         version: u64,
     ) -> Vec<u8> {
-        match self {
-            Self::DbPrefixedV1 => {
-                let pfx = self.internal_prefix(db_index);
-                let mut buf = Vec::with_capacity(pfx.len() + 3 + key.len() + 1 + 8);
-                buf.extend_from_slice(&pfx);
-                buf.extend_from_slice(ns);
-                buf.extend_from_slice(key);
-                buf.push(0x00);
-                buf.extend_from_slice(&version.to_be_bytes());
-                buf
-            }
-            Self::TableLocalV2 => {
-                let pfx = self.internal_prefix(db_index);
-                let mut buf = Vec::with_capacity(pfx.len() + 3 + key.len() + 1 + 8);
-                buf.extend_from_slice(&pfx);
-                buf.extend_from_slice(ns);
-                buf.extend_from_slice(key);
-                buf.push(0x00);
-                buf.extend_from_slice(&version.to_be_bytes());
-                buf
-            }
-        }
+        let pfx = self.internal_prefix(db_index);
+        let mut buf = Vec::with_capacity(pfx.len() + 3 + key.len() + 1 + 8 + 9);
+        buf.extend_from_slice(&pfx);
+        buf.extend_from_slice(ns);
+        append_versioned_sub_key_owner(&mut buf, key);
+        buf.push(0x00);
+        buf.extend_from_slice(&version.to_be_bytes());
+        buf
     }
 
     pub(in crate::store::db) fn sub_key_range_end_bytes(
@@ -136,7 +136,9 @@ impl KeyEncodingLayout {
         key: &[u8],
         version: u64,
     ) -> Vec<u8> {
-        self.sub_key_range_start_bytes(db_index, ns, key, version + 1)
+        let start = self.sub_key_range_start_bytes(db_index, ns, key, version);
+        prefix_exclusive_upper_bound(&start)
+            .expect("versioned sub-key prefix must have an exclusive upper bound")
     }
 
     pub(in crate::store::db) fn is_db_range_delete_start(self, db_index: u16, key: &[u8]) -> bool {
@@ -230,6 +232,60 @@ impl KeyEncodingLayout {
         store.put_raw(KEY_ENCODING_LAYOUT_META_KEY, Self::TableLocalV2.encode());
         Self::TableLocalV2
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct TtlKeyEncoding {
+    layout: KeyEncodingLayout,
+}
+
+impl TtlKeyEncoding {
+    pub(crate) const fn current() -> Self {
+        Self {
+            layout: KeyEncodingLayout::CURRENT,
+        }
+    }
+
+    pub(crate) fn main_key(self, db_index: u16, key: &str) -> Vec<u8> {
+        self.layout.main_key(db_index, key)
+    }
+
+    pub(crate) fn sub_key_range_start(
+        self,
+        db_index: u16,
+        namespace: &[u8; 3],
+        key: &str,
+        version: u64,
+    ) -> Vec<u8> {
+        self.layout
+            .sub_key_range_start_bytes(db_index, namespace, key.as_bytes(), version)
+    }
+
+    pub(crate) fn sub_key_range_end(
+        self,
+        db_index: u16,
+        namespace: &[u8; 3],
+        key: &str,
+        version: u64,
+    ) -> Vec<u8> {
+        self.layout
+            .sub_key_range_end_bytes(db_index, namespace, key.as_bytes(), version)
+    }
+}
+
+pub(crate) fn ttl_key_encoding_for_store(store: &KvStore) -> TtlKeyEncoding {
+    let layout = store
+        .get_raw(KEY_ENCODING_LAYOUT_META_KEY)
+        .map(|raw| {
+            KeyEncodingLayout::decode(&raw).unwrap_or_else(|| {
+                panic!(
+                    "unsupported onedis key encoding layout metadata: {:?}",
+                    String::from_utf8_lossy(&raw)
+                )
+            })
+        })
+        .unwrap_or(KeyEncodingLayout::CURRENT);
+    TtlKeyEncoding { layout }
 }
 
 /// 数据库索引前缀（2 字节大端序），用于兼容当前 DbPrefixedV1 磁盘格式。

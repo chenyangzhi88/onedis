@@ -29,13 +29,7 @@ impl Db {
         if batch.count() == 0 {
             return;
         }
-        if self.store.is_transactional() || self.mutation_tracker.is_enabled() {
-            self.write_batch_if_not_empty(batch);
-            return;
-        }
-        self.invalidate_counter_cache_for_batch(batch);
-        self.invalidate_list_meta_cache_for_batch(batch);
-        self.store.write_batch(batch);
+        self.write_batch_if_not_empty(batch);
     }
 
     pub(in crate::store::db) async fn write_plain_string_batch_if_not_empty_async(
@@ -45,13 +39,7 @@ impl Db {
         if batch.count() == 0 {
             return;
         }
-        if self.store.is_transactional() || self.mutation_tracker.is_enabled() {
-            self.write_batch_if_not_empty_async(batch).await;
-            return;
-        }
-        self.invalidate_counter_cache_for_batch(batch);
-        self.invalidate_list_meta_cache_for_batch(batch);
-        self.store.write_batch_async(batch).await;
+        self.write_batch_if_not_empty_async(batch).await;
     }
 
     pub(in crate::store::db) async fn write_plain_string_batch_owned_if_not_empty_async(
@@ -61,13 +49,7 @@ impl Db {
         if batch.count() == 0 {
             return;
         }
-        if self.store.is_transactional() || self.mutation_tracker.is_enabled() {
-            self.write_batch_if_not_empty_async(&batch).await;
-            return;
-        }
-        self.invalidate_counter_cache_for_batch(&batch);
-        self.invalidate_list_meta_cache_for_batch(&batch);
-        self.store.write_batch_owned_async(batch).await;
+        self.write_batch_if_not_empty_async(&batch).await;
     }
 
     pub(in crate::store::db) async fn write_plain_string_batch_if_not_empty_without_watch_publish_async(
@@ -80,6 +62,9 @@ impl Db {
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch_async(batch).await;
+        if !self.store.is_transactional() {
+            self.reconcile_vector_runtimes_for_batch(batch);
+        }
     }
 
     pub(in crate::store::db) async fn compare_and_write_batch_if_not_empty_async(
@@ -131,7 +116,13 @@ impl Db {
     }
 
     pub(in crate::store::db) fn record_or_publish_mutations(&self, batch: &WriteBatch) {
-        if !self.store.is_transactional() && !self.mutation_tracker.is_enabled() {
+        if !self.store.is_transactional() {
+            self.reconcile_vector_runtimes_for_batch(batch);
+        }
+        // This check runs after a non-transactional write. A watch registered
+        // before the write is therefore visible here; one registered after
+        // this check starts after the mutation and need not observe it.
+        if !self.store.is_transactional() && !self.mutation_tracker.has_watched_keys() {
             return;
         }
         let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, batch);

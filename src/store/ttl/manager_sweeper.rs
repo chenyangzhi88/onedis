@@ -31,8 +31,11 @@ impl TtlManager {
                 return;
             }
 
-            let more_expired = self.sweep_once_async().await;
-            if more_expired {
+            while self.sweep_once_async().await {
+                if self.shutdown.load(Ordering::Acquire) {
+                    info!("TTL sweeper shutting down");
+                    return;
+                }
                 tokio::task::yield_now().await;
             }
         }
@@ -43,9 +46,10 @@ impl TtlManager {
     /// EXPIRE cannot be deleted by a stale sweeper decision.
     async fn expire_key_async(&self, entry: &TtlEntry) -> ExpireResult {
         let store = self.store_for_db(entry.db_index);
-        let meta_key = main_key(entry.db_index, &entry.key);
+        let meta_key = entry.key_encoding.main_key(entry.db_index, &entry.key);
         let observed = store.get_raw_observed_async(&meta_key).await;
         let mut batch = WriteBatch::new();
+        let mut expired_header = None;
 
         let planned_result = match observed.value() {
             None => {
@@ -68,6 +72,7 @@ impl TtlManager {
                     batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
                     ExpireResult::Stale
                 } else {
+                    expired_header = Some(header);
                     let hook = self
                         .expire_hook
                         .read()
@@ -83,32 +88,38 @@ impl TtlManager {
 
                     batch.delete(&meta_key);
                     batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
-                    delete_sub_keys_to_batch(
+                    delete_sub_keys_to_batch_with_encoding(
                         &mut batch,
+                        entry.key_encoding,
                         entry.db_index,
                         &entry.key,
                         header.version,
                         header.type_tag,
                     );
-                    if header.type_tag == TYPE_JSON {
-                        for (node_key, _) in store
-                            .scan_prefix_raw_async(&json_node_prefix(
-                                entry.db_index,
-                                &entry.key,
-                                header.version,
-                            ))
-                            .await
-                        {
-                            batch.delete(&node_key);
-                        }
-                    }
                     ExpireResult::Deleted
                 }
             }
         };
 
-        self.commit_expire_plan_async(&store, &observed, &batch, planned_result)
-            .await
+        let result = self
+            .commit_expire_plan_async(&store, &observed, &batch, planned_result)
+            .await;
+        if matches!(result, ExpireResult::Deleted)
+            && let Some(header) = expired_header
+            && let Some(observer) = self
+                .expire_observer
+                .read()
+                .expect("ttl expire observer lock poisoned")
+                .clone()
+        {
+            observer(
+                entry.db_index,
+                &entry.key,
+                header.type_tag,
+                header.version,
+            );
+        }
+        result
     }
 
     async fn commit_expire_plan_async(
@@ -169,25 +180,34 @@ impl TtlManager {
 
     async fn scan_expired_batch_async(&self, now: u64, batch_size: usize) -> Vec<TtlEntry> {
         let mut expired = Vec::with_capacity(batch_size);
-        let db_count = self.db_count.load(Ordering::Acquire).max(1) as u16;
-        for db_idx in 0..db_count {
+        let db_count = self.db_count.load(Ordering::Acquire).max(1);
+        let start_db = self.next_db.load(Ordering::Acquire) % db_count;
+        let mut last_db = start_db;
+        for offset in 0..db_count {
             if expired.len() >= batch_size {
                 break;
             }
-            for (ttl_key, _) in self
-                .store_for_db(db_idx)
-                .scan_prefix_raw_async(&ttl_db_prefix(db_idx))
+            let db_u32 = (start_db + offset) % db_count;
+            let db_idx = db_u32 as u16;
+            last_db = db_u32;
+            let remaining = batch_size - expired.len();
+            let store = self.store_for_db(db_idx);
+            let key_encoding = ttl_key_encoding_for_store(&store);
+            for (ttl_key, _) in store
+                .scan_range_raw_limited_async(
+                    &ttl_db_prefix(db_idx),
+                    Some(ttl_db_expire_upper_bound(db_idx, now)),
+                    remaining,
+                )
                 .await
             {
                 if let Some((expire_ms, parsed_db, key)) = parse_ttl_index_key(&ttl_key) {
                     debug_assert_eq!(parsed_db, db_idx);
-                    if expire_ms > now {
-                        break;
-                    }
                     expired.push(TtlEntry {
                         expire_ms,
                         db_index: parsed_db,
                         key,
+                        key_encoding,
                     });
                     if expired.len() >= batch_size {
                         break;
@@ -195,6 +215,8 @@ impl TtlManager {
                 }
             }
         }
+        self.next_db
+            .store((last_db + 1) % db_count, Ordering::Release);
         expired
     }
 

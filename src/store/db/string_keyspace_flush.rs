@@ -8,7 +8,9 @@ impl Db {
             batch.delete_range(&prefix, &end);
         } else {
             for (key, _) in self.store.scan_prefix_raw(&prefix) {
-                batch.delete(&key);
+                if key.as_slice() != KEY_ENCODING_LAYOUT_META_KEY {
+                    batch.delete(&key);
+                }
             }
         }
         self.ttl_manager
@@ -27,7 +29,9 @@ impl Db {
             batch.delete_range(&prefix, &end);
         } else {
             for (key, _) in self.store.scan_prefix_raw_async(&prefix).await {
-                batch.delete(&key);
+                if key.as_slice() != KEY_ENCODING_LAYOUT_META_KEY {
+                    batch.delete(&key);
+                }
             }
         }
         self.ttl_manager

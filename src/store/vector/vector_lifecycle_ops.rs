@@ -7,10 +7,20 @@ impl Db {
             .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
         let (_, version, _) = self.read_vector_meta(index)?;
         let mut batch = WriteBatch::new();
-        batch.delete(&main_key(self.db_index, index));
-        delete_vector_namespace_to_batch(&self.store, &mut batch, self.db_index, index, version);
+        batch.delete(&self.mk(index));
+        delete_vector_namespace_to_batch(
+            &mut batch,
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+        );
         self.write_batch_if_not_empty(&batch);
         self.vector_runtimes.remove(self.db_index, index, version);
+        drop(_guard);
+        drop(write_lock);
+        self.vector_runtimes
+            .cleanup_write_lock_if_idle(self.db_index, index);
         Ok(1)
     }
 
@@ -29,11 +39,18 @@ impl Db {
             .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
         let (expire_ms, version, mut meta) = self.read_vector_meta(index)?;
         let mut batch = WriteBatch::new();
-        delete_vector_segments_to_batch(&self.store, &mut batch, self.db_index, index, version);
+        delete_vector_segments_to_batch(
+            &mut batch,
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+        );
         meta.next_segment_id = 1;
         meta.snapshot_doc_version = 0;
         put_vector_marker_to_batch(
             &mut batch,
+            self.key_layout,
             self.db_index,
             index,
             expire_ms,
@@ -41,7 +58,7 @@ impl Db {
             meta.dim,
         );
         batch.put(
-            &vector_meta_key(self.db_index, index, version),
+            &vector_meta_key(self.key_layout, self.db_index, index, version),
             &encode_record(&meta)?,
         );
         self.write_batch_if_not_empty(&batch);
@@ -51,7 +68,7 @@ impl Db {
             version,
             VectorRuntimeConfig::from(&meta),
         );
-        let prefix = vector_doc_prefix(self.db_index, index, version);
+        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         for (_, raw) in self.store.scan_prefix_raw(&prefix) {
             let doc = decode_record::<VectorDocRecord>(&raw)?;
             if !doc.deleted {
@@ -81,7 +98,7 @@ impl Db {
             .lock()
             .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
         let (_, version, meta) = self.read_vector_meta(index)?;
-        self.ensure_vector_runtime(index, version, &meta)?;
+        self.ensure_vector_runtime_unlocked(index, version, &meta)?;
         self.gc_obsolete_vector_segments(index, version)
     }
 
@@ -103,7 +120,7 @@ impl Db {
         if latest_doc_version <= meta.snapshot_doc_version {
             return Ok(());
         }
-        if meta.doc_count < max_docs && latest_doc_version - meta.snapshot_doc_version < max_docs {
+        if latest_doc_version.saturating_sub(meta.snapshot_doc_version) < max_docs {
             return Ok(());
         }
         let Some(runtime) = self.vector_runtimes.get(self.db_index, index, version) else {
@@ -117,7 +134,13 @@ impl Db {
             return Ok(());
         };
         let segment_id = segment.segment_id;
-        let graph_key = vector_graph_key(self.db_index, index, version, segment_id);
+        let graph_key = vector_graph_key(
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+            segment_id,
+        );
         segment.graph_key = graph_key.clone();
         runtime
             .write()
@@ -127,6 +150,7 @@ impl Db {
         meta.snapshot_doc_version = meta.snapshot_doc_version.max(segment.max_doc_version);
         persist_vector_segment_snapshot(
             &self.store,
+            self.key_layout,
             self.db_index,
             index,
             version,
@@ -146,7 +170,13 @@ impl Db {
             for (id, doc_version) in entries {
                 let Some(raw) =
                     self.store
-                        .get_raw(&vector_doc_key(self.db_index, index, version, &id))
+                        .get_raw(&vector_doc_key(
+                            self.key_layout,
+                            self.db_index,
+                            index,
+                            version,
+                            &id,
+                        ))
                 else {
                     continue;
                 };
@@ -167,6 +197,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         for segment_id in &obsolete_ids {
             batch.delete(&vector_segment_key(
+                self.key_layout,
                 self.db_index,
                 index,
                 version,

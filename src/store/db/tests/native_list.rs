@@ -67,6 +67,32 @@ async fn concurrent_list_push_async_on_same_key_keeps_all_items() {
     );
 }
 
+#[tokio::test]
+async fn stale_expired_list_cache_cannot_delete_recreated_list() {
+    let db = test_db();
+    db.list_push_right_async("queue", &["new".to_string()], false)
+        .await
+        .unwrap();
+    let current = db.list_meta_async("queue").await.unwrap().unwrap();
+
+    db.list_meta_cache.insert(
+        db.mk("queue"),
+        ListMeta {
+            expire_ms: now_ms().saturating_sub(1),
+            version: current.version,
+            head: current.head,
+            tail: current.tail,
+        },
+    );
+
+    assert_eq!(db.list_len_async("queue").await.unwrap(), 1);
+    assert_eq!(
+        db.list_index_async("queue", 0).await.unwrap(),
+        Some("new".to_string())
+    );
+    assert!(db.exists("queue"));
+}
+
 #[test]
 fn list_native_ops_reject_wrong_type() {
     let db = test_db();

@@ -57,6 +57,24 @@ impl KvStore {
         ObservedRawValue::from_engine(key, observed)
     }
 
+    pub fn get_raw_observed(&self, key: &[u8]) -> ObservedRawValue {
+        let started = Instant::now();
+        if let Some(value) = self.with_transaction_mut(|txn| {
+            txn.get(key)
+                .expect("failed to read key from kv_engine transaction")
+        }) {
+            let observed = ObservedRawValue::from_transaction(key, value);
+            global_metrics().record_storage_read(elapsed_us(started));
+            return observed;
+        }
+        let observed = self
+            .table
+            .get_observed(key)
+            .expect("failed to read observed key from kv_engine");
+        global_metrics().record_storage_read(elapsed_us(started));
+        ObservedRawValue::from_engine(key, observed)
+    }
+
     pub async fn observe_raw_key_state_async(&self, key: &[u8]) -> ObservedRawKeyState {
         let started = Instant::now();
         if let Some(exists) = self.with_transaction_mut(|txn| {

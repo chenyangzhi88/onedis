@@ -9,10 +9,12 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(test)]
 fn main_key(_db_index: u16, key: &str) -> Vec<u8> {
     key.as_bytes().to_vec()
 }
 
+#[cfg(test)]
 fn json_node_prefix(_db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(
         crate::store::TABLE_LOCAL_INTERNAL_PREFIX.len() + JSON_NODE_NS.len() + key.len() + 1 + 8,
@@ -44,7 +46,6 @@ fn ttl_db_prefix(db_index: u16) -> Vec<u8> {
     key
 }
 
-#[cfg(test)]
 fn ttl_db_expire_upper_bound(db_index: u16, now_ms: u64) -> Vec<u8> {
     let mut key = ttl_db_prefix(db_index);
     key.extend_from_slice(&now_ms.saturating_add(1).to_be_bytes());

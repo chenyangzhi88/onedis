@@ -1,4 +1,5 @@
 type ExpireHook = dyn Fn(u16, &str, u8, &mut WriteBatch) -> bool + Send + Sync;
+type ExpireObserver = dyn Fn(u16, &str, u8, u64) + Send + Sync;
 
 // ============================================================================
 // Type Tags — encoded at meta value byte offset 16 (after expire_ms + version)

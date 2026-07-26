@@ -13,7 +13,8 @@ use kv_engine::{
         DbImpl, KeyRange, KvBatch, KvProjection, KvScanCursor, KvScanRequest,
         ObservedKeyState as EngineObservedKeyState, ObservedKvValue as EngineObservedKvValue,
         SchemalessCompareCondition as EngineCompareCondition, SchemalessTable,
-        SchemalessTableOptions, SchemalessTransaction, SchemalessWriteBatch,
+        SchemalessTableOptions, SchemalessTransaction, SchemalessTransactionOptions,
+        SchemalessWriteBatch,
     },
     function::MergeOperate,
 };

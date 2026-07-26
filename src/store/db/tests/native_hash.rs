@@ -55,6 +55,39 @@ fn hash_native_ops_use_field_level_storage() {
 }
 
 #[test]
+fn stale_hash_field_expiry_cleanup_cannot_delete_new_value() {
+    let db = test_db();
+    db.hash_set("hash", "field", "old").unwrap();
+    let (_, version) = db.hash_expire_ms("hash").unwrap().unwrap();
+    let expire_key = hash_field_expire_key(db.db_index, "hash", version, "field");
+    let field_key = hash_field_key(db.db_index, "hash", version, "field");
+    db.store
+        .put_raw(&expire_key, &now_ms().saturating_sub(1).to_be_bytes());
+
+    let observed_expire = db.store.get_raw_observed(&expire_key);
+    let observed_field = db.store.get_raw_observed(&field_key);
+    db.hash_set("hash", "field", "new").unwrap();
+
+    let mut stale_cleanup = WriteBatch::new();
+    stale_cleanup.delete(&field_key);
+    stale_cleanup.delete(&expire_key);
+    assert!(
+        !db.compare_and_write_batch_if_not_empty(
+            &[
+                CompareCondition::from_observed(&observed_expire),
+                CompareCondition::from_observed(&observed_field),
+            ],
+            &stale_cleanup,
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        db.hash_get("hash", "field").unwrap(),
+        Some("new".to_string())
+    );
+}
+
+#[test]
 fn hash_delete_removes_meta_when_last_field_is_deleted() {
     let db = test_db();
 

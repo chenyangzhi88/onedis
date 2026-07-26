@@ -16,27 +16,36 @@ impl Db {
         }
 
         let distance = parse_distance(&options.distance)?;
-        if options.dim == 0 {
-            return Err(Error::msg("ERR vector dimension must be positive"));
+        if options.dim == 0 || options.dim > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::msg("ERR invalid vector dimension"));
         }
         validate_schema(&options.schema)?;
         let segment_max_docs = options
             .segment_max_docs
-            .filter(|value| *value > 0)
             .unwrap_or_else(vector_segment_max_docs);
+        if segment_max_docs == 0 || segment_max_docs > MAX_VECTOR_INITIAL_CAP as u64 {
+            return Err(Error::msg("ERR invalid vector segment size"));
+        }
         let m = normalize_hnsw_m(options.m)?;
-        let ef_construction = options
+        let requested_ef_construction = options
             .ef_construction
-            .unwrap_or(DEFAULT_HNSW_EF_CONSTRUCTION as usize)
-            .max(m);
+            .unwrap_or(DEFAULT_HNSW_EF_CONSTRUCTION as usize);
+        if requested_ef_construction == 0 || requested_ef_construction > MAX_VECTOR_HNSW_EF {
+            return Err(Error::msg("ERR invalid vector EF_CONSTRUCTION"));
+        }
+        let ef_construction = requested_ef_construction.max(m);
         let ef_runtime = options
             .ef_runtime
-            .unwrap_or(DEFAULT_HNSW_EF_RUNTIME as usize)
-            .max(1);
+            .unwrap_or(DEFAULT_HNSW_EF_RUNTIME as usize);
+        if ef_runtime == 0 || ef_runtime > MAX_VECTOR_HNSW_EF {
+            return Err(Error::msg("ERR invalid vector EF_RUNTIME"));
+        }
         let initial_cap = options
             .initial_cap
-            .unwrap_or(segment_max_docs as usize)
-            .max(1);
+            .unwrap_or(segment_max_docs as usize);
+        if initial_cap == 0 || initial_cap > MAX_VECTOR_INITIAL_CAP {
+            return Err(Error::msg("ERR invalid vector INITIAL_CAP"));
+        }
 
         let version = self.next_persisted_version();
         let meta = VectorIndexMeta {
@@ -61,7 +70,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         batch.put(&raw_key, &encode_entry(&marker, 0, version));
         batch.put(
-            &vector_meta_key(self.db_index, index, version),
+            &vector_meta_key(self.key_layout, self.db_index, index, version),
             &encode_record(&meta)?,
         );
         self.write_batch_if_not_empty(&batch);
@@ -101,6 +110,7 @@ impl Db {
         if expire_ms > 0 && super::now_ms() >= expire_ms {
             return Err(Error::msg("ERR vector index does not exist"));
         }
+        self.ensure_vector_runtime_unlocked(index, version, &meta)?;
         validate_vector(&vector, meta.dim as usize)?;
         validate_vector_for_distance(&vector, meta.distance)?;
         let attrs_json = attrs_json.unwrap_or_else(|| "{}".to_string());
@@ -109,7 +119,13 @@ impl Db {
 
         let old_doc = self
             .store
-            .get_raw(&vector_doc_key(self.db_index, index, version, id))
+            .get_raw(&vector_doc_key(
+                self.key_layout,
+                self.db_index,
+                index,
+                version,
+                id,
+            ))
             .and_then(|raw| decode_record::<VectorDocRecord>(&raw).ok());
         let doc_version = meta.next_doc_version;
         meta.next_doc_version = meta.next_doc_version.saturating_add(1);
@@ -128,6 +144,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         put_vector_marker_to_batch(
             &mut batch,
+            self.key_layout,
             self.db_index,
             index,
             expire_ms,
@@ -135,11 +152,11 @@ impl Db {
             meta.dim,
         );
         batch.put(
-            &vector_meta_key(self.db_index, index, version),
+            &vector_meta_key(self.key_layout, self.db_index, index, version),
             &encode_record(&meta)?,
         );
         batch.put(
-            &vector_doc_key(self.db_index, index, version, id),
+            &vector_doc_key(self.key_layout, self.db_index, index, version, id),
             &encode_record(&doc)?,
         );
         if let Some(old_doc) = old_doc
@@ -148,6 +165,7 @@ impl Db {
             delete_attr_index_entries_to_batch(
                 &mut batch,
                 &VectorAttrIndexContext {
+                    layout: self.key_layout,
                     db_index: self.db_index,
                     index,
                     version,
@@ -160,6 +178,7 @@ impl Db {
         put_attr_index_entries_to_batch(
             &mut batch,
             &VectorAttrIndexContext {
+                layout: self.key_layout,
                 db_index: self.db_index,
                 index,
                 version,
@@ -266,7 +285,7 @@ impl Db {
             if !seen_ids.insert(id) {
                 continue;
             }
-            let key = vector_doc_key(self.db_index, index, version, id);
+            let key = vector_doc_key(self.key_layout, self.db_index, index, version, id);
             let Some(raw) = self.store.get_raw(&key) else {
                 continue;
             };
@@ -278,6 +297,7 @@ impl Db {
                 delete_attr_index_entries_to_batch(
                     &mut batch,
                     &VectorAttrIndexContext {
+                        layout: self.key_layout,
                         db_index: self.db_index,
                         index,
                         version,
@@ -299,6 +319,7 @@ impl Db {
             meta.doc_count = meta.doc_count.saturating_sub(deleted as u64);
             put_vector_marker_to_batch(
                 &mut batch,
+                self.key_layout,
                 self.db_index,
                 index,
                 expire_ms,
@@ -306,7 +327,7 @@ impl Db {
                 meta.dim,
             );
             batch.put(
-                &vector_meta_key(self.db_index, index, version),
+                &vector_meta_key(self.key_layout, self.db_index, index, version),
                 &encode_record(&meta)?,
             );
             self.write_batch_if_not_empty(&batch);

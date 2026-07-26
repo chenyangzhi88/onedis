@@ -1,4 +1,63 @@
     use super::*;
+    use crate::store::{
+        db::KEY_ENCODING_LAYOUT_META_KEY,
+        kv_store::KvStore,
+        ttl::{TtlConfig, TtlManager, VersionCounter},
+    };
+
+    fn integration_test_db(prefix: &str, layout: KeyEncodingLayout) -> Db {
+        let unique = format!(
+            "{prefix}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("target"))
+            .join("onedis-test-data")
+            .join(unique);
+        let db_path = root.join("db");
+        let wal_dir = root.join("wal");
+        std::fs::create_dir_all(&db_path).unwrap();
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let store = KvStore::new(db_path, wal_dir, 1);
+        store
+            .for_db_index(0)
+            .put_raw(KEY_ENCODING_LAYOUT_META_KEY, layout.encode());
+        let version_counter = Arc::new(VersionCounter::new());
+        let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
+        Db::new(0, store, version_counter, ttl_manager)
+    }
+
+    fn create_options(
+        distance: &str,
+        segment_max_docs: Option<u64>,
+    ) -> VectorCreateOptions {
+        VectorCreateOptions {
+            dim: 2,
+            distance: distance.to_string(),
+            schema: schema(),
+            segment_max_docs,
+            m: Some(4),
+            ef_construction: Some(8),
+            ef_runtime: Some(8),
+            initial_cap: Some(8),
+        }
+    }
+
+    fn search_options(k: usize) -> VectorSearchOptions {
+        VectorSearchOptions {
+            k,
+            filter: None,
+            with_scores: true,
+            with_attrs: Vec::new(),
+            ef: None,
+            offset: 0,
+            limit: None,
+        }
+    }
 
     fn schema() -> Vec<VectorFieldSchema> {
         vec![
@@ -147,7 +206,7 @@
         })
         .unwrap();
         let result = doc_to_search_result(
-            raw.clone(),
+            &raw,
             &meta,
             &[1.0, 2.0],
             &["brand".to_string()],
@@ -162,13 +221,13 @@
             vec![("brand".to_string(), "acme".to_string())]
         );
         assert!(
-            doc_to_search_result(raw.clone(), &meta, &[1.0, 2.0], &[], &[], Some(8))
+            doc_to_search_result(&raw, &meta, &[1.0, 2.0], &[], &[], Some(8))
                 .unwrap()
                 .is_none()
         );
         assert!(
             doc_to_search_result(
-                raw,
+                &raw,
                 &meta,
                 &[1.0, 2.0],
                 &[],
@@ -187,7 +246,7 @@
         })
         .unwrap();
         assert!(
-            doc_to_search_result(deleted, &meta, &[1.0, 2.0], &[], &[], None)
+            doc_to_search_result(&deleted, &meta, &[1.0, 2.0], &[], &[], None)
                 .unwrap()
                 .is_none()
         );
@@ -447,4 +506,218 @@
                 .iter()
                 .all(|entry| entry.key().db_index == 1)
         );
+    }
+
+    #[test]
+    fn vector_legacy_layout_round_trips_and_drop_deletes_namespace() {
+        let db = integration_test_db("onedis-vector-legacy", KeyEncodingLayout::DbPrefixedV1);
+        db.vector_create("legacy-index", create_options("L2", Some(2)))
+            .unwrap();
+        db.vector_add(
+            "legacy-index",
+            "doc",
+            vec![1.0, 2.0],
+            Some(r#"{"brand":"acme","price":12}"#.to_string()),
+        )
+        .unwrap();
+
+        let results = db
+            .vector_search("legacy-index", &[1.0, 2.0], search_options(1))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "doc");
+        let (_, version, _) = db.read_vector_meta("legacy-index").unwrap();
+        assert!(
+            !db.store
+                .scan_prefix_raw(&vector_doc_prefix(
+                    KeyEncodingLayout::DbPrefixedV1,
+                    0,
+                    "legacy-index",
+                    version,
+                ))
+                .is_empty()
+        );
+
+        assert_eq!(db.vector_drop("legacy-index").unwrap(), 1);
+        assert!(db.vector_dim("legacy-index").unwrap().is_none());
+        assert!(
+            db.store
+                .scan_prefix_raw(&vector_prefix(
+                    KeyEncodingLayout::DbPrefixedV1,
+                    0,
+                    &VECTOR_DOC_NAMESPACE,
+                    "legacy-index",
+                    version,
+                ))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn vector_segment_freeze_uses_delta_since_snapshot() {
+        let db = integration_test_db("onedis-vector-segments", KeyEncodingLayout::TableLocalV2);
+        db.vector_create("idx", create_options("L2", Some(2)))
+            .unwrap();
+        db.vector_add("idx", "a", vec![0.0, 0.0], None)
+            .unwrap();
+        db.vector_add("idx", "b", vec![1.0, 0.0], None)
+            .unwrap();
+        let (_, version, meta_after_two) = db.read_vector_meta("idx").unwrap();
+        let segment_prefix = vector_segment_prefix(db.key_layout, 0, "idx", version);
+        assert_eq!(meta_after_two.snapshot_doc_version, 2);
+        assert_eq!(db.store.scan_prefix_raw(&segment_prefix).len(), 1);
+
+        db.vector_add("idx", "c", vec![2.0, 0.0], None)
+            .unwrap();
+        let (_, _, meta_after_three) = db.read_vector_meta("idx").unwrap();
+        assert_eq!(meta_after_three.snapshot_doc_version, 2);
+        assert_eq!(db.store.scan_prefix_raw(&segment_prefix).len(), 1);
+    }
+
+    #[test]
+    fn generic_delete_evicts_vector_runtime() {
+        let db = integration_test_db(
+            "onedis-vector-runtime-delete",
+            KeyEncodingLayout::TableLocalV2,
+        );
+        db.vector_create("idx", create_options("L2", None))
+            .unwrap();
+        db.vector_add("idx", "a", vec![0.0, 0.0], None)
+            .unwrap();
+        let (_, version, _) = db.read_vector_meta("idx").unwrap();
+        assert!(db.vector_runtimes.get(0, "idx", version).is_some());
+
+        assert!(db.delete_key("idx"));
+        assert!(db.vector_runtimes.get(0, "idx", version).is_none());
+    }
+
+    #[test]
+    fn concurrent_runtime_initialization_and_write_preserve_all_docs() {
+        let db = Arc::new(integration_test_db(
+            "onedis-vector-runtime-race",
+            KeyEncodingLayout::TableLocalV2,
+        ));
+        db.vector_create("idx", create_options("L2", None))
+            .unwrap();
+        db.vector_add("idx", "seed", vec![0.0, 0.0], None)
+            .unwrap();
+        let (_, version, _) = db.read_vector_meta("idx").unwrap();
+
+        for generation in 1..=16 {
+            db.vector_runtimes.remove(0, "idx", version);
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            std::thread::scope(|scope| {
+                let search_db = db.clone();
+                let search_barrier = barrier.clone();
+                scope.spawn(move || {
+                    search_barrier.wait();
+                    search_db
+                        .vector_search("idx", &[0.0, 0.0], search_options(2))
+                        .unwrap();
+                });
+                let write_db = db.clone();
+                let write_barrier = barrier.clone();
+                scope.spawn(move || {
+                    write_barrier.wait();
+                    write_db
+                        .vector_add("idx", "live", vec![generation as f32, 0.0], None)
+                        .unwrap();
+                });
+                barrier.wait();
+            });
+            assert_eq!(db.vector_runtime_len("idx", version, 0), 2);
+        }
+    }
+
+    #[test]
+    fn vector_config_distance_and_topk_limits_are_enforced() {
+        let db = integration_test_db("onedis-vector-limits", KeyEncodingLayout::TableLocalV2);
+        let mut invalid = create_options("L2", None);
+        invalid.dim = MAX_VECTOR_DIMENSIONS + 1;
+        assert!(db.vector_create("bad-dim", invalid).is_err());
+        let mut invalid = create_options("L2", None);
+        invalid.initial_cap = Some(MAX_VECTOR_INITIAL_CAP + 1);
+        assert!(db.vector_create("bad-cap", invalid).is_err());
+        let mut invalid = create_options("L2", None);
+        invalid.ef_construction = Some(MAX_VECTOR_HNSW_EF + 1);
+        assert!(db.vector_create("bad-ef", invalid).is_err());
+
+        assert!(validate_vector_for_distance(&[f32::MAX, 1.0], VectorDistance::L2).is_err());
+        assert!(validate_vector_for_distance(&[f32::MAX, 1.0], VectorDistance::Ip).is_err());
+        let cosine =
+            distance_score(VectorDistance::Cosine, &[f32::MAX, 1.0], &[f32::MAX, 1.0]).unwrap();
+        assert!(cosine.is_finite());
+        assert_eq!(cosine, 0.0);
+        assert!(
+            DistInnerProduct.eval(&[2.0, 0.0], &[2.0, 0.0])
+                < DistInnerProduct.eval(&[1.0, 0.0], &[2.0, 0.0])
+        );
+
+        let mut topk = TopKVectorResults::new(2, 1024).unwrap();
+        for (id, score) in [("c", 3.0), ("a", 1.0), ("b", 2.0)] {
+            topk
+                .push(VectorSearchResult {
+                    id: id.to_string(),
+                    score,
+                    attrs: Vec::new(),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            topk
+                .into_sorted()
+                .into_iter()
+                .map(|result| result.id)
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        let mut topk = TopKVectorResults::new(1, 128).unwrap();
+        assert!(
+            topk
+                .push(VectorSearchResult {
+                    id: "x".repeat(1024),
+                    score: 0.0,
+                    attrs: Vec::new(),
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn indexed_filters_use_bounded_ordered_ranges() {
+        let db = integration_test_db("onedis-vector-filters", KeyEncodingLayout::TableLocalV2);
+        db.vector_create("idx", create_options("L2", None))
+            .unwrap();
+        for (id, price, brand) in [
+            ("low", 5, "budget"),
+            ("mid", 10, "acme"),
+            ("high", 15, "acme"),
+        ] {
+            db.vector_add(
+                "idx",
+                id,
+                vec![price as f32, 0.0],
+                Some(format!(r#"{{"brand":"{brand}","price":{price}}}"#)),
+            )
+            .unwrap();
+        }
+
+        for (filter, expected) in [
+            ("price > 10", vec!["high"]),
+            ("price >= 10", vec!["high", "mid"]),
+            ("price < 10", vec!["low"]),
+            ("price <= 10", vec!["low", "mid"]),
+            ("brand IN ('acme','missing')", vec!["high", "mid"]),
+        ] {
+            let mut options = search_options(10);
+            options.filter = Some(filter.to_string());
+            let mut ids = db
+                .vector_search("idx", &[0.0, 0.0], options)
+                .unwrap()
+                .into_iter()
+                .map(|result| result.id)
+                .collect::<Vec<_>>();
+            ids.sort();
+            assert_eq!(ids, expected, "filter: {filter}");
+        }
     }

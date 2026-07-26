@@ -4,7 +4,7 @@ pub(in crate::store::db) fn list_item_prefix(db_index: u16, key: &str, version: 
     let mut prefix = Vec::with_capacity(2 + LIST_ITEM_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&LIST_ITEM_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -25,7 +25,7 @@ pub(in crate::store::db) fn set_member_prefix(db_index: u16, key: &str, version:
     let mut prefix = Vec::with_capacity(2 + SET_MEMBER_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&SET_MEMBER_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -57,7 +57,7 @@ pub(in crate::store::db) fn set_slot_prefix(db_index: u16, key: &str, version: u
     let mut prefix = Vec::with_capacity(2 + SET_SLOT_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&SET_SLOT_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -82,7 +82,7 @@ pub(in crate::store::db) fn set_member_slot_prefix(
     let mut prefix = Vec::with_capacity(2 + SET_MEMBER_SLOT_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&SET_MEMBER_SLOT_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -103,7 +103,7 @@ pub(in crate::store::db) fn zset_member_prefix(db_index: u16, key: &str, version
     let mut prefix = Vec::with_capacity(2 + ZSET_MEMBER_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&ZSET_MEMBER_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix
@@ -124,7 +124,7 @@ pub(in crate::store::db) fn zset_rank_prefix(db_index: u16, key: &str, version: 
     let mut prefix = Vec::with_capacity(2 + ZSET_RANK_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));
     prefix.extend_from_slice(&ZSET_RANK_NAMESPACE);
-    prefix.extend_from_slice(key.as_bytes());
+    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
     prefix.push(0x00);
     prefix.extend_from_slice(&version.to_be_bytes());
     prefix

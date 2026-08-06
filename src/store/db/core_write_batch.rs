@@ -14,10 +14,33 @@ impl Db {
     }
 
     pub(in crate::store::db) async fn write_batch_if_not_empty_async(&self, batch: &WriteBatch) {
+        self.write_batch_if_not_empty_async_inner(batch, true).await;
+    }
+
+    /// Commit a mutation to a structure whose version-owner marker is already durable.
+    ///
+    /// Callers must only use this after reading an existing, non-expired structure version. New
+    /// structures and expired-key replacements must use `write_batch_if_not_empty_async` so their
+    /// owner marker is created atomically with the main metadata.
+    pub(in crate::store::db) async fn write_existing_version_batch_if_not_empty_async(
+        &self,
+        batch: &WriteBatch,
+    ) {
+        self.write_batch_if_not_empty_async_inner(batch, false)
+            .await;
+    }
+
+    async fn write_batch_if_not_empty_async_inner(
+        &self,
+        batch: &WriteBatch,
+        add_version_owner_markers: bool,
+    ) {
         if batch.count() == 0 {
             return;
         }
-        let augmented = self.batch_with_version_owner_markers(batch);
+        let augmented = add_version_owner_markers
+            .then(|| self.batch_with_version_owner_markers(batch))
+            .flatten();
         let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
@@ -88,7 +111,7 @@ impl Db {
                 self.record_or_publish_mutations(batch);
                 Ok(true)
             }
-            Err(Status::ConditionFailed(_)) => Ok(false),
+            Err(Status::ConditionFailed(_) | Status::WriteConflict(_)) => Ok(false),
             Err(err) => Err(Error::msg(err.to_string())),
         }
     }
@@ -110,7 +133,7 @@ impl Db {
                 self.record_or_publish_mutations(batch);
                 Ok(true)
             }
-            Err(Status::ConditionFailed(_)) => Ok(false),
+            Err(Status::ConditionFailed(_) | Status::WriteConflict(_)) => Ok(false),
             Err(err) => Err(Error::msg(err.to_string())),
         }
     }
@@ -187,7 +210,11 @@ impl Db {
     }
 
     pub(in crate::store::db) fn invalidate_counter_cache_for_batch(&self, batch: &WriteBatch) {
-        if !self.counter_cache_maybe_non_empty.load(Ordering::Acquire) {
+        // A transaction has not changed durable state yet. Its logical keys are invalidated while
+        // the transaction commit holds the same structural write barriers as counter merges.
+        if self.store.is_transactional()
+            || !self.counter_cache.ever_populated.load(Ordering::Acquire)
+        {
             return;
         }
         let mut clear_all = false;
@@ -213,17 +240,27 @@ impl Db {
         }
 
         if clear_all {
-            self.counter_cache.clear();
-            self.counter_cache_maybe_non_empty
-                .store(false, Ordering::Release);
-            self.counter_cache_epoch.fetch_add(1, Ordering::Release);
+            self.counter_cache.invalidate_db(self.db_index);
             return;
         }
-        if !keys.is_empty() {
-            for key in keys {
-                self.counter_cache.remove(&key);
-            }
-            self.counter_cache_epoch.fetch_add(1, Ordering::Release);
+        for key in keys {
+            self.counter_cache.invalidate_key(self.db_index, &key);
+        }
+    }
+
+    pub(in crate::store::db) fn invalidate_counter_cache_for_committed_mutations(
+        &self,
+        keys: &[(u16, Vec<u8>)],
+        dbs: &[u16],
+    ) {
+        if !self.counter_cache.ever_populated.load(Ordering::Acquire) {
+            return;
+        }
+        for &(db_index, ref key) in keys {
+            self.counter_cache.invalidate_key(db_index, key);
+        }
+        for &db_index in dbs {
+            self.counter_cache.invalidate_db(db_index);
         }
     }
 

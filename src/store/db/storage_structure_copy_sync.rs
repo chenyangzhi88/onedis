@@ -39,7 +39,7 @@ impl Db {
         let Some(header) = decode_meta_header(raw) else {
             return;
         };
-        let target_version = Self::next_persisted_version_for_store(target_store, version_counter);
+        let target_version = Self::next_version_for_store(target_store, version_counter);
 
         if let Some(meta) = decode_list_meta(raw) {
             batch.put(
@@ -136,27 +136,12 @@ impl Db {
                     &main_key(target_db_index, target_key),
                     &encode_set_meta(meta.expire_ms, target_version, meta.len),
                 );
-                for (source_prefix, target_prefix) in [
-                    (
-                        set_member_prefix(source_db_index, source_key, meta.version),
-                        set_member_prefix(target_db_index, target_key, target_version),
-                    ),
-                    (
-                        set_slot_prefix(source_db_index, source_key, meta.version),
-                        set_slot_prefix(target_db_index, target_key, target_version),
-                    ),
-                    (
-                        set_member_slot_prefix(source_db_index, source_key, meta.version),
-                        set_member_slot_prefix(target_db_index, target_key, target_version),
-                    ),
-                ] {
-                    Self::copy_prefixed_namespace_to_batch_sync(
-                        source_store,
-                        batch,
-                        source_prefix,
-                        target_prefix,
-                    );
-                }
+                Self::copy_prefixed_namespace_to_batch_sync(
+                    source_store,
+                    batch,
+                    set_member_prefix(source_db_index, source_key, meta.version),
+                    set_member_prefix(target_db_index, target_key, target_version),
+                );
             }
             TYPE_JSON => {
                 batch.put(

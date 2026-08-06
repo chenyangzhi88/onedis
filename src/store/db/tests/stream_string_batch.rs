@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn async_batch_string_overwrite_removes_old_collection_subkeys() {
+async fn async_batch_string_overwrite_defers_old_subkeys_to_compaction() {
     let db = test_db();
     db.hash_set_async("batch-overwrite", "field", "value")
         .await
@@ -18,6 +18,11 @@ async fn async_batch_string_overwrite_removes_old_collection_subkeys() {
         db.get_string_bytes_async("batch-overwrite").await.unwrap(),
         Some(b"plain".to_vec())
     );
+    assert_eq!(db.store.scan_prefix_raw_async(&prefix).await.len(), 1);
+
+    db.store.mark_version_compaction_ready();
+    assert_eq!(db.refresh_retired_versions_once(usize::MAX), 1);
+    db.store.manual_compaction().unwrap();
     assert!(db.store.scan_prefix_raw_async(&prefix).await.is_empty());
 }
 
@@ -251,7 +256,7 @@ async fn string_batch_async_helpers_cover_empty_versioned_and_byte_key_paths() {
     .await;
     assert_eq!(db.get_string("raw:a").unwrap(), Some("rb".to_string()));
 
-    let _ = db.next_persisted_version();
+    let _ = db.next_version();
     db.insert_string_bytes_refs_async(&[("a", b"v1"), ("c", b"3")])
         .await;
     assert_eq!(db.get_string("a").unwrap(), Some("v1".to_string()));

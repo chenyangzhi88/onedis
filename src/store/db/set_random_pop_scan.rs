@@ -1,6 +1,148 @@
 use super::*;
 
+fn random_index(upper: usize) -> usize {
+    debug_assert!(upper > 0);
+    let upper = upper as u64;
+    let threshold = upper.wrapping_neg() % upper;
+    loop {
+        let value = random_u64();
+        if value >= threshold {
+            return (value % upper) as usize;
+        }
+    }
+}
+
+fn shuffle_prefix<T>(items: &mut [T], count: usize) {
+    let target = count.min(items.len());
+    for index in 0..target {
+        let selected = index + random_index(items.len() - index);
+        items.swap(index, selected);
+    }
+}
+
+struct SetPopRandom {
+    state: u64,
+}
+
+impl SetPopRandom {
+    fn new() -> Self {
+        Self {
+            state: random_u64(),
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        value ^ (value >> 31)
+    }
+
+    fn index(&mut self, upper: usize) -> usize {
+        debug_assert!(upper > 0);
+        let upper = upper as u64;
+        let threshold = upper.wrapping_neg() % upper;
+        loop {
+            let value = self.next_u64();
+            if value >= threshold {
+                return (value % upper) as usize;
+            }
+        }
+    }
+}
+
+fn sample_set_pop_ordinals(len: usize, count: usize) -> Vec<usize> {
+    let count = count.min(len);
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == len {
+        return (0..len).collect();
+    }
+
+    // Floyd's algorithm samples `count` distinct positions without allocating `len` slots.
+    let mut random = SetPopRandom::new();
+    let mut selected = HashSet::with_capacity(count);
+    for candidate in len - count..len {
+        let ordinal = random.index(candidate + 1);
+        if !selected.insert(ordinal) {
+            selected.insert(candidate);
+        }
+    }
+    let mut ordinals = selected.into_iter().collect::<Vec<_>>();
+    ordinals.sort_unstable();
+    ordinals
+}
+
+struct SelectedSetMember {
+    raw_key: Vec<u8>,
+    member: String,
+}
+
+fn decode_selected_set_members(
+    prefix: &[u8],
+    raw_keys: Vec<Vec<u8>>,
+    expected_count: usize,
+) -> Result<Vec<SelectedSetMember>, Error> {
+    if raw_keys.len() != expected_count {
+        return Err(Error::msg(
+            "ERR set metadata length does not match visible member entries",
+        ));
+    }
+
+    raw_keys
+        .into_iter()
+        .map(|raw_key| {
+            let member = raw_key
+                .strip_prefix(prefix)
+                .ok_or_else(|| Error::msg("ERR invalid set member key found while popping"))?;
+            let member = String::from_utf8(member.to_vec()).map_err(|_| {
+                Error::msg("ERR invalid UTF-8 set member found while popping from set")
+            })?;
+            Ok(SelectedSetMember { raw_key, member })
+        })
+        .collect()
+}
+
 impl Db {
+    fn select_set_members_for_pop(
+        &self,
+        key: &str,
+        version: u64,
+        len: usize,
+        count: usize,
+    ) -> Result<Vec<SelectedSetMember>, Error> {
+        let prefix = set_member_prefix(self.db_index, key, version);
+        let ordinals = sample_set_pop_ordinals(len, count);
+        let raw_keys = self.store.scan_range_raw_keys_at_ordinals(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            &ordinals,
+        );
+        decode_selected_set_members(&prefix, raw_keys, ordinals.len())
+    }
+
+    async fn select_set_members_for_pop_async(
+        &self,
+        key: &str,
+        version: u64,
+        len: usize,
+        count: usize,
+    ) -> Result<Vec<SelectedSetMember>, Error> {
+        let prefix = set_member_prefix(self.db_index, key, version);
+        let ordinals = sample_set_pop_ordinals(len, count);
+        let raw_keys = self
+            .store
+            .scan_range_raw_keys_at_ordinals_async(
+                &prefix,
+                prefix_exclusive_upper_bound(&prefix),
+                &ordinals,
+            )
+            .await;
+        decode_selected_set_members(&prefix, raw_keys, ordinals.len())
+    }
+
     pub fn set_random_members(
         &self,
         key: &str,
@@ -10,22 +152,22 @@ impl Db {
         if members.is_empty() {
             return Ok(None);
         }
-        let seed = now_ms() as usize;
-        let len = members.len();
-        members.rotate_left(seed % len);
-
         let Some(count) = count else {
-            return Ok(Some(vec![members[0].clone()]));
+            shuffle_prefix(&mut members, 1);
+            members.truncate(1);
+            return Ok(Some(members));
         };
         if count >= 0 {
-            members.truncate((count as usize).min(members.len()));
+            let target = (count as usize).min(members.len());
+            shuffle_prefix(&mut members, target);
+            members.truncate(target);
             return Ok(Some(members));
         }
 
         let requested = count.unsigned_abs() as usize;
         let mut result = Vec::with_capacity(requested);
-        for idx in 0..requested {
-            result.push(members[idx % members.len()].clone());
+        for _ in 0..requested {
+            result.push(members[random_index(members.len())].clone());
         }
         Ok(Some(result))
     }
@@ -39,22 +181,22 @@ impl Db {
         if members.is_empty() {
             return Ok(None);
         }
-        let seed = now_ms() as usize;
-        let len = members.len();
-        members.rotate_left(seed % len);
-
         let Some(count) = count else {
-            return Ok(Some(vec![members[0].clone()]));
+            shuffle_prefix(&mut members, 1);
+            members.truncate(1);
+            return Ok(Some(members));
         };
         if count >= 0 {
-            members.truncate((count as usize).min(members.len()));
+            let target = (count as usize).min(members.len());
+            shuffle_prefix(&mut members, target);
+            members.truncate(target);
             return Ok(Some(members));
         }
 
         let requested = count.unsigned_abs() as usize;
         let mut result = Vec::with_capacity(requested);
-        for idx in 0..requested {
-            result.push(members[idx % members.len()].clone());
+        for _ in 0..requested {
+            result.push(members[random_index(members.len())].clone());
         }
         Ok(Some(result))
     }
@@ -68,70 +210,27 @@ impl Db {
         let Some(meta) = meta else {
             return Ok(Vec::new());
         };
-        let mut meta = self.ensure_set_slot_index(key, meta);
-
         let target_count = count.min(meta.len);
-        if target_count == 1 {
-            for _ in 0..2 {
-                if meta.len == 0 {
-                    return Ok(Vec::new());
-                }
-                let slot = random_u64() % meta.len as u64;
-                let slot_key = set_slot_key(self.db_index, key, meta.version, slot);
-                let Some(member) = self.store.get_raw(&slot_key) else {
-                    meta = self.rebuild_set_slot_index(key, meta);
-                    continue;
-                };
-                let mut batch = WriteBatch::new();
-                if !self.set_slot_remove_to_batch(&mut batch, key, meta.version, meta.len, &member)
-                {
-                    meta = self.rebuild_set_slot_index(key, meta);
-                    continue;
-                }
-                let member = String::from_utf8(member).map_err(|_| {
-                    Error::msg("ERR invalid UTF-8 set member found while popping from set")
-                })?;
-                let len = meta.len.saturating_sub(1);
-                if len == 0 {
-                    self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
-                } else {
-                    batch.put(
-                        &self.mk(key),
-                        &encode_set_meta(meta.expire_ms, meta.version, len),
-                    );
-                }
-                self.write_batch_if_not_empty(&batch);
-                self.changes.fetch_add(1, Ordering::Relaxed);
-                return Ok(vec![member]);
-            }
+        if target_count == 0 {
             return Ok(Vec::new());
         }
 
-        let available = if target_count == meta.len {
-            self.set_members_raw(key, meta.version)
-        } else {
-            self.set_random_seek_members(key, meta.version, target_count)
-        };
-        let mut batch = WriteBatch::new();
-        let mut popped = Vec::new();
-        for member in available.into_iter().take(count) {
-            let member = String::from_utf8(member).map_err(|_| {
-                Error::msg("ERR invalid UTF-8 set member found while popping from set")
-            })?;
-            batch.delete(&set_member_key(self.db_index, key, meta.version, &member));
-            popped.push(member);
-        }
+        let popped = self.select_set_members_for_pop(key, meta.version, meta.len, target_count)?;
 
+        let mut batch = WriteBatch::new();
         if !popped.is_empty() {
             let len = meta.len.saturating_sub(popped.len());
             if len == 0 {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_SET);
             } else {
+                for selected in &popped {
+                    batch.delete(&selected.raw_key)?;
+                }
                 batch.put(
                     &self.mk(key),
                     &encode_set_meta(meta.expire_ms, meta.version, len),
-                );
+                )?;
             }
         }
 
@@ -139,16 +238,7 @@ impl Db {
             self.write_batch_if_not_empty(&batch);
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
-        if !popped.is_empty() && meta.len > popped.len() {
-            self.rebuild_set_slot_index(
-                key,
-                SetMeta {
-                    len: meta.len.saturating_sub(popped.len()),
-                    ..meta
-                },
-            );
-        }
-        Ok(popped)
+        Ok(popped.into_iter().map(|selected| selected.member).collect())
     }
 
     pub async fn set_pop_async(&self, key: &str, count: usize) -> Result<Vec<String>, Error> {
@@ -161,78 +251,28 @@ impl Db {
             return Ok(Vec::new());
         };
         let target_count = count.min(meta.len);
-        if target_count == 1 {
-            let mut meta = self.ensure_set_slot_index_async(key, meta).await;
-            for _ in 0..2 {
-                if meta.len == 0 {
-                    return Ok(Vec::new());
-                }
-                let slot = random_u64() % meta.len as u64;
-                let slot_key = set_slot_key(self.db_index, key, meta.version, slot);
-                let Some(member) = self.store.get_raw_async(&slot_key).await else {
-                    meta = self.rebuild_set_slot_index_async(key, meta).await;
-                    continue;
-                };
-                let mut batch = WriteBatch::new();
-                if !self
-                    .set_slot_remove_to_batch_async(
-                        &mut batch,
-                        key,
-                        meta.version,
-                        meta.len,
-                        &member,
-                    )
-                    .await
-                {
-                    meta = self.rebuild_set_slot_index_async(key, meta).await;
-                    continue;
-                }
-                let member = String::from_utf8(member).map_err(|_| {
-                    Error::msg("ERR invalid UTF-8 set member found while popping from set")
-                })?;
-                let len = meta.len.saturating_sub(1);
-                if len == 0 {
-                    self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
-                } else {
-                    batch.put(
-                        &self.mk(key),
-                        &encode_set_meta(meta.expire_ms, meta.version, len),
-                    );
-                }
-                self.write_batch_if_not_empty_async(&batch).await;
-                self.changes.fetch_add(1, Ordering::Relaxed);
-                return Ok(vec![member]);
-            }
+        if target_count == 0 {
             return Ok(Vec::new());
         }
 
-        let meta = self.ensure_set_slot_index_async(key, meta).await;
-        let available = if target_count == meta.len {
-            self.set_members_raw_async(key, meta.version).await
-        } else {
-            self.set_random_seek_members_async(key, meta.version, target_count)
-                .await
-        };
-        let mut batch = WriteBatch::new();
-        let mut popped = Vec::new();
-        for member in available.into_iter().take(count) {
-            let member = String::from_utf8(member).map_err(|_| {
-                Error::msg("ERR invalid UTF-8 set member found while popping from set")
-            })?;
-            batch.delete(&set_member_key(self.db_index, key, meta.version, &member));
-            popped.push(member);
-        }
+        let popped = self
+            .select_set_members_for_pop_async(key, meta.version, meta.len, target_count)
+            .await?;
 
+        let mut batch = WriteBatch::new();
         if !popped.is_empty() {
             let len = meta.len.saturating_sub(popped.len());
             if len == 0 {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_SET);
             } else {
+                for selected in &popped {
+                    batch.delete(&selected.raw_key)?;
+                }
                 batch.put(
                     &self.mk(key),
                     &encode_set_meta(meta.expire_ms, meta.version, len),
-                );
+                )?;
             }
         }
 
@@ -240,17 +280,7 @@ impl Db {
             self.write_batch_if_not_empty_async(&batch).await;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
-        if !popped.is_empty() && meta.len > popped.len() {
-            self.rebuild_set_slot_index_async(
-                key,
-                SetMeta {
-                    len: meta.len.saturating_sub(popped.len()),
-                    ..meta
-                },
-            )
-            .await;
-        }
-        Ok(popped)
+        Ok(popped.into_iter().map(|selected| selected.member).collect())
     }
 
     /// 扫描 set members，返回下一个游标和成员。

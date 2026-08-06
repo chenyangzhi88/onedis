@@ -1,5 +1,6 @@
 use super::super::*;
 use super::support::*;
+use tantivy::directory::{Directory, INDEX_WRITER_LOCK};
 
 #[test]
 fn alter_runtime_failure_rolls_back_schema_generation_and_runtime() {
@@ -91,6 +92,54 @@ fn metadata_cas_rejects_stale_writers_and_sequences_are_strictly_monotonic() {
     assert_eq!(sequences.len(), 2);
     assert!(sequences[0] < sequences[1]);
     assert!(sequences[0] > second_generation);
+}
+
+#[test]
+fn ensure_runtime_recovers_writer_lock_left_by_unclean_exit() {
+    let store = test_store("stale-writer-lock");
+    let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
+    let ttl_manager =
+        crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
+    let db = Db::new(0, store.clone(), version_counter, ttl_manager);
+    db.fulltext_create(
+        "idx",
+        FullTextCreateOptions {
+            source_type: FullTextSourceType::Hash,
+            prefixes: vec!["doc:".to_string()],
+            schema: vec![text_field("title")],
+            index_options: FullTextIndexOptions::default(),
+        },
+    )
+    .unwrap();
+    let meta = db.read_fulltext_meta_direct("idx").unwrap();
+    db.fulltext_runtimes.remove(0, "idx");
+
+    let directory = KvTantivyDirectory::new(store, 0, &meta.active_storage);
+    let mut stale_lock = directory
+        .open_write(INDEX_WRITER_LOCK.filepath.as_path())
+        .unwrap();
+    std::io::Write::flush(&mut stale_lock).unwrap();
+    drop(stale_lock);
+    assert!(
+        directory
+            .exists(INDEX_WRITER_LOCK.filepath.as_path())
+            .unwrap()
+    );
+
+    db.ensure_fulltext_runtime("idx").unwrap();
+    let recovered = db.fulltext_runtimes.get(0, "idx").unwrap();
+    assert!(
+        directory
+            .exists(INDEX_WRITER_LOCK.filepath.as_path())
+            .unwrap(),
+        "the recovered runtime must own a live writer lock"
+    );
+    db.ensure_fulltext_runtime("idx").unwrap();
+    let still_loaded = db.fulltext_runtimes.get(0, "idx").unwrap();
+    assert!(
+        Arc::ptr_eq(&recovered, &still_loaded),
+        "a live runtime must not be replaced while it owns the writer lock"
+    );
 }
 
 #[test]

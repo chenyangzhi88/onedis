@@ -77,25 +77,7 @@ impl TtlManager {
             }
         }
 
-        if let Some(raw) = self.store.get_raw(VERSION_COUNTER_KEY)
-            && raw.len() == 8
-        {
-            version_counter.observe(u64::from_be_bytes(raw[0..8].try_into().unwrap()));
-        }
         for db_idx in 0..num_dbs.max(1) {
-            // Compatibility with releases that persisted the reservation in
-            // the DB table that happened to allocate a new block.
-            if let Some(raw) = self.store_for_db(db_idx).get_raw(VERSION_COUNTER_KEY)
-                && raw.len() == 8
-            {
-                let max_version = u64::from_be_bytes(raw[0..8].try_into().unwrap());
-                version_counter.observe(max_version);
-            }
-            for (version_key, _) in self.store_for_db(db_idx).scan_prefix_raw(VERSION_MARK_PREFIX) {
-                if let Some(version) = parse_version_mark_key(&version_key) {
-                    version_counter.observe(version);
-                }
-            }
             let owner_prefix = crate::store::db::version_owner_prefix(db_idx);
             for (owner_key, _) in self
                 .store_for_db(db_idx)
@@ -104,19 +86,13 @@ impl TtlManager {
                 if let Some(suffix) = owner_key.strip_prefix(owner_prefix.as_slice())
                     && suffix.len() == 8
                 {
-                    version_counter.observe(u64::from_be_bytes(suffix.try_into().unwrap()));
+                    let version = u64::from_be_bytes(suffix.try_into().unwrap());
+                    version_counter.observe(version);
+                    self.store.register_live_version(version);
                 }
             }
         }
-
-        let max_version = version_counter.current();
-        if max_version > 0 {
-            let mut batch = WriteBatch::new();
-            reserve_version_high_water_to_batch(&mut batch, max_version);
-            if batch.count() > 0 {
-                self.store.write_batch(&batch);
-            }
-        }
+        self.store.mark_version_compaction_ready();
 
         info!(
             "TTL index rebuilt from namespace: {} keys with TTL, max_version = {}",
@@ -141,32 +117,7 @@ impl TtlManager {
             }
         }
 
-        if let Some(raw) = self.store.get_raw_async(VERSION_COUNTER_KEY).await
-            && raw.len() == 8
-        {
-            version_counter.observe(u64::from_be_bytes(raw[0..8].try_into().unwrap()));
-        }
         for db_idx in 0..num_dbs.max(1) {
-            // Compatibility with releases that persisted the reservation in
-            // the DB table that happened to allocate a new block.
-            if let Some(raw) = self
-                .store_for_db(db_idx)
-                .get_raw_async(VERSION_COUNTER_KEY)
-                .await
-                && raw.len() == 8
-            {
-                let max_version = u64::from_be_bytes(raw[0..8].try_into().unwrap());
-                version_counter.observe(max_version);
-            }
-            for (version_key, _) in self
-                .store_for_db(db_idx)
-                .scan_prefix_raw_async(VERSION_MARK_PREFIX)
-                .await
-            {
-                if let Some(version) = parse_version_mark_key(&version_key) {
-                    version_counter.observe(version);
-                }
-            }
             let owner_prefix = crate::store::db::version_owner_prefix(db_idx);
             for (owner_key, _) in self
                 .store_for_db(db_idx)
@@ -176,19 +127,13 @@ impl TtlManager {
                 if let Some(suffix) = owner_key.strip_prefix(owner_prefix.as_slice())
                     && suffix.len() == 8
                 {
-                    version_counter.observe(u64::from_be_bytes(suffix.try_into().unwrap()));
+                    let version = u64::from_be_bytes(suffix.try_into().unwrap());
+                    version_counter.observe(version);
+                    self.store.register_live_version(version);
                 }
             }
         }
-
-        let max_version = version_counter.current();
-        if max_version > 0 {
-            let mut batch = WriteBatch::new();
-            reserve_version_high_water_to_batch(&mut batch, max_version);
-            if batch.count() > 0 {
-                self.store.write_batch_async(&batch).await;
-            }
-        }
+        self.store.mark_version_compaction_ready();
 
         info!(
             "TTL index rebuilt from namespace: {} keys with TTL, max_version = {}",

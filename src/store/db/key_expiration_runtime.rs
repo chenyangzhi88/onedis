@@ -9,7 +9,6 @@ impl Db {
         header: MetaHeader,
     ) -> Result<(), Error> {
         batch.delete(key_bytes);
-        delete_sub_keys_to_batch(batch, self.db_index, key, header.version, header.type_tag);
         self.ttl_manager
             .remove_known_to_batch(batch, header.expire_ms, self.db_index, key);
         match header.type_tag {

@@ -223,7 +223,7 @@ impl Db {
         version: u64,
     ) -> Result<(), Error> {
         let version = if version == 0 {
-            self.next_persisted_version()
+            self.next_version()
         } else {
             version
         };
@@ -257,7 +257,7 @@ impl Db {
         cas_condition: CompareCondition,
     ) -> Result<bool, Error> {
         let version = if version == 0 {
-            self.next_persisted_version_async().await
+            self.next_version_async().await
         } else {
             version
         };

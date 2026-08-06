@@ -25,8 +25,6 @@ fn raw_key_namespace_helpers_cover_prefix_bounds_and_delete_batches() {
         HASH_FIELD_NAMESPACE,
         LIST_ITEM_NAMESPACE,
         SET_MEMBER_NAMESPACE,
-        SET_SLOT_NAMESPACE,
-        SET_MEMBER_SLOT_NAMESPACE,
         ZSET_MEMBER_NAMESPACE,
         ZSET_RANK_NAMESPACE,
         STREAM_ENTRY_NAMESPACE,
@@ -49,7 +47,7 @@ fn raw_key_namespace_helpers_cover_prefix_bounds_and_delete_batches() {
 
     let delete_counts = [
         (TYPE_HASH, 2),
-        (TYPE_SET, 3),
+        (TYPE_SET, 1),
         (TYPE_SORTED_SET, 2),
         (TYPE_LIST, 1),
         (TYPE_STREAM, 4),

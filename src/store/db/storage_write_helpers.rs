@@ -10,11 +10,10 @@ impl Db {
     ) {
         let mut batch = WriteBatch::new();
         let version = if version == 0 && !matches!(value, Structure::String(_)) {
-            self.next_persisted_version()
+            self.next_version()
         } else {
             version
         };
-        // Clean up old version's sub-keys if overwriting
         let key_bytes = self.mk(key);
         if let Some(raw) = self.store.get_raw(&key_bytes)
             && let Some(old_header) = decode_meta_header(&raw)
@@ -25,15 +24,6 @@ impl Db {
                     old_header.expire_ms,
                     self.db_index,
                     key,
-                );
-            }
-            if old_header.version != version {
-                delete_sub_keys_to_batch(
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    old_header.version,
-                    old_header.type_tag,
                 );
             }
         }
@@ -84,7 +74,7 @@ impl Db {
             .then(|| self.store.get_raw(&key_bytes))
             .flatten();
         if let Some(old_raw) = old_raw {
-            self.cleanup_old_complex_subkeys_for_string_overwrite(batch, key, Some(old_raw));
+            self.prepare_string_overwrite_to_batch(batch, key, Some(old_raw));
         } else if let Some(stored_raw) = stored_raw.as_deref() {
             self.enqueue_fulltext_delete_for_string_overwrite(batch, key, stored_raw);
         }
@@ -198,49 +188,7 @@ impl Db {
         }
     }
 
-    pub(in crate::store::db) fn cleanup_old_complex_subkeys_for_string_overwrite(
-        &self,
-        batch: &mut WriteBatch,
-        key: &str,
-        old_raw: Option<&[u8]>,
-    ) {
-        let Some(raw) = old_raw else {
-            return;
-        };
-        let Some(header) = decode_meta_header(raw) else {
-            return;
-        };
-        if header.type_tag != TYPE_STRING && header.version > 0 {
-            delete_sub_keys_to_batch(batch, self.db_index, key, header.version, header.type_tag);
-            delete_sub_keys_by_scan_to_batch(
-                &self.store,
-                batch,
-                self.db_index,
-                key,
-                header.version,
-                header.type_tag,
-            );
-            match header.type_tag {
-                TYPE_HASH => {
-                    if let Err(err) = self.fulltext_enqueue_hash_delete_to_batch(batch, key) {
-                        log::error!(
-                            "failed to enqueue fulltext delete for overwritten {key}: {err}"
-                        );
-                    }
-                }
-                TYPE_JSON => {
-                    if let Err(err) = self.fulltext_enqueue_json_delete_to_batch(batch, key) {
-                        log::error!(
-                            "failed to enqueue fulltext JSON delete for overwritten {key}: {err}"
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    pub(in crate::store::db) fn cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
+    pub(in crate::store::db) fn prepare_string_overwrite_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &str,
@@ -255,12 +203,10 @@ impl Db {
         if header.type_tag == TYPE_STRING || header.version == 0 {
             return;
         }
-
-        delete_sub_keys_to_batch(batch, self.db_index, key, header.version, header.type_tag);
         self.enqueue_fulltext_delete_for_string_overwrite(batch, key, raw);
     }
 
-    pub(in crate::store::db) fn cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
+    pub(in crate::store::db) fn prepare_string_byte_key_overwrite_to_batch(
         &self,
         batch: &mut WriteBatch,
         key: &[u8],
@@ -275,7 +221,6 @@ impl Db {
         if header.type_tag == TYPE_STRING || header.version == 0 {
             return;
         }
-        delete_sub_keys_to_batch_bytes(batch, self.db_index, key, header.version, header.type_tag);
         if let Ok(key) = std::str::from_utf8(key) {
             self.enqueue_fulltext_delete_for_string_overwrite(batch, key, raw);
         }
@@ -332,18 +277,10 @@ impl Db {
                     &encode_set_meta(expire_ms, version, set.len()),
                 );
 
-                for (slot, member) in set.iter().enumerate() {
+                for member in set {
                     batch.put(
                         &set_member_key(db_index, key, version, member),
                         INDEX_MARKER_VALUE,
-                    );
-                    batch.put(
-                        &set_slot_key(db_index, key, version, slot as u64),
-                        member.as_bytes(),
-                    );
-                    batch.put(
-                        &set_member_slot_key(db_index, key, version, member.as_bytes()),
-                        &(slot as u64).to_be_bytes(),
                     );
                 }
             }

@@ -111,7 +111,7 @@ fn long_transaction_commit_conflicts_with_direct_write() {
 }
 
 #[test]
-fn set_over_complex_type_hides_old_subkeys_and_gc_cleans_after_rebuild() {
+fn set_over_complex_type_hides_old_subkeys_and_compaction_cleans_after_rebuild() {
     let db = test_db();
 
     assert!(db.hash_set("reuse-key", "old-field", "old-value").unwrap());
@@ -142,7 +142,8 @@ fn set_over_complex_type_hides_old_subkeys_and_gc_cleans_after_rebuild() {
             .unwrap()
     );
     assert_eq!(rebuilt_db.hash_get("reuse-key", "old-field").unwrap(), None);
-    assert_eq!(rebuilt_db.retired_version_gc_once(usize::MAX), 1);
+    assert_eq!(rebuilt_db.refresh_retired_versions_once(usize::MAX), 1);
+    rebuilt_db.store.manual_compaction().unwrap();
     assert!(!rebuilt_db.store.contains_key(&old_field_key));
 
     let fields: HashMap<_, _> = rebuilt_db

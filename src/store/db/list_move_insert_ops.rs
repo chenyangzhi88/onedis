@@ -19,7 +19,7 @@ impl Db {
         } else {
             self.list_meta(destination)?.unwrap_or(ListMeta {
                 expire_ms: 0,
-                version: self.next_persisted_version(),
+                version: self.next_version(),
                 head: 0,
                 tail: 0,
             })
@@ -115,20 +115,20 @@ impl Db {
         source_left: bool,
         destination_left: bool,
     ) -> Result<Option<String>, Error> {
-        let source_shard = set_write_lock_shard(self.db_index, source);
-        let destination_shard = set_write_lock_shard(self.db_index, destination);
+        let source_shard = key_write_lock_shard(self.db_index, source);
+        let destination_shard = key_write_lock_shard(self.db_index, destination);
         if source_shard == destination_shard {
-            let _guard = self.set_write_locks[source_shard].lock().await;
+            let _guard = self.key_write_locks[source_shard].lock().await;
             self.list_move_async_unlocked(source, destination, source_left, destination_left)
                 .await
         } else if source_shard < destination_shard {
-            let _source_guard = self.set_write_locks[source_shard].lock().await;
-            let _destination_guard = self.set_write_locks[destination_shard].lock().await;
+            let _source_guard = self.key_write_locks[source_shard].lock().await;
+            let _destination_guard = self.key_write_locks[destination_shard].lock().await;
             self.list_move_async_unlocked(source, destination, source_left, destination_left)
                 .await
         } else {
-            let _destination_guard = self.set_write_locks[destination_shard].lock().await;
-            let _source_guard = self.set_write_locks[source_shard].lock().await;
+            let _destination_guard = self.key_write_locks[destination_shard].lock().await;
+            let _source_guard = self.key_write_locks[source_shard].lock().await;
             self.list_move_async_unlocked(source, destination, source_left, destination_left)
                 .await
         }
@@ -154,7 +154,7 @@ impl Db {
                 .await?
                 .unwrap_or(ListMeta {
                     expire_ms: 0,
-                    version: self.next_persisted_version_async().await,
+                    version: self.next_version_async().await,
                     head: 0,
                     tail: 0,
                 })
@@ -378,13 +378,13 @@ impl Db {
     ) -> Result<Option<(String, Vec<String>)>, Error> {
         let mut shards = keys
             .iter()
-            .map(|key| set_write_lock_shard(self.db_index, key))
+            .map(|key| key_write_lock_shard(self.db_index, key))
             .collect::<Vec<_>>();
         shards.sort_unstable();
         shards.dedup();
         let mut guards = Vec::with_capacity(shards.len());
         for shard in shards {
-            guards.push(self.set_write_locks[shard].lock().await);
+            guards.push(self.key_write_locks[shard].lock().await);
         }
 
         for key in keys {

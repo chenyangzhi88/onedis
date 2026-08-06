@@ -4,8 +4,6 @@ pub(in crate::store::db) const HASH_FIELD_NAMESPACE: [u8; 3] = [0xFF, b'h', 0x00
 pub(in crate::store::db) const HASH_FIELD_EXPIRE_NAMESPACE: [u8; 3] = [0xFF, b'H', 0x00];
 pub(in crate::store::db) const LIST_ITEM_NAMESPACE: [u8; 3] = [0xFF, b'l', 0x00];
 pub(in crate::store::db) const SET_MEMBER_NAMESPACE: [u8; 3] = [0xFF, b's', 0x00];
-pub(in crate::store::db) const SET_SLOT_NAMESPACE: [u8; 3] = [0xFF, b'S', 0x00];
-pub(in crate::store::db) const SET_MEMBER_SLOT_NAMESPACE: [u8; 3] = [0xFF, b't', 0x00];
 pub(in crate::store::db) const ZSET_MEMBER_NAMESPACE: [u8; 3] = [0xFF, b'z', 0x00];
 pub(in crate::store::db) const ZSET_RANK_NAMESPACE: [u8; 3] = [0xFF, b'Z', 0x00];
 pub(in crate::store::db) const STREAM_ENTRY_NAMESPACE: [u8; 3] = [0xFF, b'x', 0x00];
@@ -29,8 +27,6 @@ pub(in crate::store::db) const STREAM_META_MAGIC: [u8; 4] = *b"USTR";
 pub(in crate::store::db) const JSON_INDEXED_MARKER: &str = "__onedis_json_indexed_v1__";
 pub(in crate::store::db) const WRONG_TYPE_ERROR: &str =
     "WRONGTYPE Operation against a key holding the wrong kind of value";
-pub(in crate::store::db) const SET_WRITE_LOCK_SHARDS: usize = 256;
-
 pub(in crate::store::db) fn trace_lrange_sample() -> Option<u64> {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     static COUNT: AtomicU64 = AtomicU64::new(0);
@@ -224,9 +220,15 @@ impl KeyEncodingLayout {
                 )
             });
         }
-        if !store.scan_range_raw_limited(&[], None, 1).is_empty() {
+        let table_has_data = !store.scan_range_raw_limited(&[], None, 1).is_empty();
+        if table_has_data && !store.is_canonical_db_table() {
             panic!(
                 "onedis table contains data without key encoding metadata; remove old data before starting with TableLocalV2"
+            );
+        }
+        if table_has_data {
+            log::warn!(
+                "initializing missing TableLocalV2 key encoding metadata for a recovered legacy onedis database table"
             );
         }
         store.put_raw(KEY_ENCODING_LAYOUT_META_KEY, Self::TableLocalV2.encode());
@@ -341,72 +343,6 @@ pub(in crate::store::db) fn sub_key_range_end_bytes(
     KeyEncodingLayout::CURRENT.sub_key_range_end_bytes(db_index, ns, key, version)
 }
 
-pub(in crate::store::db) fn sub_key_namespaces_for_type(
-    type_tag: u8,
-) -> &'static [&'static [u8; 3]] {
-    match type_tag {
-        TYPE_HASH => &[&HASH_FIELD_NAMESPACE, &HASH_FIELD_EXPIRE_NAMESPACE],
-        TYPE_SET => &[
-            &SET_MEMBER_NAMESPACE,
-            &SET_SLOT_NAMESPACE,
-            &SET_MEMBER_SLOT_NAMESPACE,
-        ],
-        TYPE_SORTED_SET => &[&ZSET_MEMBER_NAMESPACE, &ZSET_RANK_NAMESPACE],
-        TYPE_LIST => &[&LIST_ITEM_NAMESPACE],
-        TYPE_STREAM => &[
-            &STREAM_ENTRY_NAMESPACE,
-            &STREAM_GROUP_NAMESPACE,
-            &STREAM_PEL_NAMESPACE,
-            &STREAM_CONSUMER_NAMESPACE,
-        ],
-        TYPE_JSON => &[&JSON_NODE_NAMESPACE],
-        TYPE_VECTOR => &[
-            &VECTOR_META_NAMESPACE,
-            &VECTOR_DOC_NAMESPACE,
-            &VECTOR_TAG_NAMESPACE,
-            &VECTOR_NUMERIC_NAMESPACE,
-            &VECTOR_SEGMENT_NAMESPACE,
-            &VECTOR_GRAPH_NAMESPACE,
-        ],
-        _ => &[],
-    }
-}
-
-pub(in crate::store::db) fn delete_sub_keys_by_scan_to_batch_bytes(
-    store: &KvStore,
-    batch: &mut WriteBatch,
-    db_index: u16,
-    key: &[u8],
-    version: u64,
-    type_tag: u8,
-) {
-    for ns in sub_key_namespaces_for_type(type_tag) {
-        let start = sub_key_range_start_bytes(db_index, ns, key, version);
-        let end = sub_key_range_end_bytes(db_index, ns, key, version);
-        for (sub_key, _) in store.scan_range_raw_limited(&start, Some(end), usize::MAX) {
-            batch.delete(&sub_key);
-        }
-    }
-}
-
-pub(in crate::store::db) fn delete_sub_keys_by_scan_to_batch(
-    store: &KvStore,
-    batch: &mut WriteBatch,
-    db_index: u16,
-    key: &str,
-    version: u64,
-    type_tag: u8,
-) {
-    delete_sub_keys_by_scan_to_batch_bytes(
-        store,
-        batch,
-        db_index,
-        key.as_bytes(),
-        version,
-        type_tag,
-    );
-}
-
 pub(in crate::store::db) fn delete_sub_keys_to_batch(
     batch: &mut WriteBatch,
     db_index: u16,
@@ -439,14 +375,6 @@ pub(in crate::store::db) fn delete_sub_keys_to_batch_bytes(
             batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &SET_MEMBER_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &SET_MEMBER_NAMESPACE, key, version),
-            );
-            batch.delete_range(
-                &sub_key_range_start_bytes(db_index, &SET_SLOT_NAMESPACE, key, version),
-                &sub_key_range_end_bytes(db_index, &SET_SLOT_NAMESPACE, key, version),
-            );
-            batch.delete_range(
-                &sub_key_range_start_bytes(db_index, &SET_MEMBER_SLOT_NAMESPACE, key, version),
-                &sub_key_range_end_bytes(db_index, &SET_MEMBER_SLOT_NAMESPACE, key, version),
             );
         }
         TYPE_SORTED_SET => {
@@ -525,8 +453,6 @@ pub(in crate::store::db) fn is_known_subkey_namespace(rest: &[u8]) -> bool {
         || rest.starts_with(&HASH_FIELD_EXPIRE_NAMESPACE)
         || rest.starts_with(&LIST_ITEM_NAMESPACE)
         || rest.starts_with(&SET_MEMBER_NAMESPACE)
-        || rest.starts_with(&SET_SLOT_NAMESPACE)
-        || rest.starts_with(&SET_MEMBER_SLOT_NAMESPACE)
         || rest.starts_with(&ZSET_MEMBER_NAMESPACE)
         || rest.starts_with(&ZSET_RANK_NAMESPACE)
         || rest.starts_with(&STREAM_ENTRY_NAMESPACE)

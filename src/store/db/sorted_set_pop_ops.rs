@@ -73,13 +73,13 @@ impl Db {
     ) -> Result<ZsetMultiPopResult, Error> {
         let mut shards = keys
             .iter()
-            .map(|key| set_write_lock_shard(self.db_index, key))
+            .map(|key| key_write_lock_shard(self.db_index, key))
             .collect::<Vec<_>>();
         shards.sort_unstable();
         shards.dedup();
         let mut guards = Vec::with_capacity(shards.len());
         for shard in shards {
-            guards.push(self.set_write_locks[shard].lock().await);
+            guards.push(self.key_write_locks[shard].lock().await);
         }
 
         for key in keys {

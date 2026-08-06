@@ -103,10 +103,7 @@ mod tests {
         ok_batch.put(b"cas", b"ok");
         store
             .compare_and_write_batch_async(
-                &[CompareCondition::with_expected(
-                    b"a",
-                    Some(b"1".to_vec()),
-                )],
+                &[CompareCondition::with_expected(b"a", Some(b"1".to_vec()))],
                 &ok_batch,
             )
             .await
@@ -153,6 +150,23 @@ mod tests {
                 .await
                 .len(),
             2
+        );
+
+        assert_eq!(
+            store.scan_range_raw_keys_at_ordinals(b"p:", Some(b"p;".to_vec()), &[0, 2, 4],),
+            vec![b"p:0".to_vec(), b"p:2".to_vec(), b"p:4".to_vec()]
+        );
+        assert_eq!(
+            store
+                .scan_range_raw_keys_at_ordinals_async(b"p:", Some(b"p;".to_vec()), &[1, 3],)
+                .await,
+            vec![b"p:1".to_vec(), b"p:3".to_vec()]
+        );
+        assert!(
+            store
+                .scan_range_raw_keys_at_ordinals_async(b"p:", Some(b"p;".to_vec()), &[],)
+                .await
+                .is_empty()
         );
 
         let visited = store
@@ -256,10 +270,7 @@ mod tests {
         );
         let observed = txn.get_raw_observed_async(b"async:txn").await;
         assert_eq!(observed.value().map(Bytes::as_ref), Some(&b"value"[..]));
-        assert!(txn
-            .observe_raw_key_state_async(b"async:txn")
-            .await
-            .exists());
+        assert!(txn.observe_raw_key_state_async(b"async:txn").await.exists());
         txn.commit_transaction_async().await.unwrap();
         assert_eq!(store.get_raw(b"async:txn"), Some(b"value".to_vec()));
     }
@@ -335,6 +346,15 @@ mod tests {
             .scan_range_raw_limited_async(b"txnscan:", Some(b"txnscan;".to_vec()), 3)
             .await;
         assert_eq!(async_range_entries.len(), 3);
+        assert_eq!(
+            txn.scan_range_raw_keys_at_ordinals_async(
+                b"txnscan:",
+                Some(b"txnscan;".to_vec()),
+                &[0, 2],
+            )
+            .await,
+            vec![b"txnscan:0".to_vec(), b"txnscan:2".to_vec()]
+        );
 
         let visited = txn
             .scan_range_raw_visit_async(b"txnscan:", Some(b"txnscan;".to_vec()), 10, |key, _| {

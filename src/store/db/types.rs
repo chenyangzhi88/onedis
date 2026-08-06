@@ -118,10 +118,115 @@ pub struct ZsetAddOutcome {
     pub applied: bool,
 }
 
-#[derive(Clone, Copy)]
+pub(crate) const COUNTER_CACHE_MAX_ENTRIES: usize = 1 << 16;
+
+#[derive(Default)]
+pub(crate) struct CounterCommitProgress {
+    pub(crate) committed_sequence: u64,
+    pub(crate) completed: BTreeSet<u64>,
+    pub(crate) failure: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct CounterCommitState {
+    pub(crate) progress: Mutex<CounterCommitProgress>,
+    pub(crate) notify: tokio::sync::Notify,
+}
+
+impl CounterCommitState {
+    pub(crate) fn complete(&self, sequence: u64) {
+        let mut progress = self
+            .progress
+            .lock()
+            .expect("counter commit progress mutex poisoned");
+        progress.completed.insert(sequence);
+        loop {
+            let Some(next) = progress.committed_sequence.checked_add(1) else {
+                break;
+            };
+            if !progress.completed.remove(&next) {
+                break;
+            }
+            progress.committed_sequence += 1;
+        }
+        drop(progress);
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) fn fail(&self, error: String) {
+        let mut progress = self
+            .progress
+            .lock()
+            .expect("counter commit progress mutex poisoned");
+        if progress.failure.is_none() {
+            progress.failure = Some(error);
+        }
+        drop(progress);
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.progress
+            .lock()
+            .expect("counter commit progress mutex poisoned")
+            .failure
+            .clone()
+    }
+
+    pub(crate) async fn wait_for(&self, sequence: u64) -> Result<(), Error> {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let progress = self
+                    .progress
+                    .lock()
+                    .expect("counter commit progress mutex poisoned");
+                if let Some(error) = &progress.failure {
+                    return Err(Error::msg(error.clone()));
+                }
+                if progress.committed_sequence >= sequence {
+                    return Ok(());
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(in crate::store::db) struct CounterCacheEntry {
     pub(in crate::store::db) value: i64,
-    pub(in crate::store::db) expire_ms: u64,
+    pub(in crate::store::db) next_sequence: u64,
+    pub(in crate::store::db) commit_state: Arc<CounterCommitState>,
+}
+
+#[derive(Default)]
+pub(crate) struct CounterCacheRuntime {
+    pub(in crate::store::db) entries: DashMap<(u16, Vec<u8>), CounterCacheEntry>,
+    /// This flag is intentionally monotonic. Resetting it during an eviction can race with an
+    /// insertion for another key and make a later structural write skip invalidation.
+    pub(in crate::store::db) ever_populated: AtomicBool,
+}
+
+impl CounterCacheRuntime {
+    pub(crate) fn invalidate_key(&self, db_index: u16, key: &[u8]) {
+        if self.ever_populated.load(Ordering::Acquire) {
+            self.entries.remove(&(db_index, key.to_vec()));
+        }
+    }
+
+    pub(crate) fn invalidate_db(&self, db_index: u16) {
+        if self.ever_populated.load(Ordering::Acquire) {
+            self.entries
+                .retain(|(cached_db, _), _| *cached_db != db_index);
+        }
+    }
+
+    pub(crate) fn evict_if_full(&self) {
+        if self.entries.len() >= COUNTER_CACHE_MAX_ENTRIES {
+            self.entries.clear();
+        }
+    }
 }
 
 #[derive(Clone, Encode, Decode, Debug, PartialEq, Eq)]

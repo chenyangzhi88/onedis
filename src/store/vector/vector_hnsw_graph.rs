@@ -19,21 +19,11 @@ struct HnswGraph {
 enum HnswBackend {
     L2(Hnsw<'static, f32, DistL2>),
     Cosine(Hnsw<'static, f32, DistCosine>),
-    Ip(Hnsw<'static, f32, DistInnerProduct>),
-}
-
-#[derive(Clone, Copy, Default)]
-struct DistInnerProduct;
-
-impl Distance<f32> for DistInnerProduct {
-    fn eval(&self, left: &[f32], right: &[f32]) -> f32 {
-        let dot = left
-            .iter()
-            .zip(right)
-            .map(|(a, b)| f64::from(*a) * f64::from(*b))
-            .sum::<f64>();
-        (-dot) as f32
-    }
+    // hnsw_rs requires every distance it receives to be non-negative. The
+    // natural ordering for maximum inner product is -dot(lhs, rhs), which can
+    // be negative, and clamping or normalizing it would change IP semantics.
+    // Keep IP nodes in the runtime and search them exactly instead.
+    ExactIp,
 }
 
 fn hnsw_vector(distance: VectorDistance, vector: &[f32]) -> Vec<f32> {
@@ -140,6 +130,25 @@ impl HnswGraph {
         validate_vector_for_distance(query, self.distance)?;
         if self.len() == 0 || limit == 0 {
             return Ok(Vec::new());
+        }
+        if self.distance == VectorDistance::Ip {
+            let candidates = self
+                .nodes
+                .iter()
+                .filter(|node| {
+                    !node.deleted
+                        && allow_doc_ids
+                            .is_none_or(|allow_doc_ids| allow_doc_ids.contains(&node.id))
+                })
+                .map(|node| {
+                    Ok(VectorCandidate {
+                        id: node.id.clone(),
+                        doc_version: node.doc_version,
+                        distance: distance_score(self.distance, query, &node.vector)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            return reduce_vector_candidates(candidates, limit);
         }
         let filter = |origin_id: &usize| {
             self.nodes.get(*origin_id).is_some_and(|node| {
@@ -311,13 +320,7 @@ impl HnswBackend {
                 ef_construction,
                 DistCosine {},
             )),
-            VectorDistance::Ip => HnswBackend::Ip(Hnsw::<f32, DistInnerProduct>::new(
-                m,
-                initial_cap,
-                DEFAULT_HNSW_MAX_LAYER,
-                ef_construction,
-                DistInnerProduct,
-            )),
+            VectorDistance::Ip => HnswBackend::ExactIp,
         }
     }
 
@@ -325,7 +328,7 @@ impl HnswBackend {
         match self {
             HnswBackend::L2(index) => index.insert((vector, origin_id)),
             HnswBackend::Cosine(index) => index.insert((vector, origin_id)),
-            HnswBackend::Ip(index) => index.insert((vector, origin_id)),
+            HnswBackend::ExactIp => {}
         }
     }
 
@@ -339,7 +342,7 @@ impl HnswBackend {
         match self {
             HnswBackend::L2(index) => index.search_filter(query, limit, ef, filter),
             HnswBackend::Cosine(index) => index.search_filter(query, limit, ef, filter),
-            HnswBackend::Ip(index) => index.search_filter(query, limit, ef, filter),
+            HnswBackend::ExactIp => Vec::new(),
         }
     }
 
@@ -357,7 +360,7 @@ impl HnswBackend {
         match self {
             HnswBackend::L2(index) => neighborhood!(index),
             HnswBackend::Cosine(index) => neighborhood!(index),
-            HnswBackend::Ip(index) => neighborhood!(index),
+            HnswBackend::ExactIp => Vec::new(),
         }
     }
 }

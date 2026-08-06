@@ -214,14 +214,22 @@ mod tests {
 
         manager.add_monitor(9, writer_a.clone());
         manager.broadcast_monitor(1, "PING".to_string());
-        let n = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            client_a.read(&mut buf),
-        )
+        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            let mut received = Vec::new();
+            loop {
+                let n = client_a.read(&mut buf).await.unwrap();
+                assert!(
+                    n > 0,
+                    "monitor connection closed before its message arrived"
+                );
+                received.extend_from_slice(&buf[..n]);
+                if received.windows(b"PING".len()).any(|part| part == b"PING") {
+                    break;
+                }
+            }
+        })
         .await
-        .unwrap()
-        .unwrap();
-        assert!(String::from_utf8_lossy(&buf[..n]).contains("PING"));
+        .expect("monitor message did not arrive");
 
         manager.unregister_channel("news", 1);
         manager.unregister_pattern("n*", 2);

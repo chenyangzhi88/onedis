@@ -47,7 +47,7 @@ impl Db {
             return Err(Error::msg("ERR invalid vector INITIAL_CAP"));
         }
 
-        let version = self.next_persisted_version();
+        let version = self.next_version();
         let meta = VectorIndexMeta {
             dim: options.dim as u32,
             distance,

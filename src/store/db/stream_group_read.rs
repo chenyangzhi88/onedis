@@ -117,13 +117,13 @@ impl Db {
         }
         let mut write_shards = requests
             .iter()
-            .map(|(key, _)| set_write_lock_shard(self.db_index, key))
+            .map(|(key, _)| key_write_lock_shard(self.db_index, key))
             .collect::<Vec<_>>();
         write_shards.sort_unstable();
         write_shards.dedup();
         let mut _stream_write_guards = Vec::with_capacity(write_shards.len());
         for shard in write_shards {
-            _stream_write_guards.push(self.set_write_locks[shard].lock().await);
+            _stream_write_guards.push(self.key_write_locks[shard].lock().await);
         }
         for (key, start) in requests {
             let Some(meta) = self.stream_meta_async(key).await? else {

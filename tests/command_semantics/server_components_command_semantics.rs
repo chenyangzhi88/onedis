@@ -50,6 +50,17 @@ fn command_executor_from_env_executes_work_with_default_limits() {
 }
 
 #[test]
+fn command_executor_can_shutdown_and_drop_inside_async_context() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let executor = CommandExecutor::new(1, 1).unwrap();
+        assert_eq!(executor.execute(async { 7 }).await.unwrap(), 7);
+        executor.shutdown_background();
+        drop(executor);
+    });
+}
+
+#[test]
 fn database_manager_accessors_and_waiter_notifications_are_wired() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let args = test_args_with_config(3, None);

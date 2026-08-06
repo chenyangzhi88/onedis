@@ -11,7 +11,7 @@ impl KvStore {
         }
         let value = self
             .table
-            .get(key)
+            .get(key, &ReadOptions::default())
             .expect("failed to read key from kv_engine")
             .map(|value| value.to_vec());
         global_metrics().record_storage_read(elapsed_us(started));
@@ -30,7 +30,7 @@ impl KvStore {
         }
         let value = self
             .table
-            .get_async(key)
+            .get_async(key, &ReadOptions::default())
             .await
             .expect("failed to read key from kv_engine")
             .map(|value| value.to_vec());
@@ -106,7 +106,7 @@ impl KvStore {
         }
         let value = self
             .table
-            .get(key)
+            .get(key, &ReadOptions::default())
             .expect("failed to read key from kv_engine");
         global_metrics().record_storage_read(elapsed_us(started));
         value
@@ -122,7 +122,7 @@ impl KvStore {
         }
         let value = self
             .table
-            .get_async(key)
+            .get_async(key, &ReadOptions::default())
             .await
             .expect("failed to read key from kv_engine");
         global_metrics().record_storage_read(elapsed_us(started));
@@ -147,7 +147,7 @@ impl KvStore {
         }
         let values = self
             .table
-            .multi_get(keys)
+            .multi_get(keys, &ReadOptions::default())
             .expect("failed to read keys from kv_engine")
             .into_iter()
             .map(|value| value.map(|bytes| bytes.to_vec()))
@@ -173,7 +173,7 @@ impl KvStore {
         }
         let values = self
             .table
-            .multi_get_async(keys)
+            .multi_get_async(keys, &ReadOptions::default())
             .await
             .expect("failed to read keys from kv_engine")
             .into_iter()
@@ -181,6 +181,37 @@ impl KvStore {
             .collect();
         global_metrics().record_storage_read(elapsed_us(started));
         values
+    }
+
+    /// Batch-read values together with reusable compare-and-write observation tokens.
+    pub async fn multi_get_raw_observed_async(&self, keys: &[Vec<u8>]) -> Vec<ObservedRawValue> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let started = Instant::now();
+        if let Some(values) = self.with_transaction_mut(|txn| {
+            txn.multi_get(keys)
+                .expect("failed to read observed keys from kv_engine transaction")
+        }) {
+            let observed = keys
+                .iter()
+                .zip(values)
+                .map(|(key, value)| ObservedRawValue::from_transaction(key, value))
+                .collect();
+            global_metrics().record_storage_read(elapsed_us(started));
+            return observed;
+        }
+        let observed = self
+            .table
+            .multi_get_observed_async(keys)
+            .await
+            .expect("failed to read observed keys from kv_engine")
+            .into_iter()
+            .zip(keys)
+            .map(|(observed, key)| ObservedRawValue::from_engine(key, observed))
+            .collect();
+        global_metrics().record_storage_read(elapsed_us(started));
+        observed
     }
 
     pub fn contains_key(&self, key: &[u8]) -> bool {

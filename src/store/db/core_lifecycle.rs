@@ -33,6 +33,7 @@ impl Db {
             ttl_manager,
             mutation_tracker,
             Arc::new(VectorRuntimeRegistry::default()),
+            Arc::new(CounterCacheRuntime::default()),
         )
     }
 
@@ -43,6 +44,7 @@ impl Db {
         ttl_manager: Arc<TtlManager>,
         mutation_tracker: Arc<KeyMutationTracker>,
         vector_runtimes: Arc<VectorRuntimeRegistry>,
+        counter_cache: Arc<CounterCacheRuntime>,
     ) -> Self {
         let store = store.for_db_index(db_index);
         // The layout marker describes the table itself, not a user transaction.
@@ -50,6 +52,7 @@ impl Db {
         // snapshot is first touched.
         let key_layout =
             KeyEncodingLayout::open_or_initialize_for_table(&store.non_transactional_view());
+        let key_write_locks = ttl_manager.key_write_locks();
         Db {
             db_index,
             store,
@@ -57,14 +60,12 @@ impl Db {
             changes: Arc::new(AtomicU64::new(0)),
             version_counter,
             ttl_manager,
-            counter_cache: Arc::new(DashMap::new()),
-            counter_cache_maybe_non_empty: Arc::new(AtomicBool::new(false)),
-            counter_cache_epoch: Arc::new(AtomicU64::new(0)),
+            counter_cache,
             list_meta_cache: Arc::new(DashMap::new()),
             list_meta_cache_maybe_non_empty: Arc::new(AtomicBool::new(false)),
             vector_runtimes,
             fulltext_runtimes: Arc::new(FullTextRuntimeRegistry::default()),
-            set_write_locks: Arc::new(std::array::from_fn(|_| tokio::sync::Mutex::new(()))),
+            key_write_locks,
             mutation_tracker,
             pending_mutations: Arc::new(Mutex::new(PendingMutations::default())),
         }
@@ -83,20 +84,39 @@ impl Db {
             version_counter: self.version_counter.clone(),
             ttl_manager: self.ttl_manager.clone(),
             counter_cache: self.counter_cache.clone(),
-            counter_cache_maybe_non_empty: self.counter_cache_maybe_non_empty.clone(),
-            counter_cache_epoch: self.counter_cache_epoch.clone(),
             list_meta_cache: self.list_meta_cache.clone(),
             list_meta_cache_maybe_non_empty: self.list_meta_cache_maybe_non_empty.clone(),
             vector_runtimes: self.vector_runtimes.clone(),
             fulltext_runtimes: self.fulltext_runtimes.clone(),
-            set_write_locks: self.set_write_locks.clone(),
+            key_write_locks: self.key_write_locks.clone(),
             mutation_tracker: self.mutation_tracker.clone(),
             pending_mutations: Arc::new(Mutex::new(PendingMutations::default())),
         })
     }
 
-    pub(in crate::store::db) fn set_write_lock(&self, key: &str) -> &tokio::sync::Mutex<()> {
-        &self.set_write_locks[set_write_lock_shard(self.db_index, key)]
+    pub(in crate::store::db) fn set_write_lock(&self, key: &str) -> &KeyWriteLock {
+        &self.key_write_locks[key_write_lock_shard(self.db_index, key)]
+    }
+
+    pub(in crate::store::db) async fn lock_write_shards(
+        &self,
+        shards: &[usize],
+    ) -> Vec<tokio::sync::RwLockWriteGuard<'_, ()>> {
+        let mut guards = Vec::with_capacity(shards.len());
+        for &shard in shards {
+            guards.push(self.key_write_locks[shard].lock().await);
+        }
+        guards
+    }
+
+    fn transaction_write_lock_shards(&self, keys: &[(u16, Vec<u8>)]) -> Vec<usize> {
+        let mut shards = keys
+            .iter()
+            .map(|(db_index, key)| key_write_lock_shard_bytes(*db_index, key))
+            .collect::<Vec<_>>();
+        shards.sort_unstable();
+        shards.dedup();
+        shards
     }
 
     pub(in crate::store) async fn run_blocking_store_task<T, F>(
@@ -128,9 +148,7 @@ impl Db {
             list_meta_cache: self.list_meta_cache.clone(),
             list_meta_cache_maybe_non_empty: self.list_meta_cache_maybe_non_empty.clone(),
             counter_cache: self.counter_cache.clone(),
-            counter_cache_maybe_non_empty: self.counter_cache_maybe_non_empty.clone(),
-            counter_cache_epoch: self.counter_cache_epoch.clone(),
-            set_write_locks: self.set_write_locks.clone(),
+            key_write_locks: self.key_write_locks.clone(),
         }
     }
 
@@ -138,12 +156,12 @@ impl Db {
         self.store.is_transactional()
     }
 
-    pub(in crate::store::db) fn next_persisted_version(&self) -> u64 {
-        Self::next_persisted_version_for_store(&self.store, &self.version_counter)
+    pub(in crate::store::db) fn next_version(&self) -> u64 {
+        self.version_counter.next()
     }
 
-    pub(in crate::store::db) async fn next_persisted_version_async(&self) -> u64 {
-        Self::next_persisted_version_for_store_async(&self.store, &self.version_counter).await
+    pub(in crate::store::db) async fn next_version_async(&self) -> u64 {
+        self.version_counter.next()
     }
 
     pub fn ttl_observability_snapshot(&self) -> TtlObservabilitySnapshot {
@@ -158,31 +176,18 @@ impl Db {
         }
     }
 
-    pub(in crate::store::db) fn next_persisted_version_for_store(
-        store: &KvStore,
+    pub(in crate::store::db) fn next_version_for_store(
+        _store: &KvStore,
         version_counter: &VersionCounter,
     ) -> u64 {
-        version_counter.next_reserved(|high_water| {
-            let mut batch = WriteBatch::new();
-            reserve_version_high_water_to_batch(&mut batch, high_water);
-            store.global_metadata_view().write_batch_direct(&batch);
-        })
+        version_counter.next()
     }
 
-    pub(in crate::store::db) async fn next_persisted_version_for_store_async(
-        store: &KvStore,
+    pub(in crate::store::db) async fn next_version_for_store_async(
+        _store: &KvStore,
         version_counter: &VersionCounter,
     ) -> u64 {
-        version_counter
-            .next_reserved_async(|high_water| async move {
-                let mut batch = WriteBatch::new();
-                reserve_version_high_water_to_batch(&mut batch, high_water);
-                store
-                    .global_metadata_view()
-                    .write_batch_direct_async(batch)
-                    .await;
-            })
-            .await
+        version_counter.next()
     }
 
     pub fn commit_transaction(&self) -> Result<(), Error> {
@@ -191,9 +196,19 @@ impl Db {
             self.store.discard_transaction();
             return Ok(());
         }
+        let shards = if dbs.is_empty() {
+            self.transaction_write_lock_shards(&keys)
+        } else {
+            (0..KEY_WRITE_LOCK_SHARDS).collect()
+        };
+        let _write_guards = shards
+            .iter()
+            .map(|&shard| self.key_write_locks[shard].blocking_lock())
+            .collect::<Vec<_>>();
         self.store.commit_transaction()?;
+        self.invalidate_counter_cache_for_committed_mutations(&keys, &dbs);
         self.publish_mutations(keys.clone(), dbs.clone());
-        for db_index in dbs {
+        for &db_index in &dbs {
             self.vector_runtimes.remove_db(db_index);
         }
         if let Err(err) = self.reconcile_committed_keys(&keys) {
@@ -215,9 +230,16 @@ impl Db {
             self.store.discard_transaction();
             return Ok(());
         }
+        let shards = if dbs.is_empty() {
+            self.transaction_write_lock_shards(&keys)
+        } else {
+            (0..KEY_WRITE_LOCK_SHARDS).collect()
+        };
+        let _write_guards = self.lock_write_shards(&shards).await;
         self.store.commit_transaction_async().await?;
+        self.invalidate_counter_cache_for_committed_mutations(&keys, &dbs);
         self.publish_mutations(keys.clone(), dbs.clone());
-        for db_index in dbs {
+        for &db_index in &dbs {
             self.vector_runtimes.remove_db(db_index);
         }
         let reconcile_keys = keys.clone();
@@ -270,9 +292,7 @@ impl Db {
             list_meta_cache: self.list_meta_cache.clone(),
             list_meta_cache_maybe_non_empty: self.list_meta_cache_maybe_non_empty.clone(),
             counter_cache: self.counter_cache.clone(),
-            counter_cache_maybe_non_empty: self.counter_cache_maybe_non_empty.clone(),
-            counter_cache_epoch: self.counter_cache_epoch.clone(),
-            set_write_locks: self.set_write_locks.clone(),
+            key_write_locks: self.key_write_locks.clone(),
         }
     }
 }

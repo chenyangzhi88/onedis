@@ -45,6 +45,11 @@ impl TtlManager {
     /// part of the engine compare-and-write, so a concurrent SET/PERSIST/
     /// EXPIRE cannot be deleted by a stale sweeper decision.
     async fn expire_key_async(&self, entry: &TtlEntry) -> ExpireResult {
+        let shard = crate::store::key_write_locks::key_write_lock_shard(
+            entry.db_index,
+            &entry.key,
+        );
+        let _write_guard = self.key_write_locks[shard].lock().await;
         let store = self.store_for_db(entry.db_index);
         let meta_key = entry.key_encoding.main_key(entry.db_index, &entry.key);
         let observed = store.get_raw_observed_async(&meta_key).await;
@@ -88,14 +93,6 @@ impl TtlManager {
 
                     batch.delete(&meta_key);
                     batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
-                    delete_sub_keys_to_batch_with_encoding(
-                        &mut batch,
-                        entry.key_encoding,
-                        entry.db_index,
-                        &entry.key,
-                        header.version,
-                        header.type_tag,
-                    );
                     ExpireResult::Deleted
                 }
             }

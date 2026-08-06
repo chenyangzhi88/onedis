@@ -38,24 +38,48 @@ impl Handler {
         &self,
         commands: Vec<(&'a [u8], &'a [u8], &'a [u8])>,
     ) -> Vec<u8> {
+        const MAX_HSET_COMMANDS_PER_WRITE: usize = 256;
+
         let db = self.session.get_db().clone();
         let mut out = Vec::with_capacity(commands.len() * 4);
-        for (key_bytes, field_bytes, value_bytes) in commands {
+        let mut index = 0;
+        while index < commands.len() {
+            let (key_bytes, field_bytes, _) = commands[index];
             let Ok(key) = std::str::from_utf8(key_bytes) else {
                 append_error(&mut out, "ERR invalid UTF-8 key");
+                index += 1;
                 continue;
             };
-            let Ok(field) = std::str::from_utf8(field_bytes) else {
+            if std::str::from_utf8(field_bytes).is_err() {
                 append_error(&mut out, "ERR invalid UTF-8 hash field");
+                index += 1;
                 continue;
-            };
-            let Ok(value) = std::str::from_utf8(value_bytes) else {
-                append_error(&mut out, "ERR invalid UTF-8 hash value");
-                continue;
-            };
-            match db.hash_set_async(key, field, value).await {
-                Ok(added) => append_integer(&mut out, i64::from(added)),
-                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+            let mut fields = Vec::new();
+            while index < commands.len()
+                && fields.len() < MAX_HSET_COMMANDS_PER_WRITE
+                && commands[index].0 == key_bytes
+            {
+                let (_, field_bytes, value_bytes) = commands[index];
+                let Ok(field) = std::str::from_utf8(field_bytes) else {
+                    break;
+                };
+                fields.push((field, value_bytes));
+                index += 1;
+            }
+
+            match db.hash_set_ordered_bytes_async(key, &fields).await {
+                Ok(added) => {
+                    for added in added {
+                        append_integer(&mut out, i64::from(added));
+                    }
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    for _ in fields {
+                        append_error(&mut out, &error);
+                    }
+                }
             }
         }
         out

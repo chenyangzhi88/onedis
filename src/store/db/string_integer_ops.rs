@@ -77,78 +77,9 @@ impl Db {
     }
 
     pub fn increment_integer_string(&self, key: &str, delta: i64) -> Result<i64, Error> {
-        if self.store.is_transactional() {
-            return self.update_integer_string_read_modify_write(key, |current| {
-                current.checked_add(delta)
-            });
-        }
-
-        let key_bytes = self.mk(key);
-        let now = now_ms();
-
-        let cached_next = match self.counter_cache.entry(key_bytes.clone()) {
-            Entry::Occupied(mut occupied) => {
-                let entry = occupied.get_mut();
-                if entry.expire_ms == 0 || entry.expire_ms > now {
-                    let next = entry
-                        .value
-                        .checked_add(delta)
-                        .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
-                    entry.value = next;
-                    Some(next)
-                } else {
-                    occupied.remove();
-                    None
-                }
-            }
-            Entry::Vacant(_) => None,
-        };
-        if let Some(next) = cached_next {
-            self.store.merge_raw(&key_bytes, &delta.to_be_bytes());
-            self.changes.fetch_add(1, Ordering::Relaxed);
-            return Ok(next);
-        }
-
-        self.expire_if_needed(key);
-        let now = now_ms();
-        let next = loop {
-            match self.counter_cache.entry(key_bytes.clone()) {
-                Entry::Occupied(mut occupied) => {
-                    let entry = occupied.get_mut();
-                    if entry.expire_ms > 0 && entry.expire_ms <= now {
-                        occupied.remove();
-                        continue;
-                    }
-                    let next = entry
-                        .value
-                        .checked_add(delta)
-                        .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
-                    entry.value = next;
-                    break next;
-                }
-                Entry::Vacant(vacant) => {
-                    let cache_epoch = self.counter_cache_epoch.load(Ordering::Acquire);
-                    let (expire_ms, current) = self.read_integer_string_for_update(&key_bytes)?;
-                    let next = current
-                        .checked_add(delta)
-                        .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
-
-                    if self.counter_cache_epoch.load(Ordering::Acquire) == cache_epoch {
-                        vacant.insert(CounterCacheEntry {
-                            value: next,
-                            expire_ms,
-                        });
-                        self.counter_cache_maybe_non_empty
-                            .store(true, Ordering::Release);
-                    }
-                    break next;
-                }
-            }
-        };
-
-        self.store.merge_raw(&key_bytes, &delta.to_be_bytes());
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        Ok(next)
+        // The server hot path is async. Keep the synchronous API on the strict read-modify-write
+        // implementation so it remains usable from both ordinary and current-thread runtimes.
+        self.update_integer_string_read_modify_write(key, |current| current.checked_add(delta))
     }
 
     pub async fn increment_integer_string_async(
@@ -156,8 +87,159 @@ impl Db {
         key: &str,
         delta: i64,
     ) -> Result<i64, Error> {
-        self.update_integer_string_async(key, |current| current.checked_add(delta))
-            .await
+        // Arbitrary INCRBY operands can be individually valid relative to a negative base while
+        // overflowing if kv_engine partial-merges the operands without that base. Keep those on
+        // the strict path; the hot INCR/DECR cases cannot reach that condition in practice.
+        if self.store.is_transactional() || !matches!(delta, -1 | 1) {
+            return self
+                .update_integer_string_async(key, |current| current.checked_add(delta))
+                .await;
+        }
+
+        let logical_key = key.as_bytes().to_vec();
+        let cache_key = (self.db_index, logical_key.clone());
+        let raw_key = self.mk(key);
+
+        let read_guard = self.set_write_lock(key).read_owned().await;
+        if let Some((next, sequence, commit_state)) =
+            self.assign_cached_counter(&cache_key, delta)?
+        {
+            self.spawn_counter_merge(
+                logical_key,
+                raw_key,
+                delta,
+                sequence,
+                commit_state.clone(),
+                read_guard,
+            );
+            commit_state.wait_for(sequence).await?;
+            return Ok(next);
+        }
+        drop(read_guard);
+
+        // Cache initialization is a structural operation: wait for any evicted in-flight merge,
+        // then read one authoritative base value while SET/DEL/expiry are excluded.
+        let write_guard = self.set_write_lock(key).lock_owned().await;
+        if let Some((next, sequence, commit_state)) =
+            self.assign_cached_counter(&cache_key, delta)?
+        {
+            self.spawn_counter_merge(
+                logical_key,
+                raw_key,
+                delta,
+                sequence,
+                commit_state.clone(),
+                write_guard,
+            );
+            commit_state.wait_for(sequence).await?;
+            return Ok(next);
+        }
+
+        self.expire_if_needed_async(key).await;
+        let (expire_ms, current) = self.read_integer_string_for_update_async(&raw_key).await?;
+        if expire_ms > 0 {
+            // TTL-bearing counters stay on the compare-and-write path. An expiry delete and a
+            // blind merge must never race, because the merge could recreate an expired key.
+            let result = self
+                .update_integer_string_async(key, |value| value.checked_add(delta))
+                .await;
+            drop(write_guard);
+            return result;
+        }
+        let next = current
+            .checked_add(delta)
+            .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
+        let commit_state = Arc::new(CounterCommitState::default());
+        self.counter_cache.evict_if_full();
+        self.counter_cache
+            .ever_populated
+            .store(true, Ordering::Release);
+        self.counter_cache.entries.insert(
+            cache_key,
+            CounterCacheEntry {
+                value: next,
+                next_sequence: 1,
+                commit_state: commit_state.clone(),
+            },
+        );
+        self.spawn_counter_merge(
+            logical_key,
+            raw_key,
+            delta,
+            1,
+            commit_state.clone(),
+            write_guard,
+        );
+        commit_state.wait_for(1).await?;
+        Ok(next)
+    }
+
+    fn assign_cached_counter(
+        &self,
+        cache_key: &(u16, Vec<u8>),
+        delta: i64,
+    ) -> Result<Option<(i64, u64, Arc<CounterCommitState>)>, Error> {
+        let Some(mut entry) = self.counter_cache.entries.get_mut(cache_key) else {
+            return Ok(None);
+        };
+        if let Some(error) = entry.commit_state.failure() {
+            return Err(Error::msg(error));
+        }
+        let next = entry
+            .value
+            .checked_add(delta)
+            .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
+        let sequence = entry
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::msg("ERR counter merge sequence exhausted"))?;
+        entry.value = next;
+        entry.next_sequence = sequence;
+        Ok(Some((next, sequence, entry.commit_state.clone())))
+    }
+
+    fn spawn_counter_merge<G>(
+        &self,
+        logical_key: Vec<u8>,
+        raw_key: Vec<u8>,
+        delta: i64,
+        sequence: u64,
+        commit_state: Arc<CounterCommitState>,
+        guard: G,
+    ) where
+        G: Send + 'static,
+    {
+        let db = self.shared_task_view();
+        tokio::spawn(async move {
+            // The owned key guard moves into this task so disconnecting/cancelling the request
+            // cannot let a structural overwrite pass an already assigned counter delta.
+            let _guard = guard;
+            match db
+                .store
+                .try_merge_raw_async(&raw_key, &delta.to_be_bytes())
+                .await
+            {
+                Ok(()) => {
+                    db.changes.fetch_add(1, Ordering::Relaxed);
+                    if db.mutation_tracker.has_watched_keys() {
+                        db.record_external_key_mutation(db.db_index, raw_key);
+                    }
+                    commit_state.complete(sequence);
+                }
+                Err(error) => {
+                    db.counter_cache.invalidate_key(db.db_index, &logical_key);
+                    commit_state.fail(format!("ERR counter merge failed: {error}"));
+                }
+            }
+        });
+    }
+
+    async fn read_integer_string_for_update_async(
+        &self,
+        key_bytes: &[u8],
+    ) -> Result<(u64, i64), Error> {
+        let raw = self.store.get_raw_async(key_bytes).await;
+        Self::decode_integer_string_for_update(raw.as_deref())
     }
 
     pub(in crate::store::db) fn read_integer_string_for_update(

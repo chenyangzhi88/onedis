@@ -16,7 +16,7 @@ impl Db {
             self.write_string(&key, value.as_bytes(), 0);
             return;
         }
-        let version = self.next_persisted_version();
+        let version = self.next_version();
         self.write_structure(&key, &value, 0, version);
     }
 

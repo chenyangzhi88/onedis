@@ -11,8 +11,12 @@ impl Db {
         // background for INFO/idle indexes. Keep Tantivy indexing off this
         // path, but retain bounded outbox compaction without scanning the
         // queue on every source write.
+        let matching_metas = self.fulltext_matching_metas_for_source(key, source_type)?;
+        if matching_metas.is_empty() {
+            return Ok(());
+        }
         let threshold = self.fulltext_outbox_compact_threshold()?;
-        for (index, meta) in self.fulltext_matching_metas_for_source(key, source_type)? {
+        for (index, meta) in matching_metas {
             if self
                 .fulltext_runtimes
                 .outbox_pending(self.db_index, &index)

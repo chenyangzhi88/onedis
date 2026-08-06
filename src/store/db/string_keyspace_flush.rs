@@ -23,6 +23,10 @@ impl Db {
     }
 
     pub async fn flushdb_async(&self) {
+        let shards = (!self.store.is_transactional())
+            .then(|| (0..KEY_WRITE_LOCK_SHARDS).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let _write_guards = self.lock_write_shards(&shards).await;
         let prefix = db_prefix(self.db_index);
         let mut batch = WriteBatch::new();
         if let Some(end) = db_prefix_exclusive_upper_bound(self.db_index) {

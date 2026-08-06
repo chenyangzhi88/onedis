@@ -1,7 +1,7 @@
 use super::*;
 impl Db {
     pub(super) fn next_fulltext_sequence(&self) -> u64 {
-        self.next_persisted_version()
+        self.next_version()
     }
 
     pub(super) fn resolve_fulltext_index(&self, index_or_alias: &str) -> Result<String, Error> {
@@ -9,7 +9,7 @@ impl Db {
             .store
             .get_raw(&fulltext_meta_key(self.db_index, index_or_alias))
         {
-            let meta = decode_fulltext_meta(&raw)?;
+            let meta = decode_fulltext_meta_for_index(index_or_alias, &raw)?;
             if matches!(meta.state, FullTextIndexState::Dropping) {
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
@@ -50,7 +50,7 @@ impl Db {
         let Some(raw) = self.store.get_raw(&fulltext_meta_key(self.db_index, index)) else {
             return Err(Error::msg("ERR fulltext index does not exist"));
         };
-        Ok((decode_fulltext_meta(&raw)?, raw))
+        Ok((decode_fulltext_meta_for_index(index, &raw)?, raw))
     }
 
     pub(super) fn fulltext_write_meta_cas(
@@ -567,7 +567,14 @@ impl Db {
             let Some(index) = fulltext_index_from_meta_key(self.db_index, &key) else {
                 continue;
             };
-            metas.push((index, decode_fulltext_meta(&raw)?));
+            let meta = decode_fulltext_meta_for_index(&index, &raw).map_err(|error| {
+                Error::msg(format!(
+                    "{error}; db={} index={index:?} encoded_bytes={}",
+                    self.db_index,
+                    raw.len()
+                ))
+            })?;
+            metas.push((index, meta));
         }
         Ok(metas)
     }

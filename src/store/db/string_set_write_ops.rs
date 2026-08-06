@@ -111,6 +111,7 @@ impl Db {
         condition: SetCondition,
         return_old: bool,
     ) -> Result<SetOutcome, Error> {
+        let _write_guard = self.set_write_lock(&key).lock().await;
         for _ in 0..64 {
             self.expire_if_needed_async(&key).await;
             let key_bytes = self.mk(&key);
@@ -154,11 +155,7 @@ impl Db {
                 SetExpiration::At(expire_ms) => expire_ms,
             };
             let mut batch = WriteBatch::new();
-            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
-                &mut batch,
-                &key,
-                old_raw.as_deref(),
-            );
+            self.prepare_string_overwrite_to_batch(&mut batch, &key, old_raw.as_deref());
             if expire_ms > 0 && now_ms() >= expire_ms {
                 batch.delete(&key_bytes);
                 if let Some(header) = old_header
@@ -351,6 +348,7 @@ impl Db {
     }
 
     pub async fn getdel_string_bytes_async(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let key_bytes = self.mk(key);
         for _ in 0..64 {
             self.expire_if_needed_async(key).await;

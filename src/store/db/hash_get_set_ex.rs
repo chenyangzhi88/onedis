@@ -248,7 +248,7 @@ impl Db {
         }
         let version = match meta {
             Some((_, v)) => v,
-            None => self.next_persisted_version(),
+            None => self.next_version(),
         };
         if fnx
             && fields
@@ -373,7 +373,7 @@ impl Db {
         }
         let version = match meta {
             Some((_, v)) => v,
-            None => self.next_persisted_version_async().await,
+            None => self.next_version_async().await,
         };
         if fnx || fxx {
             for (field, _) in fields {

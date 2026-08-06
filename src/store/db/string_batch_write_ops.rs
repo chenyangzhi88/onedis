@@ -5,6 +5,11 @@ impl Db {
         if key_vals.is_empty() {
             return;
         }
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            key_vals.iter().map(|(key, _)| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let keys = key_vals
@@ -14,11 +19,7 @@ impl Db {
         let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
-            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
-                &mut batch,
-                key,
-                old_raw.as_deref(),
-            );
+            self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
             self.write_string_to_batch_with_deferred_old_raw(
                 &mut batch,
                 key,
@@ -38,6 +39,11 @@ impl Db {
         if key_vals.is_empty() {
             return;
         }
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            key_vals.iter().map(|(key, _)| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let keys = key_vals
@@ -47,11 +53,7 @@ impl Db {
         let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
-            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
-                &mut batch,
-                key,
-                old_raw.as_deref(),
-            );
+            self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
             self.write_string_to_batch_with_deferred_old_raw(
                 &mut batch,
                 key,
@@ -68,6 +70,9 @@ impl Db {
         if key_vals.is_empty() {
             return;
         }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, key_vals.iter().map(|(key, _)| *key));
+        let _write_guards = self.lock_write_shards(&shards).await;
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let keys = key_vals
@@ -77,11 +82,7 @@ impl Db {
         let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
-            self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
-                &mut batch,
-                key,
-                old_raw.as_deref(),
-            );
+            self.prepare_string_byte_key_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
             self.write_string_byte_key_to_batch_with_deferred_old_raw(
                 &mut batch,
                 key,
@@ -101,6 +102,9 @@ impl Db {
         if key_vals.is_empty() {
             return;
         }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, key_vals.iter().map(|(key, _)| *key));
+        let _write_guards = self.lock_write_shards(&shards).await;
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let keys = key_vals
@@ -110,11 +114,7 @@ impl Db {
         let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
-            self.cleanup_old_complex_subkeys_for_string_byte_key_overwrite(
-                &mut batch,
-                key,
-                old_raw.as_deref(),
-            );
+            self.prepare_string_byte_key_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
             self.write_string_byte_key_to_batch_with_deferred_old_raw(
                 &mut batch,
                 key,
@@ -153,6 +153,11 @@ impl Db {
         if key_vals.is_empty() {
             return;
         }
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            key_vals.iter().map(|(key, _)| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let keys = key_vals
@@ -162,11 +167,7 @@ impl Db {
         let old_values = self.store.multi_get_raw_async(&keys).await;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.into_iter().zip(old_values) {
-            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
-                &mut batch,
-                &key,
-                old_raw.as_deref(),
-            );
+            self.prepare_string_overwrite_to_batch(&mut batch, &key, old_raw.as_deref());
             self.write_string_to_batch_with_deferred_old_raw(
                 &mut batch,
                 &key,
@@ -207,6 +208,11 @@ impl Db {
         if key_vals.is_empty() {
             return false;
         }
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            key_vals.iter().map(|(key, _)| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
         for (key, _) in &key_vals {
             self.expire_if_needed_async(key).await;
         }
@@ -269,11 +275,7 @@ impl Db {
         for ((key, value), old_raw) in key_vals.iter().zip(&old_values) {
             let old_header = old_raw.as_deref().and_then(decode_meta_header);
             let expire_ms = expiration_ms(expiration, old_header.map(|header| header.expire_ms));
-            self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
-                &mut batch,
-                key,
-                old_raw.as_deref(),
-            );
+            self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
             if expire_ms > 0 && now_ms() >= expire_ms {
                 batch.delete(&self.mk(key));
                 if let Some(header) = old_header
@@ -312,6 +314,11 @@ impl Db {
         if key_vals.is_empty() {
             return Ok(false);
         }
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            key_vals.iter().map(|(key, _)| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
         for _ in 0..64 {
             for (key, _) in &key_vals {
                 self.expire_if_needed_async(key).await;
@@ -333,11 +340,7 @@ impl Db {
                 let old_header = old_raw.as_deref().and_then(decode_meta_header);
                 let expire_ms =
                     expiration_ms(expiration, old_header.map(|header| header.expire_ms));
-                self.cleanup_old_complex_subkeys_for_string_overwrite_range_to_batch(
-                    &mut batch,
-                    key,
-                    old_raw.as_deref(),
-                );
+                self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
                 if expire_ms > 0 && now_ms() >= expire_ms {
                     batch.delete(&self.mk(key));
                     if let Some(header) = old_header

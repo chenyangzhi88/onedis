@@ -190,18 +190,6 @@ impl Db {
             .await
     }
 
-    pub(in crate::store::db) async fn hash_live_field_observed_async(
-        &self,
-        key: &str,
-        version: u64,
-        field: &str,
-    ) -> super::ObservedRawValue {
-        let _ = self.hash_field_is_live_async(key, version, field).await;
-        self.store
-            .get_raw_observed_async(&hash_field_key(self.db_index, key, version, field))
-            .await
-    }
-
     pub(in crate::store::db) async fn hash_entries_raw_async(
         &self,
         key: &str,

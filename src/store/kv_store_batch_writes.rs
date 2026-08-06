@@ -23,9 +23,10 @@ impl KvStore {
             global_metrics().record_storage_write(elapsed_us(started), false);
             return;
         }
-        let table_batch = SchemalessWriteBatch::from_write_batch(batch.clone());
+        let table_batch = bind_write_batch(&self.table, batch)
+            .expect("failed to bind batch to kv_engine table");
         self.table
-            .write(&table_batch)
+            .write(table_batch, self.write_options.clone())
             .expect("failed to write batch into kv_engine");
         global_metrics().record_storage_write(elapsed_us(started), false);
     }
@@ -36,9 +37,10 @@ impl KvStore {
             return;
         }
         let started = Instant::now();
-        let table_batch = SchemalessWriteBatch::from_write_batch(batch.clone());
+        let table_batch = bind_write_batch(&self.table, batch)
+            .expect("failed to bind batch to kv_engine table");
         self.table
-            .write_async(&table_batch)
+            .write_async(table_batch, self.write_options.clone())
             .await
             .expect("failed to write batch into kv_engine");
         global_metrics().record_storage_write(elapsed_us(started), false);
@@ -50,9 +52,10 @@ impl KvStore {
             return;
         }
         let started = Instant::now();
-        let table_batch = SchemalessWriteBatch::from_write_batch(batch);
+        let table_batch = bind_write_batch(&self.table, &batch)
+            .expect("failed to bind owned batch to kv_engine table");
         self.table
-            .write_async(&table_batch)
+            .write_async(table_batch, self.write_options.clone())
             .await
             .expect("failed to write owned batch into kv_engine");
         global_metrics().record_storage_write(elapsed_us(started), false);
@@ -78,7 +81,7 @@ impl KvStore {
             global_metrics().record_storage_write(elapsed_us(started), result.is_err());
             return result;
         }
-        let table_batch = SchemalessWriteBatch::from_write_batch(batch.clone());
+        let table_batch = bind_write_batch(&self.table, batch)?;
         let engine_conditions = conditions
             .iter()
             .map(|condition| {
@@ -92,7 +95,11 @@ impl KvStore {
             .collect::<KvResult<Vec<_>>>()?;
         let result = self
             .table
-            .compare_and_write_async(&engine_conditions, &table_batch)
+            .compare_and_write_async(
+                engine_conditions,
+                table_batch,
+                self.write_options.clone(),
+            )
             .await;
         global_metrics().record_storage_write(elapsed_us(started), result.is_err());
         result
@@ -118,7 +125,7 @@ impl KvStore {
             global_metrics().record_storage_write(elapsed_us(started), result.is_err());
             return result;
         }
-        let table_batch = SchemalessWriteBatch::from_write_batch(batch.clone());
+        let table_batch = bind_write_batch(&self.table, batch)?;
         let engine_conditions = conditions
             .iter()
             .map(|condition| {
@@ -130,34 +137,54 @@ impl KvStore {
                 })
             })
             .collect::<KvResult<Vec<_>>>()?;
-        let result = self.table.compare_and_write(&engine_conditions, &table_batch);
+        let result = self.table.compare_and_write(
+            engine_conditions,
+            table_batch,
+            self.write_options.clone(),
+        );
         global_metrics().record_storage_write(elapsed_us(started), result.is_err());
         result
     }
 
     /// 直接提交到底层 DB，绕过当前事务视图。
-    ///
-    /// Version high-water reservations intentionally use this path: gaps are
-    /// safe, but the reserved high-water mark must be durable before any
-    /// transaction can publish keys using those versions.
     pub fn write_batch_direct(&self, batch: &WriteBatch) {
         let started = Instant::now();
-        let table_batch = SchemalessWriteBatch::from_write_batch(batch.clone());
+        let table_batch = bind_write_batch(&self.table, batch)
+            .expect("failed to bind direct batch to kv_engine table");
         self.table
-            .write(&table_batch)
+            .write(table_batch, self.write_options.clone())
             .expect("failed to write direct batch into kv_engine");
         global_metrics().record_storage_write(elapsed_us(started), false);
     }
 
     pub async fn write_batch_direct_async(&self, batch: WriteBatch) {
         let started = Instant::now();
-        let table_batch = SchemalessWriteBatch::from_write_batch(batch);
+        let table_batch = bind_write_batch(&self.table, &batch)
+            .expect("failed to bind direct batch to kv_engine table");
         self.table
-            .write_async(&table_batch)
+            .write_async(table_batch, self.write_options.clone())
             .await
             .expect("failed to write direct batch into kv_engine");
         global_metrics().record_storage_write(elapsed_us(started), false);
     }
+}
+
+fn bind_write_batch(
+    table: &SchemalessTable,
+    batch: &WriteBatch,
+) -> KvResult<SchemalessWriteBatch> {
+    let mut table_batch = table.new_write_batch()?;
+    for (write_type, key, value) in batch.iter() {
+        match write_type {
+            WriteType::Put | WriteType::PutBlobMedium | WriteType::PutBlobExternal => {
+                table_batch.put(key, value)?
+            }
+            WriteType::Delete => table_batch.delete(key)?,
+            WriteType::RangeDelete => table_batch.delete_range(key, value)?,
+            WriteType::Merge => table_batch.merge(key, value)?,
+        }
+    }
+    Ok(table_batch)
 }
 
 fn stage_batch_in_transaction(

@@ -61,5 +61,25 @@ fn json_paths_indexing_encoding_and_legacy_decode_are_covered() {
     let decoded = decode_fulltext_meta(&encoded).unwrap();
     assert_eq!(decoded.schema.len(), 3);
 
+    let legacy = LegacyFullTextIndexMetaV1 {
+        source_type: meta_record.source_type,
+        prefixes: meta_record.prefixes.clone(),
+        schema,
+        aliases: meta_record.aliases.clone(),
+        index_options: meta_record.index_options.clone(),
+        state: meta_record.state,
+        generation: 17,
+        backfill_cursor: meta_record.backfill_cursor.clone(),
+        last_indexed_outbox_seq: 23,
+        refresh_policy: meta_record.refresh_policy.clone(),
+    };
+    let legacy_encoded = encode_record(&legacy).unwrap();
+    let legacy_decoded = decode_fulltext_meta_for_index("legacy-index", &legacy_encoded).unwrap();
+    assert_eq!(legacy_decoded.incarnation, 17);
+    assert_eq!(legacy_decoded.generation, 17);
+    assert_eq!(legacy_decoded.revision, 0);
+    assert_eq!(legacy_decoded.active_storage, "legacy-index");
+    assert_eq!(legacy_decoded.last_indexed_outbox_seq, 23);
+
     assert!(decode_fulltext_meta(b"not-bincode").is_err());
 }

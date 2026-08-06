@@ -174,6 +174,7 @@ impl Server {
                 handlers.abort_all();
                 while handlers.join_next().await.is_some() {}
                 self.db_manager.shutdown().await;
+                self.command_executor.shutdown_background();
                 log::info!("Server shutdown complete");
             }
             Err(err) => {

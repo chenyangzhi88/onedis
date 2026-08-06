@@ -13,10 +13,7 @@ use anyhow::Error;
 use bincode::{Decode, Encode};
 use common::types::write_batch::WriteBatch;
 use dashmap::DashMap;
-use hnsw_rs::{
-    anndists::dist::distances::Distance,
-    prelude::{DistCosine, DistL2, Hnsw},
-};
+use hnsw_rs::prelude::{DistCosine, DistL2, Hnsw};
 use serde_json::Value as JsonValue;
 
 use super::{

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::Ordering;
 
 #[test]
 fn hash_is_stored_and_loaded_via_kv_entries() {
@@ -218,6 +219,70 @@ fn hash_multi_set_shares_native_storage_model() {
 }
 
 #[tokio::test]
+async fn ordered_hash_set_batch_reports_each_command_and_keeps_last_value() {
+    let db = test_db();
+
+    let first = [
+        ("name", b"alice".as_slice()),
+        ("name", b"bob".as_slice()),
+        ("city", b"paris".as_slice()),
+    ];
+    assert_eq!(
+        db.hash_set_ordered_bytes_async("user:batch", &first)
+            .await
+            .unwrap(),
+        vec![true, false, true]
+    );
+    assert_eq!(
+        db.hash_get_async("user:batch", "name").await.unwrap(),
+        Some("bob".to_string())
+    );
+
+    let second = [
+        ("city", b"london".as_slice()),
+        ("age", b"30".as_slice()),
+        ("age", b"31".as_slice()),
+    ];
+    assert_eq!(
+        db.hash_set_ordered_bytes_async("user:batch", &second)
+            .await
+            .unwrap(),
+        vec![false, true, false]
+    );
+    assert_eq!(
+        db.hash_get_async("user:batch", "city").await.unwrap(),
+        Some("london".to_string())
+    );
+    assert_eq!(
+        db.hash_get_async("user:batch", "age").await.unwrap(),
+        Some("31".to_string())
+    );
+}
+
+#[tokio::test]
+async fn hash_set_same_persistent_value_is_a_storage_noop() {
+    let db = test_db();
+
+    assert!(
+        db.hash_set_bytes_async("user:noop", "name", b"alice")
+            .await
+            .unwrap()
+    );
+    let changes_after_insert = db.changes.load(Ordering::Relaxed);
+
+    assert!(
+        !db.hash_set_bytes_async("user:noop", "name", b"alice")
+            .await
+            .unwrap()
+    );
+    assert_eq!(db.changes.load(Ordering::Relaxed), changes_after_insert);
+    assert_eq!(
+        db.hash_get_bytes_async("user:noop", "name").await.unwrap(),
+        Some(b"alice".to_vec())
+    );
+}
+
+#[tokio::test]
 async fn concurrent_hash_set_async_on_same_new_key_keeps_all_fields() {
     let db = Arc::new(test_db());
     let mut tasks = Vec::new();
@@ -278,6 +343,134 @@ async fn concurrent_hash_set_async_same_field_reports_single_new_field() {
 }
 
 #[tokio::test]
+async fn concurrent_hash_set_async_existing_field_is_last_write_wins() {
+    let db = Arc::new(test_db());
+    assert!(
+        db.hash_set_async("existing-field-hash", "field", "seed")
+            .await
+            .unwrap()
+    );
+
+    let mut tasks = Vec::new();
+    for idx in 0..64 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            let value = format!("v{idx}");
+            let added = db
+                .hash_set_async("existing-field-hash", "field", &value)
+                .await
+                .unwrap();
+            (added, value)
+        }));
+    }
+
+    let mut written_values = HashSet::new();
+    for task in tasks {
+        let (added, value) = task.await.unwrap();
+        assert!(!added);
+        written_values.insert(value);
+    }
+
+    assert_eq!(db.hash_len_async("existing-field-hash").await.unwrap(), 1);
+    assert!(
+        written_values.contains(
+            &db.hash_get_async("existing-field-hash", "field")
+                .await
+                .unwrap()
+                .unwrap()
+        )
+    );
+}
+
+#[tokio::test]
+async fn concurrent_hash_set_many_async_only_counts_each_new_field_once() {
+    let db = Arc::new(test_db());
+    assert!(
+        db.hash_set_async("mixed-field-hash", "base", "seed")
+            .await
+            .unwrap()
+    );
+
+    let mut tasks = Vec::new();
+    for idx in 0..64 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.hash_set_many_async(
+                "mixed-field-hash",
+                &[
+                    ("shared".to_string(), format!("shared-{idx}")),
+                    (format!("unique-{idx}"), format!("value-{idx}")),
+                ],
+            )
+            .await
+            .unwrap()
+        }));
+    }
+
+    let mut added = 0usize;
+    for task in tasks {
+        added += task.await.unwrap();
+    }
+
+    assert_eq!(added, 65);
+    assert_eq!(db.hash_len_async("mixed-field-hash").await.unwrap(), 66);
+    for idx in 0..64 {
+        assert_eq!(
+            db.hash_get_async("mixed-field-hash", &format!("unique-{idx}"))
+                .await
+                .unwrap(),
+            Some(format!("value-{idx}"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_hash_set_async_expired_field_reports_single_new_field() {
+    let db = Arc::new(test_db());
+    assert!(
+        db.hash_set_async("expired-field-hash", "field", "old")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        db.hash_expire_fields_at_ms_async(
+            "expired-field-hash",
+            now_ms().saturating_add(25),
+            &["field".to_string()],
+            ExpireCondition::Always,
+        )
+        .await
+        .unwrap(),
+        vec![1]
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut tasks = Vec::new();
+    for idx in 0..32 {
+        let db = db.clone();
+        tasks.push(tokio::spawn(async move {
+            db.hash_set_async("expired-field-hash", "field", &format!("v{idx}"))
+                .await
+                .unwrap()
+        }));
+    }
+
+    let mut added = 0usize;
+    for task in tasks {
+        added += usize::from(task.await.unwrap());
+    }
+
+    assert_eq!(added, 1);
+    assert_eq!(db.hash_len_async("expired-field-hash").await.unwrap(), 1);
+    assert!(
+        db.hash_get_async("expired-field-hash", "field")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn concurrent_hash_increment_async_keeps_all_increments() {
     let db = Arc::new(test_db());
     let mut tasks = Vec::new();
@@ -297,5 +490,86 @@ async fn concurrent_hash_increment_async_keeps_all_increments() {
     assert_eq!(
         db.hash_get_async("counter-hash", "field").await.unwrap(),
         Some("64".to_string())
+    );
+}
+
+#[tokio::test]
+async fn concurrent_hash_set_nx_is_field_local_and_has_one_winner_per_field() {
+    let db = Arc::new(test_db());
+    let mut distinct = Vec::new();
+    for index in 0..64 {
+        let db = Arc::clone(&db);
+        distinct.push(tokio::spawn(async move {
+            db.hash_set_nx_async("nx-fields", &format!("field-{index}"), "value")
+                .await
+                .unwrap()
+        }));
+    }
+    for task in distinct {
+        assert!(task.await.unwrap());
+    }
+    assert_eq!(db.hash_len_async("nx-fields").await.unwrap(), 64);
+
+    let mut same = Vec::new();
+    for index in 0..64 {
+        let db = Arc::clone(&db);
+        same.push(tokio::spawn(async move {
+            db.hash_set_nx_async("nx-same", "field", &format!("value-{index}"))
+                .await
+                .unwrap()
+        }));
+    }
+    let mut winners = 0usize;
+    for task in same {
+        winners += usize::from(task.await.unwrap());
+    }
+    assert_eq!(winners, 1);
+    assert_eq!(db.hash_len_async("nx-same").await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn hash_numeric_updates_treat_expired_fields_as_missing() {
+    let db = test_db();
+    db.hash_set_async("expired-counter", "integer", "99")
+        .await
+        .unwrap();
+    db.hash_set_async("expired-counter", "float", "99.5")
+        .await
+        .unwrap();
+    assert_eq!(
+        db.hash_expire_fields_at_ms_async(
+            "expired-counter",
+            now_ms().saturating_add(25),
+            &["integer".to_string(), "float".to_string()],
+            ExpireCondition::Always,
+        )
+        .await
+        .unwrap(),
+        vec![1, 1]
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        db.hash_increment_by_async("expired-counter", "integer", 2)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.hash_increment_by_float_async("expired-counter", "float", 0.5)
+            .await
+            .unwrap(),
+        "0.5"
+    );
+    assert_eq!(
+        db.hash_field_ttls_async(
+            "expired-counter",
+            &["integer".to_string(), "float".to_string()],
+            true,
+            false,
+        )
+        .await
+        .unwrap(),
+        vec![-1, -1]
     );
 }

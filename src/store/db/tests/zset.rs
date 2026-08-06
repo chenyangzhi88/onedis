@@ -324,3 +324,47 @@ async fn concurrent_zset_writes_preserve_members_and_increments() {
         Some(16.0)
     );
 }
+
+#[tokio::test]
+async fn concurrent_same_member_zadd_keeps_exactly_one_rank_entry() {
+    let db = Arc::new(test_db());
+    db.zset_add_async("same-member", &[(0.0, "member".to_string())])
+        .await
+        .unwrap();
+
+    let mut tasks = Vec::new();
+    for score in 1..=64 {
+        let db = Arc::clone(&db);
+        tasks.push(tokio::spawn(async move {
+            db.zset_add_async("same-member", &[(score as f64, "member".to_string())])
+                .await
+                .unwrap()
+        }));
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), 0);
+    }
+
+    let (_, version) = db
+        .zset_expire_ms_async("same-member")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.zset_members_raw_async("same-member", version)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.zset_rank_entries_raw_async("same-member", version)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(db.zset_card_async("same-member").await.unwrap(), 1);
+    assert_eq!(
+        db.zset_rank_async("same-member", "member").await.unwrap(),
+        Some(0)
+    );
+}

@@ -1,12 +1,13 @@
 use anyhow::Error;
 use std::future::Future;
 use std::sync::Arc;
-use tokio::runtime::{Builder, Runtime};
+use std::sync::Mutex;
+use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::sync::Semaphore;
 
-#[derive(Clone)]
 pub struct CommandExecutor {
-    runtime: Arc<Runtime>,
+    runtime: Mutex<Option<Runtime>>,
+    handle: Handle,
     permits: Arc<Semaphore>,
 }
 
@@ -17,8 +18,10 @@ impl CommandExecutor {
             .thread_name("onedis-command")
             .enable_all()
             .build()?;
+        let handle = runtime.handle().clone();
         Ok(Self {
-            runtime: Arc::new(runtime),
+            runtime: Mutex::new(Some(runtime)),
+            handle,
             permits: Arc::new(Semaphore::new(max_in_flight.max(1))),
         })
     }
@@ -44,10 +47,27 @@ impl CommandExecutor {
         T: Send + 'static,
     {
         let permit = self.permits.clone().acquire_owned().await?;
-        let join = self.runtime.spawn(async move {
+        let join = self.handle.spawn(async move {
             let _permit = permit;
             future.await
         });
         join.await.map_err(Error::from)
+    }
+
+    pub fn shutdown_background(&self) {
+        let runtime = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(runtime) = runtime {
+            runtime.shutdown_background();
+        }
+    }
+}
+
+impl Drop for CommandExecutor {
+    fn drop(&mut self) {
+        self.shutdown_background();
     }
 }

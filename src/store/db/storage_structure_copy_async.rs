@@ -40,7 +40,7 @@ impl Db {
             return;
         };
         let target_version =
-            Self::next_persisted_version_for_store_async(target_store, version_counter).await;
+            Self::next_version_for_store_async(target_store, version_counter).await;
 
         if let Some(meta) = decode_list_meta(raw) {
             batch.put(
@@ -143,20 +143,6 @@ impl Db {
                     batch,
                     set_member_prefix(source_db_index, source_key, meta.version),
                     set_member_prefix(target_db_index, target_key, target_version),
-                )
-                .await;
-                Self::copy_prefixed_namespace_to_batch(
-                    source_store,
-                    batch,
-                    set_slot_prefix(source_db_index, source_key, meta.version),
-                    set_slot_prefix(target_db_index, target_key, target_version),
-                )
-                .await;
-                Self::copy_prefixed_namespace_to_batch(
-                    source_store,
-                    batch,
-                    set_member_slot_prefix(source_db_index, source_key, meta.version),
-                    set_member_slot_prefix(target_db_index, target_key, target_version),
                 )
                 .await;
             }

@@ -385,7 +385,7 @@ fn transaction_ttl_index_is_published_after_commit() {
 }
 
 #[test]
-fn set_string_over_hash_hides_old_subkeys_until_retired_version_gc() {
+fn set_string_over_hash_hides_old_subkeys_until_compaction() {
     let db = test_db();
 
     db.hash_set("mixed", "field", "value").unwrap();
@@ -405,7 +405,9 @@ fn set_string_over_hash_hides_old_subkeys_until_retired_version_gc() {
         WRONG_TYPE_ERROR
     );
     assert!(db.store.contains_key(&field_key));
-    assert_eq!(db.retired_version_gc_once(usize::MAX), 1);
+    db.store.mark_version_compaction_ready();
+    assert_eq!(db.refresh_retired_versions_once(usize::MAX), 1);
+    db.store.manual_compaction().unwrap();
     assert!(!db.store.contains_key(&field_key));
 }
 

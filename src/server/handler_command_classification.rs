@@ -109,6 +109,7 @@ impl Handler {
                 | Command::Decr(_)
                 | Command::Decrby(_)
                 | Command::Hset(_)
+                | Command::Hsetnx(_)
                 | Command::Hdel(_)
                 | Command::Hincrby(_)
                 | Command::HincrbyFloat(_)

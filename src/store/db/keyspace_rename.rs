@@ -95,22 +95,22 @@ impl Db {
         new_key: &str,
         replace: bool,
     ) -> Result<bool, Error> {
-        let old_shard = set_write_lock_shard(self.db_index, old_key);
-        let new_shard = set_write_lock_shard(self.db_index, new_key);
+        let old_shard = key_write_lock_shard(self.db_index, old_key);
+        let new_shard = key_write_lock_shard(self.db_index, new_key);
         if old_shard == new_shard {
-            let _guard = self.set_write_locks[old_shard].lock().await;
+            let _guard = self.key_write_locks[old_shard].lock().await;
             return self
                 .rename_key_async_unlocked(old_key, new_key, replace)
                 .await;
         }
         if old_shard < new_shard {
-            let _old_guard = self.set_write_locks[old_shard].lock().await;
-            let _new_guard = self.set_write_locks[new_shard].lock().await;
+            let _old_guard = self.key_write_locks[old_shard].lock().await;
+            let _new_guard = self.key_write_locks[new_shard].lock().await;
             self.rename_key_async_unlocked(old_key, new_key, replace)
                 .await
         } else {
-            let _new_guard = self.set_write_locks[new_shard].lock().await;
-            let _old_guard = self.set_write_locks[old_shard].lock().await;
+            let _new_guard = self.key_write_locks[new_shard].lock().await;
+            let _old_guard = self.key_write_locks[old_shard].lock().await;
             self.rename_key_async_unlocked(old_key, new_key, replace)
                 .await
         }

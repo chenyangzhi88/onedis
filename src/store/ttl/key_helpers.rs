@@ -27,18 +27,6 @@ fn json_node_prefix(_db_index: u16, key: &str, version: u64) -> Vec<u8> {
     prefix
 }
 
-pub fn reserve_version_high_water_to_batch(batch: &mut WriteBatch, high_water: u64) {
-    batch.put(VERSION_COUNTER_KEY, &high_water.to_be_bytes());
-}
-
-fn parse_version_mark_key(key: &[u8]) -> Option<u64> {
-    let suffix = key.strip_prefix(VERSION_MARK_PREFIX)?;
-    if suffix.len() != 8 {
-        return None;
-    }
-    Some(u64::from_be_bytes(suffix.try_into().ok()?))
-}
-
 fn ttl_db_prefix(db_index: u16) -> Vec<u8> {
     let mut key = Vec::with_capacity(TTL_INDEX_PREFIX.len() + 2);
     key.extend_from_slice(TTL_INDEX_PREFIX);

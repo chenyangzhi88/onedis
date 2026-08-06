@@ -53,52 +53,6 @@ pub(in crate::store::db) fn set_member_key_bytes(
     composite_key
 }
 
-pub(in crate::store::db) fn set_slot_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(2 + SET_SLOT_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&internal_prefix(db_index));
-    prefix.extend_from_slice(&SET_SLOT_NAMESPACE);
-    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
-    prefix.push(0x00);
-    prefix.extend_from_slice(&version.to_be_bytes());
-    prefix
-}
-
-pub(in crate::store::db) fn set_slot_key(
-    db_index: u16,
-    key: &str,
-    version: u64,
-    slot: u64,
-) -> Vec<u8> {
-    let mut composite_key = set_slot_prefix(db_index, key, version);
-    composite_key.extend_from_slice(&slot.to_be_bytes());
-    composite_key
-}
-
-pub(in crate::store::db) fn set_member_slot_prefix(
-    db_index: u16,
-    key: &str,
-    version: u64,
-) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(2 + SET_MEMBER_SLOT_NAMESPACE.len() + key.len() + 1 + 8);
-    prefix.extend_from_slice(&internal_prefix(db_index));
-    prefix.extend_from_slice(&SET_MEMBER_SLOT_NAMESPACE);
-    append_versioned_sub_key_owner(&mut prefix, key.as_bytes());
-    prefix.push(0x00);
-    prefix.extend_from_slice(&version.to_be_bytes());
-    prefix
-}
-
-pub(in crate::store::db) fn set_member_slot_key(
-    db_index: u16,
-    key: &str,
-    version: u64,
-    member: &[u8],
-) -> Vec<u8> {
-    let mut composite_key = set_member_slot_prefix(db_index, key, version);
-    composite_key.extend_from_slice(member);
-    composite_key
-}
-
 pub(in crate::store::db) fn zset_member_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + ZSET_MEMBER_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));

@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 
 use crate::{
     args::ResolvedArgs,
-    store::db::{Db, KeyMutationTracker, VectorRuntimeRegistry},
+    store::db::{CounterCacheRuntime, Db, KeyMutationTracker, VectorRuntimeRegistry},
     store::kv_store::KvStore,
     store::ttl::{TYPE_HASH, TYPE_JSON, TYPE_VECTOR, TtlConfig, TtlManager, VersionCounter},
 };
@@ -74,7 +74,7 @@ pub struct DatabaseManager {
     version_counter: Arc<VersionCounter>,
     ttl_manager: Arc<TtlManager>,
     fulltext_shutdown: Arc<AtomicBool>,
-    retired_gc_shutdown: Arc<AtomicBool>,
+    version_scan_shutdown: Arc<AtomicBool>,
     list_notify: Arc<Notify>,
     zset_notify: Arc<Notify>,
     stream_notify: Arc<Notify>,
@@ -84,7 +84,7 @@ pub struct DatabaseManager {
 impl DatabaseManager {
     fn request_shutdown(&self) {
         self.fulltext_shutdown.store(true, Ordering::Release);
-        self.retired_gc_shutdown.store(true, Ordering::Release);
+        self.version_scan_shutdown.store(true, Ordering::Release);
         self.ttl_manager.shutdown();
     }
 
@@ -125,6 +125,7 @@ impl DatabaseManager {
         let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
         let mutation_tracker = Arc::new(KeyMutationTracker::default());
         let vector_runtimes = Arc::new(VectorRuntimeRegistry::default());
+        let counter_cache = Arc::new(CounterCacheRuntime::default());
         let list_notify = Arc::new(Notify::new());
         let zset_notify = Arc::new(Notify::new());
         let stream_notify = Arc::new(Notify::new());
@@ -143,6 +144,7 @@ impl DatabaseManager {
                 ttl_manager.clone(),
                 mutation_tracker.clone(),
                 vector_runtimes.clone(),
+                counter_cache.clone(),
             ));
             dbs.push(db);
         }
@@ -180,24 +182,22 @@ impl DatabaseManager {
             while !fulltext_worker_shutdown.load(Ordering::Acquire) {
                 for db in &fulltext_worker_dbs {
                     if let Err(err) = db.fulltext_maintenance_tick_async().await {
-                        log::error!("fulltext maintenance failed: {err}");
+                        log::error!("fulltext maintenance failed db={}: {err}", db.db_index());
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         });
 
-        let retired_gc_shutdown = Arc::new(AtomicBool::new(false));
-        let retired_gc_worker_shutdown = retired_gc_shutdown.clone();
-        let retired_gc_worker_dbs = dbs.clone();
-        let retired_gc_task = tokio::spawn(async move {
-            while !retired_gc_worker_shutdown.load(Ordering::Acquire) {
-                for db in &retired_gc_worker_dbs {
-                    let reclaimed = db.retired_version_gc_tick();
-                    if reclaimed > 0 {
-                        log::debug!(
-                            "retired version GC reclaimed {reclaimed} version namespace(s)"
-                        );
+        let version_scan_shutdown = Arc::new(AtomicBool::new(false));
+        let version_scan_worker_shutdown = version_scan_shutdown.clone();
+        let version_scan_worker_dbs = dbs.clone();
+        let version_scan_task = tokio::spawn(async move {
+            while !version_scan_worker_shutdown.load(Ordering::Acquire) {
+                for db in &version_scan_worker_dbs {
+                    let retired = db.refresh_retired_versions_for_compaction();
+                    if retired > 0 {
+                        log::debug!("marked {retired} retired version namespace(s) for compaction");
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -214,11 +214,15 @@ impl DatabaseManager {
             version_counter,
             ttl_manager,
             fulltext_shutdown,
-            retired_gc_shutdown,
+            version_scan_shutdown,
             list_notify,
             zset_notify,
             stream_notify,
-            background_tasks: std::sync::Mutex::new(vec![fulltext_task, retired_gc_task, ttl_task]),
+            background_tasks: std::sync::Mutex::new(vec![
+                fulltext_task,
+                version_scan_task,
+                ttl_task,
+            ]),
         }
     }
 

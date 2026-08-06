@@ -177,6 +177,10 @@ impl Db {
         )?;
         if copied {
             let logical_key = target_key.as_bytes().to_vec();
+            if !self.store.is_transactional() {
+                self.counter_cache
+                    .invalidate_key(target_db_index, &logical_key);
+            }
             self.record_external_key_mutation(target_db_index, logical_key.clone());
             if !self.store.is_transactional() {
                 let target_db = self.non_transactional_view_for_db(target_db_index);
@@ -194,20 +198,20 @@ impl Db {
         target_key: &str,
         replace: bool,
     ) -> Result<bool, Error> {
-        let source_shard = set_write_lock_shard(self.db_index, source_key);
-        let target_shard = set_write_lock_shard(target_db_index, target_key);
+        let source_shard = key_write_lock_shard(self.db_index, source_key);
+        let target_shard = key_write_lock_shard(target_db_index, target_key);
         if source_shard == target_shard {
-            let _guard = self.set_write_locks[source_shard].lock().await;
+            let _guard = self.key_write_locks[source_shard].lock().await;
             self.copy_key_to_db_async_unlocked(target_db_index, source_key, target_key, replace)
                 .await
         } else if source_shard < target_shard {
-            let _source_guard = self.set_write_locks[source_shard].lock().await;
-            let _target_guard = self.set_write_locks[target_shard].lock().await;
+            let _source_guard = self.key_write_locks[source_shard].lock().await;
+            let _target_guard = self.key_write_locks[target_shard].lock().await;
             self.copy_key_to_db_async_unlocked(target_db_index, source_key, target_key, replace)
                 .await
         } else {
-            let _target_guard = self.set_write_locks[target_shard].lock().await;
-            let _source_guard = self.set_write_locks[source_shard].lock().await;
+            let _target_guard = self.key_write_locks[target_shard].lock().await;
+            let _source_guard = self.key_write_locks[source_shard].lock().await;
             self.copy_key_to_db_async_unlocked(target_db_index, source_key, target_key, replace)
                 .await
         }
@@ -231,6 +235,10 @@ impl Db {
         .await?;
         if copied {
             let logical_key = target_key.as_bytes().to_vec();
+            if !self.store.is_transactional() {
+                self.counter_cache
+                    .invalidate_key(target_db_index, &logical_key);
+            }
             self.record_external_key_mutation(target_db_index, logical_key.clone());
             if !self.store.is_transactional() {
                 let target_key = target_key.to_string();

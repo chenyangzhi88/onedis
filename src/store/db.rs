@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex, OnceLock},
 };
@@ -13,11 +13,14 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use serde_json::Value as JsonValue;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use super::kv_store::{CompareCondition, KvStore, ObservedRawValue};
+use super::key_write_locks::{
+    KEY_WRITE_LOCK_SHARDS, KeyWriteLock, KeyWriteLocks, key_write_lock_shard,
+    key_write_lock_shard_bytes, unique_key_write_lock_shards,
+};
+use super::kv_store::{CompareCondition, KvStore};
 use super::ttl::{
     MetaHeader, TYPE_HASH, TYPE_JSON, TYPE_LIST, TYPE_SET, TYPE_SORTED_SET, TYPE_STREAM,
     TYPE_STRING, TYPE_VECTOR, TtlManager, VersionCounter, decode_meta_header, patch_meta_expire_ms,
-    reserve_version_high_water_to_batch,
 };
 use crate::{observability::metrics::global_metrics, tools::pattern};
 
@@ -73,9 +76,6 @@ mod native_hash_helpers;
 mod native_list_helpers;
 mod native_set_member_scan;
 mod native_set_meta;
-mod native_set_random_seek;
-mod native_set_slot_index;
-mod native_set_slot_mutation;
 mod native_stream_helpers;
 mod native_zset_helpers;
 mod set_aggregate_ops;
@@ -122,7 +122,7 @@ mod types;
 mod value_entry_codec;
 mod value_meta_codec;
 mod value_runtime_helpers;
-mod version_owner_gc;
+mod version_compaction;
 
 use collection_key_codec::*;
 use hash_key_codec::*;
@@ -138,7 +138,9 @@ use value_runtime_helpers::*;
 
 pub use types::*;
 pub use value_entry_codec::decode_string_bytes_slice;
-pub(crate) use version_owner_gc::version_owner_prefix;
+pub(crate) use version_compaction::{
+    OnedisVersionCompactionFilter, VersionCompactionTracker, version_owner_prefix,
+};
 
 pub struct Db {
     db_index: u16,
@@ -147,14 +149,12 @@ pub struct Db {
     pub changes: Arc<AtomicU64>,
     version_counter: Arc<VersionCounter>,
     ttl_manager: Arc<TtlManager>,
-    counter_cache: Arc<DashMap<Vec<u8>, CounterCacheEntry>>,
-    counter_cache_maybe_non_empty: Arc<AtomicBool>,
-    counter_cache_epoch: Arc<AtomicU64>,
+    counter_cache: Arc<CounterCacheRuntime>,
     list_meta_cache: Arc<DashMap<Vec<u8>, ListMeta>>,
     list_meta_cache_maybe_non_empty: Arc<AtomicBool>,
     vector_runtimes: Arc<VectorRuntimeRegistry>,
     fulltext_runtimes: Arc<FullTextRuntimeRegistry>,
-    set_write_locks: Arc<[tokio::sync::Mutex<()>; SET_WRITE_LOCK_SHARDS]>,
+    key_write_locks: KeyWriteLocks,
     mutation_tracker: Arc<KeyMutationTracker>,
     pending_mutations: Arc<Mutex<PendingMutations>>,
 }

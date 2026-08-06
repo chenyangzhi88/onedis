@@ -13,7 +13,7 @@ impl Db {
             None if mkstream => {
                 let meta = StreamMeta {
                     expire_ms: 0,
-                    version: self.next_persisted_version(),
+                    version: self.next_version(),
                     last_id: StreamId { ms: 0, seq: 0 },
                     length: 0,
                     entries_added: 0,
@@ -68,7 +68,7 @@ impl Db {
             None if mkstream => {
                 let meta = StreamMeta {
                     expire_ms: 0,
-                    version: self.next_persisted_version_async().await,
+                    version: self.next_version_async().await,
                     last_id: StreamId { ms: 0, seq: 0 },
                     length: 0,
                     entries_added: 0,

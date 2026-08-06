@@ -1,11 +1,21 @@
 use super::*;
 
+// A small bounded retry window lets field-local writers finish without taking the structural
+// barrier. Persistent hot-member contention still falls back to the exclusive path, so retries
+// cannot turn into an unbounded storm.
+const ZSET_ADD_SHARED_CAS_ATTEMPTS: usize = 3;
+
+enum ZsetAddAttempt {
+    Applied(ZsetAddOutcome),
+    Conflict,
+}
+
 impl Db {
     pub fn zset_add(&self, key: &str, members: &[(f64, String)]) -> Result<usize, Error> {
         let exists = self.zset_expire_ms(key)?;
         let version = match exists {
             Some((_, v)) => v,
-            None => self.next_persisted_version(),
+            None => self.next_version(),
         };
         let mut batch = WriteBatch::new();
         let mut added = 0usize;
@@ -56,8 +66,10 @@ impl Db {
         key: &str,
         members: &[(f64, String)],
     ) -> Result<usize, Error> {
-        let _write_guard = self.set_write_lock(key).lock().await;
-        self.zset_add_async_unlocked(key, members).await
+        Ok(self
+            .zset_add_with_options_async(key, members, ZsetAddOptions::default())
+            .await?
+            .added)
     }
 
     pub fn zset_add_with_options(
@@ -69,7 +81,7 @@ impl Db {
         let exists = self.zset_expire_ms(key)?;
         let version = match exists {
             Some((_, version)) => version,
-            None => self.next_persisted_version(),
+            None => self.next_version(),
         };
         let mut batch = WriteBatch::new();
         let mut outcome = ZsetAddOutcome::default();
@@ -137,26 +149,109 @@ impl Db {
         members: &[(f64, String)],
         options: ZsetAddOptions,
     ) -> Result<ZsetAddOutcome, Error> {
+        for _ in 0..ZSET_ADD_SHARED_CAS_ATTEMPTS {
+            let structural_guard = self.set_write_lock(key).read().await;
+            match self
+                .zset_add_with_options_async_attempt(key, members, options)
+                .await?
+            {
+                ZsetAddAttempt::Applied(outcome) => return Ok(outcome),
+                ZsetAddAttempt::Conflict => {}
+            }
+            drop(structural_guard);
+            tokio::task::yield_now().await;
+        }
+
         let _write_guard = self.set_write_lock(key).lock().await;
-        let exists = self.zset_expire_ms_async(key).await?;
+        loop {
+            match self
+                .zset_add_with_options_async_attempt(key, members, options)
+                .await?
+            {
+                ZsetAddAttempt::Applied(outcome) => return Ok(outcome),
+                ZsetAddAttempt::Conflict => tokio::task::yield_now().await,
+            }
+        }
+    }
+
+    async fn zset_add_with_options_async_attempt(
+        &self,
+        key: &str,
+        members: &[(f64, String)],
+        options: ZsetAddOptions,
+    ) -> Result<ZsetAddAttempt, Error> {
+        let key_bytes = self.mk(key);
+        let raw_meta = self.store.get_raw_async(&key_bytes).await;
+        let mut expired_at = None;
+        let exists = match raw_meta.as_deref() {
+            Some(raw) => {
+                let header = decode_meta_header(raw)
+                    .ok_or_else(|| Error::msg("Failed to decode sorted set metadata"))?;
+                if header.expire_ms > 0 && now_ms() >= header.expire_ms {
+                    expired_at = Some(header.expire_ms);
+                    None
+                } else {
+                    if header.type_tag != TYPE_SORTED_SET {
+                        return Err(Error::msg(WRONG_TYPE_ERROR));
+                    }
+                    Some((header.expire_ms, header.version))
+                }
+            }
+            None => None,
+        };
+        // Existing structures are protected against structural replacement by the shared key
+        // barrier, so their metadata is not part of the member-local CAS. Creation/replacement
+        // still observes the main key: if another shared creator won between the plain read and
+        // this observation, retry against its version instead of overwriting it.
+        let observed_meta = if exists.is_none() {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            if observed.value().map(Bytes::as_ref) != raw_meta.as_deref() {
+                return Ok(ZsetAddAttempt::Conflict);
+            }
+            Some(observed)
+        } else {
+            None
+        };
         let version = match exists {
             Some((_, version)) => version,
-            None => self.next_persisted_version_async().await,
+            None => self.next_version_async().await,
         };
-        let mut batch = WriteBatch::new();
-        let mut outcome = ZsetAddOutcome::default();
-        let mut seen_members = HashSet::new();
 
-        for (input_score, member) in members.iter().rev() {
-            if !seen_members.insert(member) {
-                continue;
-            }
-            let member_key = zset_member_key(self.db_index, key, version, member);
-            let previous_score = self
-                .store
-                .get_raw_async(&member_key)
+        let mut seen_members = HashSet::with_capacity(members.len());
+        let unique_members = members
+            .iter()
+            .rev()
+            .filter(|(_, member)| seen_members.insert(member.as_str()))
+            .collect::<Vec<_>>();
+        let member_keys = unique_members
+            .iter()
+            .map(|(_, member)| zset_member_key(self.db_index, key, version, member))
+            .collect::<Vec<_>>();
+        let previous_observed = if exists.is_some() {
+            self.store
+                .multi_get_raw_observed_async(&member_keys)
                 .await
-                .and_then(|value| decode_zset_score(&value));
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>()
+        } else {
+            std::iter::repeat_with(|| None)
+                .take(member_keys.len())
+                .collect::<Vec<_>>()
+        };
+
+        let mut batch = WriteBatch::new();
+        let mut conditions = Vec::new();
+        let mut outcome = ZsetAddOutcome::default();
+        for (((input_score, member), member_key), observed_member) in unique_members
+            .into_iter()
+            .zip(&member_keys)
+            .zip(previous_observed)
+        {
+            let old_raw = observed_member
+                .as_ref()
+                .and_then(|observed| observed.value());
+            let previous_score = old_raw.map(Bytes::as_ref).and_then(decode_zset_score);
             let score = if options.increment {
                 let next = previous_score.unwrap_or(0.0) + input_score;
                 if next.is_nan() {
@@ -175,33 +270,53 @@ impl Db {
             if previous_score.is_none() {
                 outcome.added += 1;
             }
-            if previous_score != Some(score) {
-                outcome.changed += 1;
-                if let Some(old_score) = previous_score {
-                    batch.delete(&zset_rank_key(
-                        self.db_index,
-                        key,
-                        version,
-                        old_score,
-                        member,
-                    ));
-                }
-                batch.put(&member_key, &score.to_be_bytes());
-                batch.put(
-                    &zset_rank_key(self.db_index, key, version, score, member),
-                    INDEX_MARKER_VALUE,
-                );
+            if previous_score == Some(score) {
+                continue;
             }
+
+            outcome.changed += 1;
+            if let Some(observed_member) = observed_member {
+                conditions.push(observed_member.condition());
+            }
+            if let Some(old_score) = previous_score {
+                batch.delete(&zset_rank_key(
+                    self.db_index,
+                    key,
+                    version,
+                    old_score,
+                    member,
+                ));
+            }
+            batch.put(member_key, &score.to_be_bytes());
+            batch.put(
+                &zset_rank_key(self.db_index, key, version, score, member),
+                INDEX_MARKER_VALUE,
+            );
         }
 
-        if outcome.changed > 0 {
-            if exists.is_none() {
-                batch.put(&self.mk(key), &encode_zset_meta(0, version));
-            }
-            self.write_batch_if_not_empty_async(&batch).await;
-            self.changes.fetch_add(1, Ordering::Relaxed);
+        if outcome.changed == 0 {
+            return Ok(ZsetAddAttempt::Applied(outcome));
         }
-        Ok(outcome)
+        if let Some(expire_ms) = expired_at {
+            self.ttl_manager
+                .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
+        }
+        if exists.is_none() {
+            batch.put(&key_bytes, &encode_zset_meta(0, version));
+            conditions.push(
+                observed_meta
+                    .expect("missing or expired metadata was observed")
+                    .condition(),
+            );
+        }
+        if !self
+            .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+            .await?
+        {
+            return Ok(ZsetAddAttempt::Conflict);
+        }
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        Ok(ZsetAddAttempt::Applied(outcome))
     }
 
     pub(in crate::store::db) async fn zset_add_async_unlocked(
@@ -212,7 +327,7 @@ impl Db {
         let exists = self.zset_expire_ms_async(key).await?;
         let version = match exists {
             Some((_, v)) => v,
-            None => self.next_persisted_version_async().await,
+            None => self.next_version_async().await,
         };
         let mut batch = WriteBatch::new();
         let mut added = 0usize;
@@ -371,15 +486,19 @@ impl Db {
         if increment.is_nan() {
             return Err(Error::msg("ERR value is not a valid float"));
         }
-        let _write_guard = self.set_write_lock(key).lock().await;
-        let current = self.zset_score_async(key, member).await?.unwrap_or(0.0);
-        let next = current + increment;
-        if next.is_nan() {
-            return Err(Error::msg("ERR resulting score is not a number (NaN)"));
-        }
-        self.zset_add_async_unlocked(key, &[(next, member.to_string())])
+        let outcome = self
+            .zset_add_with_options_async(
+                key,
+                &[(increment, member.to_string())],
+                ZsetAddOptions {
+                    increment: true,
+                    ..ZsetAddOptions::default()
+                },
+            )
             .await?;
-        Ok(next)
+        outcome
+            .score
+            .ok_or_else(|| Error::msg("ERR sorted set increment was not applied"))
     }
 }
 

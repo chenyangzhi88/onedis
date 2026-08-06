@@ -15,7 +15,12 @@ impl TtlManager {
             },
             expire_hook: RwLock::new(None),
             expire_observer: RwLock::new(None),
+            key_write_locks: crate::store::key_write_locks::new_key_write_locks(),
         })
+    }
+
+    pub(crate) fn key_write_locks(&self) -> crate::store::key_write_locks::KeyWriteLocks {
+        self.key_write_locks.clone()
     }
 
     pub fn set_expire_hook(&self, hook: Arc<ExpireHook>) {

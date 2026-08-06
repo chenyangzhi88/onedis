@@ -648,10 +648,16 @@
             distance_score(VectorDistance::Cosine, &[f32::MAX, 1.0], &[f32::MAX, 1.0]).unwrap();
         assert!(cosine.is_finite());
         assert_eq!(cosine, 0.0);
-        assert!(
-            DistInnerProduct.eval(&[2.0, 0.0], &[2.0, 0.0])
-                < DistInnerProduct.eval(&[1.0, 0.0], &[2.0, 0.0])
-        );
+        let mut ip_graph = HnswGraph::new(2, VectorDistance::Ip, 4, 8, 2);
+        ip_graph
+            .upsert("larger-dot".to_string(), 1, vec![2.0, 0.0])
+            .unwrap();
+        ip_graph
+            .upsert("smaller-dot".to_string(), 2, vec![1.0, 0.0])
+            .unwrap();
+        let ip_results = ip_graph.search(&[2.0, 0.0], 2, 8, None).unwrap();
+        assert_eq!(ip_results[0].id, "larger-dot");
+        assert_eq!(ip_results[1].id, "smaller-dot");
 
         let mut topk = TopKVectorResults::new(2, 1024).unwrap();
         for (id, score) in [("c", 3.0), ("a", 1.0), ("b", 2.0)] {

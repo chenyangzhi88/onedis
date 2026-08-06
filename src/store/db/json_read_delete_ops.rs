@@ -66,6 +66,7 @@ impl Db {
     }
 
     pub async fn json_del_async(&self, key: &str, path: &str) -> Result<i64, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let tokens = parse_json_path(path)?;
         for _ in 0..64 {
             self.expire_if_needed_async(key).await;

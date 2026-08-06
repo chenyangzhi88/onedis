@@ -74,14 +74,6 @@ fn delete_sub_keys_to_batch_with_encoding(
                 &sub_key_range_start(key_encoding, db_index, &SET_MEMBER_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &SET_MEMBER_NS, key, version),
             );
-            batch.delete_range(
-                &sub_key_range_start(key_encoding, db_index, &SET_SLOT_NS, key, version),
-                &sub_key_range_end(key_encoding, db_index, &SET_SLOT_NS, key, version),
-            );
-            batch.delete_range(
-                &sub_key_range_start(key_encoding, db_index, &SET_MEMBER_SLOT_NS, key, version),
-                &sub_key_range_end(key_encoding, db_index, &SET_MEMBER_SLOT_NS, key, version),
-            );
         }
         TYPE_SORTED_SET => {
             // member index

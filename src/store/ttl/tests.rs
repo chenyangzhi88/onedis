@@ -111,41 +111,30 @@
     #[test]
     fn version_counter_monotonic() {
         let vc = VersionCounter::new();
-        assert_eq!(vc.next(), 1);
-        assert_eq!(vc.next(), 2);
-        assert_eq!(vc.next(), 3);
+        let first = vc.next();
+        let second = vc.next();
+        let third = vc.next();
+        assert!(first < second && second < third);
     }
 
     #[test]
     fn version_counter_observe() {
         let vc = VersionCounter::new();
         vc.observe(100);
-        assert_eq!(vc.next(), 101);
+        let first = vc.next();
+        assert!(first > 100);
         vc.observe(50); // should not downgrade
-        assert_eq!(vc.next(), 102);
+        assert!(vc.next() > first);
     }
 
     #[test]
-    fn version_counter_reserves_high_water_in_blocks() {
+    fn version_counter_allocates_monotonically_without_persistence_callback() {
         let vc = VersionCounter::new();
-        let mut reservations = Vec::new();
-
-        assert_eq!(vc.next_reserved(|high| reservations.push(high)), 1);
-        assert_eq!(reservations, vec![VERSION_RESERVATION_BLOCK]);
-
-        for expected in 2..=VERSION_RESERVATION_BLOCK {
-            assert_eq!(vc.next_reserved(|high| reservations.push(high)), expected);
-        }
-        assert_eq!(reservations, vec![VERSION_RESERVATION_BLOCK]);
-
-        assert_eq!(
-            vc.next_reserved(|high| reservations.push(high)),
-            VERSION_RESERVATION_BLOCK + 1
-        );
-        assert_eq!(
-            reservations,
-            vec![VERSION_RESERVATION_BLOCK, VERSION_RESERVATION_BLOCK * 2]
-        );
+        let first = vc.next();
+        assert!(first > 0);
+        let second = vc.next();
+        assert!(second > first);
+        assert_eq!(vc.current(), second);
     }
 
     // --------------------------------------------------------- MetaHeader
@@ -307,30 +296,14 @@
     }
 
     #[tokio::test]
-    async fn version_counter_async_reserves_observes_and_concurrent_allocations_are_unique() {
+    async fn version_counter_concurrent_allocations_are_unique() {
         let vc = std::sync::Arc::new(VersionCounter::new());
-        let reservations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        assert_eq!(
-            vc.next_reserved_async({
-                let reservations = reservations.clone();
-                move |high| {
-                    let reservations = reservations.clone();
-                    async move {
-                        reservations.lock().unwrap().push(high);
-                    }
-                }
-            })
-            .await,
-            1
-        );
+        let first = vc.next();
 
         let mut tasks = Vec::new();
         for _ in 0..16 {
             let vc = vc.clone();
-            tasks.push(tokio::spawn(async move {
-                vc.next_reserved_async(|_| async {}).await
-            }));
+            tasks.push(tokio::spawn(async move { vc.next() }));
         }
         let mut versions = Vec::new();
         for task in tasks {
@@ -339,11 +312,7 @@
         versions.sort_unstable();
         versions.dedup();
         assert_eq!(versions.len(), 16);
-        assert!(vc.current() >= 17);
-        assert_eq!(
-            *reservations.lock().unwrap(),
-            vec![VERSION_RESERVATION_BLOCK]
-        );
+        assert!(vc.current() >= first + 16);
     }
 
     #[test]
@@ -383,22 +352,13 @@
         *invalid_utf8.last_mut().unwrap() = 0xff;
         assert!(parse_ttl_index_key(&invalid_utf8).is_none());
 
-        let mut reserve = WriteBatch::new();
-        reserve_version_high_water_to_batch(&mut reserve, 44);
-        reserve.put(
-            &[VERSION_MARK_PREFIX, &99u64.to_be_bytes()].concat(),
-            b"mark",
-        );
-        db0_store.write_batch(&reserve);
+        let mut owner_key = crate::store::db::version_owner_prefix(0);
+        owner_key.extend_from_slice(&99u64.to_be_bytes());
+        db0_store.put_raw(&owner_key, b"owner");
 
         let vc = VersionCounter::new();
         manager.rebuild_from_store(2, &vc);
         assert_eq!(vc.current(), 99);
-        assert_eq!(parse_version_mark_key(b"bad"), None);
-        assert_eq!(
-            parse_version_mark_key(&[VERSION_MARK_PREFIX, &55u64.to_be_bytes()].concat()),
-            Some(55)
-        );
     }
 
     #[tokio::test]
@@ -422,13 +382,9 @@
         db0_store.write_batch(&deletes);
         assert_eq!(manager.index_size_async().await, 0);
 
-        let mut reserve = WriteBatch::new();
-        reserve_version_high_water_to_batch(&mut reserve, 12);
-        reserve.put(
-            &[VERSION_MARK_PREFIX, &30u64.to_be_bytes()].concat(),
-            b"mark",
-        );
-        db0_store.write_batch(&reserve);
+        let mut owner_key = crate::store::db::version_owner_prefix(0);
+        owner_key.extend_from_slice(&30u64.to_be_bytes());
+        db0_store.put_raw(&owner_key, b"owner");
         let vc = VersionCounter::new();
         manager.rebuild_from_store_async(1, &vc).await;
         assert_eq!(vc.current(), 30);
@@ -561,7 +517,7 @@
     }
 
     #[tokio::test]
-    async fn ttl_sweep_of_plain_key_preserves_nul_key_subkeys() {
+    async fn ttl_sweep_of_plain_key_preserves_a_distinct_nul_key() {
         let store = test_store();
         let versions = Arc::new(VersionCounter::new());
         let manager = TtlManager::new(
@@ -574,11 +530,7 @@
         let db = Db::new(0, store, versions.clone(), manager.clone());
 
         db.hash_set("a", "field", "source").unwrap();
-        let source_version = versions.current();
-        let mut nested_key = b"a\0".to_vec();
-        nested_key.extend_from_slice(&source_version.to_be_bytes());
-        nested_key.extend_from_slice(b"x");
-        let nested_key = String::from_utf8(nested_key).unwrap();
+        let nested_key = "a\0nested".to_string();
         db.hash_set(&nested_key, "field", "nested").unwrap();
 
         assert!(db.expire("a".to_string(), 1));
@@ -654,7 +606,7 @@
     }
 
     #[tokio::test]
-    async fn ttl_async_sweep_honors_batch_size_and_json_node_cleanup() {
+    async fn ttl_async_sweep_honors_batch_size_and_defers_json_cleanup_to_compaction() {
         let store = test_store();
         let db0_store = store.for_db_index(0);
         let manager = TtlManager::new(
@@ -681,6 +633,19 @@
         assert!(!manager.sweep_once_async().await);
         assert_eq!(manager.stats().keys_expired.load(Ordering::Relaxed), 2);
         assert_eq!(manager.index_size(), 0);
+        assert!(
+            !db0_store
+                .scan_prefix_raw(&json_node_prefix(0, "json-a", 8))
+                .is_empty()
+        );
+        assert!(
+            !db0_store
+                .scan_prefix_raw(&json_node_prefix(0, "json-b", 8))
+                .is_empty()
+        );
+
+        store.mark_version_compaction_ready();
+        store.manual_compaction().unwrap();
         assert!(
             db0_store
                 .scan_prefix_raw(&json_node_prefix(0, "json-a", 8))

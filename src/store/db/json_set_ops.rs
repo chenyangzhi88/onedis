@@ -27,7 +27,7 @@ impl Db {
             if !tokens.is_empty() || condition == SetCondition::Xx {
                 return Ok(false);
             }
-            self.write_json_value(key, &new_value, 0, self.next_persisted_version())?;
+            self.write_json_value(key, &new_value, 0, self.next_version())?;
             return Ok(true);
         };
 
@@ -263,6 +263,7 @@ impl Db {
         json: &str,
         condition: SetCondition,
     ) -> Result<bool, Error> {
+        let _write_guard = self.set_write_lock(key).lock().await;
         let tokens = parse_json_path(path)?;
         let new_value: JsonValue =
             serde_json::from_str(json).map_err(|_| Error::msg("ERR invalid JSON value"))?;
@@ -281,7 +282,7 @@ impl Db {
                         key,
                         &new_value,
                         0,
-                        self.next_persisted_version_async().await,
+                        self.next_version_async().await,
                         cas_condition,
                     )
                     .await?

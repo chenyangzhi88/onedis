@@ -2,6 +2,7 @@
 struct OnedisIntegerMergeOperator;
 
 impl OnedisIntegerMergeOperator {
+    const NAME: &'static str = "onedis_integer";
     const TYPE_STRING: u8 = 1;
 
     fn decode_operand(bytes: &[u8], context: &str) -> KvResult<i64> {
@@ -40,7 +41,7 @@ impl OnedisIntegerMergeOperator {
 
 impl MergeOperate for OnedisIntegerMergeOperator {
     fn name(&self) -> &str {
-        "onedis_integer"
+        Self::NAME
     }
 
     fn full_merge(

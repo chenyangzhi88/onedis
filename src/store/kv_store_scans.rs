@@ -25,10 +25,12 @@ impl KvStore {
         let query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
         let entries = if self.txn.is_some() {
             let new_cursor_started_at = trace_id.map(|_| Instant::now());
-            let cursor = self.with_transaction_mut(|txn| {
-                txn.scan(query)
-                    .expect("failed to create kv_engine transaction scan cursor")
-            }).expect("missing kv_engine transaction");
+            let cursor = self
+                .with_transaction_mut(|txn| {
+                    txn.scan(query)
+                        .expect("failed to create kv_engine transaction scan cursor")
+                })
+                .expect("missing kv_engine transaction");
             let new_cursor_us = new_cursor_started_at.map(|started| started.elapsed().as_micros());
             let collect_started_at = trace_id.map(|_| Instant::now());
             let entries = collect_scan_cursor(cursor, limit);
@@ -93,6 +95,68 @@ impl KvStore {
         .expect("kv_engine scan worker panicked")
     }
 
+    /// Return the keys at the requested zero-based visible-key ranks from one bounded read view.
+    ///
+    /// `ordinals` must be strictly increasing. Exact clean scan units before a target are skipped
+    /// by kv-engine without materializing their keys; dirty units retain normal MVCC merge
+    /// semantics.
+    pub fn scan_range_raw_keys_at_ordinals(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        ordinals: &[usize],
+    ) -> Vec<Vec<u8>> {
+        if ordinals.is_empty() {
+            return Vec::new();
+        }
+        debug_assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let storage_started = Instant::now();
+        let ranks = ordinals.iter().map(|&rank| rank as u64).collect::<Vec<_>>();
+        let query = scan_request_with_projection(
+            Some(lower_bound.to_vec()),
+            upper_bound,
+            None,
+            KvProjection::KeyOnly,
+        );
+        let selected = if self.txn.is_some() {
+            self.with_transaction_mut(|txn| {
+                txn.scan(query)
+                    .expect("failed to create kv_engine transaction key scan cursor")
+                    .select_keys_by_rank(&ranks)
+                    .expect("failed to select ranked keys from kv_engine transaction cursor")
+            })
+            .expect("missing kv_engine transaction")
+        } else {
+            self.table
+                .scan(query)
+                .expect("failed to create kv_engine key scan cursor")
+                .select_keys_by_rank(&ranks)
+                .expect("failed to select ranked keys from kv_engine cursor")
+        };
+        global_metrics().record_storage_read(elapsed_us(storage_started));
+        selected
+    }
+
+    pub async fn scan_range_raw_keys_at_ordinals_async(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        ordinals: &[usize],
+    ) -> Vec<Vec<u8>> {
+        if ordinals.is_empty() {
+            return Vec::new();
+        }
+        let store = self.clone();
+        let lower_bound = lower_bound.to_vec();
+        let ordinals = ordinals.to_vec();
+        tokio::task::spawn_blocking(move || {
+            store.scan_range_raw_keys_at_ordinals(&lower_bound, upper_bound, &ordinals)
+        })
+        .await
+        .expect("kv_engine ordinal key scan worker panicked")
+    }
+
     pub fn scan_range_raw_visit<F>(
         &self,
         lower_bound: &[u8],
@@ -113,10 +177,12 @@ impl KvStore {
         let query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
         let mut visitor = visitor;
         let seen = if self.txn.is_some() {
-            let cursor = self.with_transaction_mut(|txn| {
-                txn.scan(query)
-                    .expect("failed to create kv_engine transaction scan cursor")
-            }).expect("missing kv_engine transaction");
+            let cursor = self
+                .with_transaction_mut(|txn| {
+                    txn.scan(query)
+                        .expect("failed to create kv_engine transaction scan cursor")
+                })
+                .expect("missing kv_engine transaction");
             let scan_started_at = trace_id.map(|_| Instant::now());
             let mut cursor = cursor;
             let seen = collect_scan_cursor_into(&mut cursor, limit, &mut visitor);
@@ -183,11 +249,7 @@ impl KvStore {
         while seen < limit {
             let batch_limit = limit.saturating_sub(seen).min(VISIT_BATCH_SIZE);
             let entries = self
-                .scan_range_raw_limited_async(
-                    &next_lower_bound,
-                    upper_bound.clone(),
-                    batch_limit,
-                )
+                .scan_range_raw_limited_async(&next_lower_bound, upper_bound.clone(), batch_limit)
                 .await;
             if entries.is_empty() {
                 break;
@@ -228,7 +290,7 @@ impl KvStore {
             return;
         }
         self.table
-            .delete_range(start, end)
+            .delete_range(start, end, self.write_options.clone())
             .expect("failed to delete_range in kv_engine");
         global_metrics().record_storage_write(elapsed_us(started), false);
     }

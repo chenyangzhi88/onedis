@@ -292,6 +292,7 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
 
     assert!(Handler::can_apply_direct(&command(&["get", "k"])));
     assert!(Handler::can_apply_direct(&command(&["set", "k", "v"])));
+    assert!(Handler::can_apply_direct(&command(&["hsetnx", "h", "f", "v"])));
     assert!(Handler::can_apply_on_worker(&command(&[
         "zrange", "z", "0", "-1"
     ])));
@@ -465,6 +466,20 @@ fn handler_fast_paths_acl_pubsub_and_monitor_cover_private_routes() {
         rt.block_on(handler.try_handle_borrowed_fast_batch(hset_bytes))
             .unwrap(),
         b":1\r\n"
+    );
+    let hset_batch = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$1\r\nf\r\n$2\r\nv2\r\n\
+                       *4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$1\r\ng\r\n$1\r\nx\r\n\
+                       *4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$1\r\nf\r\n$2\r\nv3\r\n\
+                       *4\r\n$4\r\nHSET\r\n$1\r\nj\r\n$1\r\nf\r\n$1\r\ny\r\n";
+    assert_eq!(
+        rt.block_on(handler.try_handle_borrowed_fast_batch(hset_batch))
+            .unwrap(),
+        b":0\r\n:1\r\n:0\r\n:1\r\n"
+    );
+    assert_eq!(
+        rt.block_on(handler.get_session().get_db().hash_get_async("h", "f"))
+            .unwrap(),
+        Some("v3".to_string())
     );
     let list_bytes =
         b"*3\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n*3\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\nb\r\n";
@@ -934,7 +949,17 @@ fn borrowed_fast_paths_cover_guards_and_error_branches() {
     let response_text = text(&response);
     assert!(response_text.contains("ERR invalid UTF-8 key"));
     assert!(response_text.contains("ERR invalid UTF-8 hash field"));
-    assert!(response_text.contains("ERR invalid UTF-8 hash value"));
+    assert!(response_text.contains(":1\r\n"));
+    assert_eq!(
+        rt.block_on(
+            handler
+                .get_session()
+                .get_db()
+                .hash_get_bytes_async("h", "f")
+        )
+        .unwrap(),
+        Some(vec![0xff])
+    );
 
     rt.block_on(crate::command_dispatch::handle_command_async(
         handler.get_session().get_db().as_ref(),

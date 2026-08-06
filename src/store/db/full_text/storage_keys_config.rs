@@ -7,11 +7,26 @@ pub(super) fn encode_record<T: Encode>(value: &T) -> Result<Vec<u8>, Error> {
 pub(super) fn decode_record<T: Decode<()>>(raw: &[u8]) -> Result<T, Error> {
     bincode::decode_from_slice::<T, _>(raw, bincode::config::standard())
         .map(|(value, _)| value)
-        .map_err(|_| Error::msg("ERR failed to decode fulltext record"))
+        .map_err(|error| Error::msg(format!("ERR failed to decode fulltext record: {error}")))
 }
 
 pub(super) fn decode_fulltext_meta(raw: &[u8]) -> Result<FullTextIndexMeta, Error> {
-    decode_record::<FullTextIndexMeta>(raw)
+    decode_record::<FullTextIndexMeta>(raw).or_else(|current_error| {
+        decode_record::<LegacyFullTextIndexMetaV1>(raw)
+            .map(FullTextIndexMeta::from)
+            .map_err(|_| current_error)
+    })
+}
+
+pub(super) fn decode_fulltext_meta_for_index(
+    index: &str,
+    raw: &[u8],
+) -> Result<FullTextIndexMeta, Error> {
+    let mut meta = decode_fulltext_meta(raw)?;
+    if meta.active_storage.is_empty() {
+        meta.active_storage = index.to_string();
+    }
+    Ok(meta)
 }
 
 pub(super) fn fulltext_meta_prefix(db_index: u16) -> Vec<u8> {

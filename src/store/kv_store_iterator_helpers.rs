@@ -3,10 +3,24 @@ fn scan_request(
     upper_bound: Option<Vec<u8>>,
     limit: usize,
 ) -> KvScanRequest {
+    scan_request_with_projection(
+        lower_bound,
+        upper_bound,
+        Some(limit),
+        KvProjection::KeyValue,
+    )
+}
+
+fn scan_request_with_projection(
+    lower_bound: Option<Vec<u8>>,
+    upper_bound: Option<Vec<u8>>,
+    limit: Option<usize>,
+    projection: KvProjection,
+) -> KvScanRequest {
     KvScanRequest {
         bounds: KeyRange::new(lower_bound, upper_bound),
-        projection: KvProjection::KeyValue,
-        limit: Some(limit as u64),
+        projection,
+        limit: limit.map(|limit| limit as u64),
         ..KvScanRequest::default()
     }
 }
@@ -26,8 +40,8 @@ where
 {
     let mut seen = 0usize;
     while let Some(batch) = cursor
-            .next_batch()
-            .expect("failed to advance kv_engine scan cursor")
+        .next_batch()
+        .expect("failed to advance kv_engine scan cursor")
     {
         if !visit_scan_batch(&batch, limit, &mut seen, &mut visitor) {
             break;

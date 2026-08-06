@@ -11,7 +11,7 @@
 //! │  │ in kv_engine      │───►│  ┌──────────────────────────┐  │ │
 //! │  │ ordered by        │    │  │ 1. scan expired entries  │  │ │
 //! │  │ (db, expire, key) │    │  │ 2. Lazy Double Check     │  │ │
-//! │  └───────────────────┘    │  │ 3. WriteBatch + DelRange │  │ │
+//! │  └───────────────────┘    │  │ 3. delete meta + index   │  │ │
 //! │                           │  └──────────────────────────┘  │ │
 //! │                           └────────────────────────────────┘ │
 //! │  ┌──────────────────────────────────────────────────────┐    │
@@ -30,11 +30,10 @@
 //!   (1) meta key still exists, (2) stored expire_ms matches the index entry.
 //!   This eliminates all races with user DEL / PERSIST / re-EXPIRE commands.
 //!
-//! - **Version-based DeleteRange**: Sub-keys are prefixed with an unambiguous
-//!   owner component and a monotonic version, enabling O(1) bulk cleanup via a
-//!   single DeleteRange per namespace instead of scan + individual delete.
+//! - **Version-based compaction cleanup**: Expiration only removes the main
+//!   metadata and TTL index. Versioned sub-keys become unreachable immediately
+//!   and are physically reclaimed by the engine compaction filter.
 
-use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};

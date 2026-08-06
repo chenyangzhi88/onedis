@@ -33,7 +33,7 @@ impl Db {
             None if only_if_exists => return Ok(0),
             None => ListMeta {
                 expire_ms: 0,
-                version: self.next_persisted_version(),
+                version: self.next_version(),
                 head: 0,
                 tail: 0,
             },
@@ -88,7 +88,7 @@ impl Db {
                 None if only_if_exists => return Ok(0),
                 None => ListMeta {
                     expire_ms: 0,
-                    version: self.next_persisted_version_async().await,
+                    version: self.next_version_async().await,
                     head: 0,
                     tail: 0,
                 },
@@ -152,7 +152,7 @@ impl Db {
             None if only_if_exists => return Ok(0),
             None => ListMeta {
                 expire_ms: 0,
-                version: self.next_persisted_version(),
+                version: self.next_version(),
                 head: 0,
                 tail: 0,
             },
@@ -207,7 +207,7 @@ impl Db {
                 None if only_if_exists => return Ok(0),
                 None => ListMeta {
                     expire_ms: 0,
-                    version: self.next_persisted_version_async().await,
+                    version: self.next_version_async().await,
                     head: 0,
                     tail: 0,
                 },

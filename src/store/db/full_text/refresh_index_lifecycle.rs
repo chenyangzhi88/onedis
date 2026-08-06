@@ -209,6 +209,15 @@ impl Db {
         self.fulltext_create_vector_indexes(index, &meta)?;
         let storage_name = self.fulltext_active_storage_name(index, &meta);
         let runtime_config = self.fulltext_runtime_config()?;
+        let directory = KvTantivyDirectory::new(self.store.clone(), self.db_index, &storage_name);
+        if directory.remove_stale_writer_lock()? {
+            log::warn!(
+                "removed stale fulltext writer lock db={} index={} storage={}",
+                self.db_index,
+                index,
+                storage_name
+            );
+        }
         let runtime = FullTextRuntime::new(
             self.store.clone(),
             self.db_index,

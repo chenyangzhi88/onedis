@@ -68,4 +68,5 @@ pub struct TtlManager {
     stats: TtlStats,
     expire_hook: RwLock<Option<Arc<ExpireHook>>>,
     expire_observer: RwLock<Option<Arc<ExpireObserver>>>,
+    key_write_locks: crate::store::key_write_locks::KeyWriteLocks,
 }

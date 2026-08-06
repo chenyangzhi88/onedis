@@ -14,8 +14,8 @@ use common::types::write_batch::WriteBatch;
 use tantivy::{
     HasLen,
     directory::{
-        AntiCallToken, Directory, FileHandle, FileSlice, OwnedBytes, TerminatingWrite,
-        WatchCallback, WatchCallbackList, WatchHandle, WritePtr,
+        AntiCallToken, Directory, FileHandle, FileSlice, INDEX_WRITER_LOCK, OwnedBytes,
+        TerminatingWrite, WatchCallback, WatchCallbackList, WatchHandle, WritePtr,
         error::{DeleteError, OpenReadError, OpenWriteError},
     },
 };
@@ -140,6 +140,25 @@ impl KvTantivyDirectory {
 
     pub fn storage_bytes(store: &KvStore, db_index: u16, index: &str) -> usize {
         Self::new(store.clone(), db_index, index).total_bytes()
+    }
+
+    /// Removes a writer lock left behind by an unclean process exit.
+    ///
+    /// The caller must hold the index lifecycle write lock and must have confirmed that no
+    /// in-process runtime owns an `IndexWriter` for this storage generation.
+    pub(crate) fn remove_stale_writer_lock(&self) -> io::Result<bool> {
+        let path = INDEX_WRITER_LOCK.filepath.as_path();
+        if self.manifest(path).is_none() {
+            // A crash between reservation and manifest publication can leave this bookkeeping key.
+            if self.store.contains_key(&self.reservation_key(path)) {
+                self.release_reservation(path);
+            }
+            return Ok(false);
+        }
+        self.delete(path).map_err(|error| {
+            io::Error::other(format!("failed to remove stale writer lock: {error}"))
+        })?;
+        Ok(true)
     }
 
     fn put_file(&self, path: &Path, data: &[u8]) -> io::Result<()> {

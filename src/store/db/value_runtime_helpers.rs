@@ -18,12 +18,3 @@ pub(in crate::store::db) fn random_u64() -> u64 {
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^ (x >> 31)
 }
-
-pub(in crate::store::db) fn set_write_lock_shard(db_index: u16, key: &str) -> usize {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in db_index.to_be_bytes().into_iter().chain(key.bytes()) {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash as usize & (SET_WRITE_LOCK_SHARDS - 1)
-}

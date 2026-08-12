@@ -1,5 +1,14 @@
 use super::*;
 impl Db {
+    pub(in crate::store::db) fn fulltext_hash_source_is_indexed(
+        &self,
+        key: &str,
+    ) -> Result<bool, Error> {
+        Ok(!self
+            .fulltext_matching_metas_for_source(key, FullTextSourceType::Hash)?
+            .is_empty())
+    }
+
     pub(super) fn fulltext_enqueue_mutation_to_batch(
         &self,
         batch: &mut WriteBatch,

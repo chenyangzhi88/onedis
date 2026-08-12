@@ -36,7 +36,7 @@ impl Handler {
 
     async fn handle_borrowed_hset_commands<'a>(
         &self,
-        commands: Vec<(&'a [u8], &'a [u8], &'a [u8])>,
+        commands: Vec<BorrowedHsetCommand<'a>>,
     ) -> Vec<u8> {
         const MAX_HSET_COMMANDS_PER_WRITE: usize = 256;
 
@@ -44,39 +44,196 @@ impl Handler {
         let mut out = Vec::with_capacity(commands.len() * 4);
         let mut index = 0;
         while index < commands.len() {
-            let (key_bytes, field_bytes, _) = commands[index];
+            let (key_bytes, command_fields) = &commands[index];
             let Ok(key) = std::str::from_utf8(key_bytes) else {
                 append_error(&mut out, "ERR invalid UTF-8 key");
                 index += 1;
                 continue;
             };
-            if std::str::from_utf8(field_bytes).is_err() {
+            if command_fields
+                .iter()
+                .any(|(field, _)| std::str::from_utf8(field).is_err())
+            {
                 append_error(&mut out, "ERR invalid UTF-8 hash field");
                 index += 1;
                 continue;
             }
             let mut fields = Vec::new();
-            while index < commands.len()
-                && fields.len() < MAX_HSET_COMMANDS_PER_WRITE
-                && commands[index].0 == key_bytes
-            {
-                let (_, field_bytes, value_bytes) = commands[index];
-                let Ok(field) = std::str::from_utf8(field_bytes) else {
+            let mut field_count_by_command = Vec::new();
+            while index < commands.len() && commands[index].0 == *key_bytes {
+                let candidate_fields = &commands[index].1;
+                if !fields.is_empty()
+                    && fields.len() + candidate_fields.len() > MAX_HSET_COMMANDS_PER_WRITE
+                {
+                    break;
+                }
+                let Some(decoded_fields) = candidate_fields
+                    .iter()
+                    .map(|(field, value)| {
+                        std::str::from_utf8(field)
+                            .ok()
+                            .map(|field| (field, *value))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
                     break;
                 };
-                fields.push((field, value_bytes));
+                field_count_by_command.push(decoded_fields.len());
+                fields.extend(decoded_fields);
                 index += 1;
             }
 
             match db.hash_set_ordered_bytes_async(key, &fields).await {
                 Ok(added) => {
-                    for added in added {
-                        append_integer(&mut out, i64::from(added));
+                    let mut added = added.into_iter();
+                    for field_count in field_count_by_command {
+                        let count = added.by_ref().take(field_count).filter(|added| *added).count();
+                        append_integer(&mut out, count as i64);
                     }
                 }
                 Err(error) => {
                     let error = error.to_string();
-                    for _ in fields {
+                    for _ in field_count_by_command {
+                        append_error(&mut out, &error);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_hdel_commands<'a>(
+        &self,
+        commands: Vec<BorrowedHdelCommand<'a>>,
+    ) -> Vec<u8> {
+        const MAX_HDEL_FIELDS_PER_WRITE: usize = 256;
+
+        let db = self.session.get_db().clone();
+        let mut out = Vec::with_capacity(commands.len() * 4);
+        let mut index = 0;
+        while index < commands.len() {
+            let (key_bytes, command_fields) = &commands[index];
+            let Ok(key) = std::str::from_utf8(key_bytes) else {
+                append_error(&mut out, "ERR invalid UTF-8 key");
+                index += 1;
+                continue;
+            };
+            if command_fields
+                .iter()
+                .any(|field| std::str::from_utf8(field).is_err())
+            {
+                append_error(&mut out, "ERR invalid UTF-8 hash field");
+                index += 1;
+                continue;
+            }
+
+            let mut fields = Vec::new();
+            let mut field_count_by_command = Vec::new();
+            while index < commands.len() && commands[index].0 == *key_bytes {
+                let candidate_fields = &commands[index].1;
+                if !fields.is_empty()
+                    && fields.len() + candidate_fields.len() > MAX_HDEL_FIELDS_PER_WRITE
+                {
+                    break;
+                }
+                let Some(decoded_fields) = candidate_fields
+                    .iter()
+                    .map(|field| std::str::from_utf8(field).ok())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    break;
+                };
+                field_count_by_command.push(decoded_fields.len());
+                fields.extend(decoded_fields);
+                index += 1;
+            }
+
+            match db.hash_delete_ordered_refs_async(key, &fields).await {
+                Ok(deleted) => {
+                    let mut deleted = deleted.into_iter();
+                    for field_count in field_count_by_command {
+                        let count = deleted
+                            .by_ref()
+                            .take(field_count)
+                            .filter(|deleted| *deleted)
+                            .count();
+                        append_integer(&mut out, count as i64);
+                    }
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    for _ in field_count_by_command {
+                        append_error(&mut out, &error);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_hgetdel_commands<'a>(
+        &self,
+        commands: Vec<BorrowedHdelCommand<'a>>,
+    ) -> Vec<u8> {
+        const MAX_HGETDEL_FIELDS_PER_WRITE: usize = 256;
+
+        let db = self.session.get_db().clone();
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index < commands.len() {
+            let (key_bytes, command_fields) = &commands[index];
+            let Ok(key) = std::str::from_utf8(key_bytes) else {
+                append_error(&mut out, "ERR invalid UTF-8 key");
+                index += 1;
+                continue;
+            };
+            if command_fields
+                .iter()
+                .any(|field| std::str::from_utf8(field).is_err())
+            {
+                append_error(&mut out, "ERR invalid UTF-8 hash field");
+                index += 1;
+                continue;
+            }
+
+            let mut fields = Vec::new();
+            let mut field_count_by_command = Vec::new();
+            while index < commands.len() && commands[index].0 == *key_bytes {
+                let candidate_fields = &commands[index].1;
+                if !fields.is_empty()
+                    && fields.len() + candidate_fields.len() > MAX_HGETDEL_FIELDS_PER_WRITE
+                {
+                    break;
+                }
+                let Some(decoded_fields) = candidate_fields
+                    .iter()
+                    .map(|field| std::str::from_utf8(field).ok().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    break;
+                };
+                field_count_by_command.push(decoded_fields.len());
+                fields.extend(decoded_fields);
+                index += 1;
+            }
+
+            match db.hash_get_del_bytes_async(key, &fields).await {
+                Ok(values) => {
+                    let mut values = values.into_iter();
+                    for field_count in field_count_by_command {
+                        append_array_len(&mut out, field_count);
+                        for value in values.by_ref().take(field_count) {
+                            if let Some(value) = value {
+                                append_bulk_string(&mut out, &value);
+                            } else {
+                                append_null(&mut out);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    for _ in field_count_by_command {
                         append_error(&mut out, &error);
                     }
                 }

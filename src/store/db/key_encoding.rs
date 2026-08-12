@@ -480,6 +480,45 @@ pub(in crate::store::db) fn logical_main_key_from_raw_key(
     layout.logical_main_key_from_raw_key(db_index, key)
 }
 
+pub(in crate::store::db) fn hash_field_key_from_raw_sub_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    raw_key: &[u8],
+) -> Option<Vec<u8>> {
+    let internal = layout.internal_prefix(db_index);
+    let rest = raw_key.strip_prefix(internal.as_slice())?;
+    if rest.starts_with(&HASH_FIELD_NAMESPACE) {
+        return Some(raw_key.to_vec());
+    }
+    if rest.starts_with(&HASH_FIELD_EXPIRE_NAMESPACE) {
+        let mut field_key = raw_key.to_vec();
+        field_key[internal.len() + 1] = b'h';
+        return Some(field_key);
+    }
+    None
+}
+
+pub(in crate::store::db) fn hash_owner_from_raw_sub_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    raw_key: &[u8],
+) -> Option<Vec<u8>> {
+    let internal = layout.internal_prefix(db_index);
+    let rest = raw_key.strip_prefix(internal.as_slice())?;
+    let encoded_owner = rest
+        .strip_prefix(&HASH_FIELD_NAMESPACE)
+        .or_else(|| rest.strip_prefix(&HASH_FIELD_EXPIRE_NAMESPACE))?;
+    if encoded_owner.first().copied() == Some(NUL_KEY_ENCODING_MARKER) {
+        let len = usize::try_from(u64::from_be_bytes(
+            encoded_owner.get(1..9)?.try_into().ok()?,
+        ))
+        .ok()?;
+        return Some(encoded_owner.get(9..9 + len)?.to_vec());
+    }
+    let delimiter = encoded_owner.iter().position(|byte| *byte == 0)?;
+    Some(encoded_owner[..delimiter].to_vec())
+}
+
 pub(in crate::store::db) fn collect_logical_mutations(
     layout: KeyEncodingLayout,
     db_index: u16,
@@ -495,6 +534,8 @@ pub(in crate::store::db) fn collect_logical_mutations(
             | common::types::write_batch::WriteType::Delete
             | common::types::write_batch::WriteType::Merge => {
                 if let Some(key) = logical_main_key_from_raw_key(layout, db_index, key) {
+                    keys.push(key);
+                } else if let Some(key) = hash_owner_from_raw_sub_key(layout, db_index, key) {
                     keys.push(key);
                 }
             }

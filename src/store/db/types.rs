@@ -206,6 +206,26 @@ pub(crate) struct CounterCacheRuntime {
     /// This flag is intentionally monotonic. Resetting it during an eviction can race with an
     /// insertion for another key and make a later structural write skip invalidation.
     pub(in crate::store::db) ever_populated: AtomicBool,
+    pub(in crate::store::db) hash_entries: DashMap<(u16, Vec<u8>), HashCounterCacheEntry>,
+    pub(in crate::store::db) hash_routes: DashMap<(u16, Vec<u8>), Vec<u8>>,
+    pub(in crate::store::db) hash_lengths: DashMap<(u16, Vec<u8>), HashLenCacheEntry>,
+    pub(in crate::store::db) hash_key_epochs: DashMap<(u16, Vec<u8>), u64>,
+    pub(in crate::store::db) hash_ever_populated: AtomicBool,
+}
+
+#[derive(Clone)]
+pub(in crate::store::db) struct HashCounterCacheEntry {
+    pub(in crate::store::db) value: i64,
+    pub(in crate::store::db) next_sequence: u64,
+    pub(in crate::store::db) key_epoch: u64,
+    pub(in crate::store::db) commit_state: Arc<CounterCommitState>,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::store::db) struct HashLenCacheEntry {
+    pub(in crate::store::db) len: usize,
+    pub(in crate::store::db) version: u64,
+    pub(in crate::store::db) key_epoch: u64,
 }
 
 impl CounterCacheRuntime {
@@ -220,11 +240,53 @@ impl CounterCacheRuntime {
             self.entries
                 .retain(|(cached_db, _), _| *cached_db != db_index);
         }
+        if self.hash_ever_populated.load(Ordering::Acquire) {
+            self.hash_entries
+                .retain(|(cached_db, _), _| *cached_db != db_index);
+            self.hash_routes
+                .retain(|(cached_db, _), _| *cached_db != db_index);
+            self.hash_lengths
+                .retain(|(cached_db, _), _| *cached_db != db_index);
+            self.hash_key_epochs
+                .retain(|(cached_db, _), _| *cached_db != db_index);
+        }
     }
 
     pub(crate) fn evict_if_full(&self) {
         if self.entries.len() >= COUNTER_CACHE_MAX_ENTRIES {
             self.entries.clear();
+        }
+    }
+
+    pub(crate) fn hash_key_epoch(&self, db_index: u16, key: &[u8]) -> u64 {
+        self.hash_key_epochs
+            .get(&(db_index, key.to_vec()))
+            .map(|epoch| *epoch)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn invalidate_hash_key(&self, db_index: u16, key: &[u8]) {
+        if !self.hash_ever_populated.load(Ordering::Acquire) {
+            return;
+        }
+        self.hash_key_epochs
+            .entry((db_index, key.to_vec()))
+            .and_modify(|epoch| *epoch = epoch.wrapping_add(1))
+            .or_insert(1);
+    }
+
+    pub(crate) fn invalidate_hash_field(&self, db_index: u16, raw_field_key: &[u8]) {
+        if self.hash_ever_populated.load(Ordering::Acquire) {
+            self.hash_entries
+                .remove(&(db_index, raw_field_key.to_vec()));
+        }
+    }
+
+    pub(crate) fn evict_hash_if_full(&self) {
+        if self.hash_entries.len() >= COUNTER_CACHE_MAX_ENTRIES {
+            self.hash_entries.clear();
+            self.hash_routes.clear();
+            self.hash_lengths.clear();
         }
     }
 }

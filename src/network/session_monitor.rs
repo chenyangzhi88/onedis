@@ -1,4 +1,8 @@
 impl SessionManager {
+    pub fn has_monitors(&self) -> bool {
+        !self.monitors.is_empty()
+    }
+
     pub fn add_monitor(&self, session_id: usize, writer: SharedWriter) {
         self.monitors.insert(session_id, writer);
     }
@@ -8,6 +12,11 @@ impl SessionManager {
     }
 
     pub fn broadcast_monitor(&self, source_session_id: usize, line: String) {
+        // MONITOR is normally unused. Avoid constructing a RESP frame and, more importantly,
+        // walking every DashMap shard on every command when there are no listeners.
+        if self.monitors.is_empty() {
+            return;
+        }
         let message: std::sync::Arc<[u8]> = Frame::SimpleString(line).as_bytes().into();
         let writers = self
             .monitors

@@ -35,12 +35,20 @@ impl Db {
         key: &str,
         field: &str,
     ) -> Result<Option<Vec<u8>>, Error> {
-        let meta = self.hash_expire_ms_async(key).await?;
-        let Some((_, version)) = meta else {
+        let Some(meta) = self.hash_meta_async(key).await? else {
             return Ok(None);
         };
-
-        Ok(self.hash_live_field_value_async(key, version, field).await)
+        if meta.may_have_field_ttl
+            && !self
+                .hash_field_is_live_async(key, meta.version, field)
+                .await
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .store
+            .get_raw_async(&hash_field_key(self.db_index, key, meta.version, field))
+            .await)
     }
 
     /// 设置 hash field，返回是否为新字段。
@@ -191,23 +199,47 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        for _ in 0..HASH_SET_SHARED_CAS_ATTEMPTS {
-            let structural_guard = self.set_write_lock(key).read().await;
-            match self
-                .hash_set_ordered_bytes_async_attempt(key, fields)
-                .await?
-            {
-                OrderedHashSetAttempt::Applied(added) => return Ok(added),
-                OrderedHashSetAttempt::Conflict => {}
+        let field_shards = unique_hash_field_write_lock_shards(
+            self.db_index,
+            key,
+            fields.iter().map(|(field, _)| *field),
+        );
+        let _structural_guard = self.set_write_lock(key).read().await;
+        // Large batches of mostly-new fields have a wide CAS conflict surface: one collision
+        // would retry the entire batch. Lock their field shards up front. Small hot updates keep
+        // the shared path so existing fields remain parallel last-write-wins writes.
+        if field_shards.len() > 8 {
+            let _field_write_guards = self.lock_hash_field_write_shards(&field_shards).await;
+            loop {
+                match self
+                    .hash_set_ordered_bytes_async_attempt(key, fields)
+                    .await?
+                {
+                    OrderedHashSetAttempt::Applied(added) => return Ok(added),
+                    OrderedHashSetAttempt::Conflict => tokio::task::yield_now().await,
+                }
             }
-            drop(structural_guard);
-            tokio::task::yield_now().await;
         }
-
-        // A short optimistic phase handles the normal one-winner create race. Persistent
-        // contention falls back to the structural writer instead of spinning a fixed retry loop
-        // or surfacing an internal conflict to the Redis client.
-        let _structural_guard = self.set_write_lock(key).lock().await;
+        let field_read_guards = self.lock_hash_field_read_shards(&field_shards).await;
+        let has_cached_counter = fields.iter().any(|(field, _)| {
+            self.counter_cache.hash_routes.contains_key(&(
+                self.db_index,
+                super::hash_numeric_update::hash_counter_route_key(key, field),
+            ))
+        });
+        if !has_cached_counter {
+            for _ in 0..HASH_SET_SHARED_CAS_ATTEMPTS {
+                match self
+                    .hash_set_ordered_bytes_async_attempt(key, fields)
+                    .await?
+                {
+                    OrderedHashSetAttempt::Applied(added) => return Ok(added),
+                    OrderedHashSetAttempt::Conflict => tokio::task::yield_now().await,
+                }
+            }
+        }
+        drop(field_read_guards);
+        let _field_write_guards = self.lock_hash_field_write_shards(&field_shards).await;
         loop {
             match self
                 .hash_set_ordered_bytes_async_attempt(key, fields)
@@ -409,8 +441,23 @@ impl Db {
     }
 
     pub async fn hash_delete_async(&self, key: &str, fields: &[String]) -> Result<usize, Error> {
+        let fields = fields.iter().map(String::as_str).collect::<Vec<_>>();
+        Ok(self
+            .hash_delete_ordered_refs_async(key, &fields)
+            .await?
+            .into_iter()
+            .filter(|deleted| *deleted)
+            .count())
+    }
+
+    pub(crate) async fn hash_delete_ordered_refs_async(
+        &self,
+        key: &str,
+        fields: &[&str],
+    ) -> Result<Vec<bool>, Error> {
         let _write_guard = self.set_write_lock(key).lock().await;
-        self.hash_delete_async_unlocked(key, fields).await
+        self.hash_delete_ordered_refs_async_unlocked(key, fields)
+            .await
     }
 
     pub(in crate::store::db) async fn hash_delete_async_unlocked(
@@ -418,40 +465,104 @@ impl Db {
         key: &str,
         fields: &[String],
     ) -> Result<usize, Error> {
-        let meta = self.hash_expire_ms_async(key).await?;
-        let Some((expire_ms, version)) = meta else {
-            return Ok(0);
+        let fields = fields.iter().map(String::as_str).collect::<Vec<_>>();
+        Ok(self
+            .hash_delete_ordered_refs_async_unlocked(key, &fields)
+            .await?
+            .into_iter()
+            .filter(|deleted| *deleted)
+            .count())
+    }
+
+    async fn hash_delete_ordered_refs_async_unlocked(
+        &self,
+        key: &str,
+        fields: &[&str],
+    ) -> Result<Vec<bool>, Error> {
+        let Some(meta) = self.hash_meta_async(key).await? else {
+            return Ok(vec![false; fields.len()]);
         };
-
-        let existing_fields = self.hash_live_entries_raw_async(key, version).await;
-        let existing_field_keys: std::collections::HashSet<Vec<u8>> = existing_fields
-            .iter()
-            .map(|(field, _)| {
-                hash_field_key(self.db_index, key, version, &String::from_utf8_lossy(field))
-            })
-            .collect();
-
-        let mut batch = WriteBatch::new();
-        let mut deleted = 0usize;
-        let mut seen_fields = HashSet::new();
-        for field in fields {
-            if !seen_fields.insert(field) {
-                continue;
+        let logical_key = key.as_bytes().to_vec();
+        let key_epoch = self
+            .counter_cache
+            .hash_key_epoch(self.db_index, &logical_key);
+        let cache_key = (self.db_index, logical_key);
+        let total_len = if !meta.may_have_field_ttl
+            && let Some(cached) = self.counter_cache.hash_lengths.get(&cache_key)
+            && cached.version == meta.version
+            && cached.key_epoch == key_epoch
+        {
+            cached.len
+        } else {
+            let len = self.hash_live_entries_for_meta_async(key, meta).await.len();
+            if !meta.may_have_field_ttl {
+                self.counter_cache
+                    .hash_ever_populated
+                    .store(true, Ordering::Release);
+                self.counter_cache.hash_lengths.insert(
+                    cache_key.clone(),
+                    HashLenCacheEntry {
+                        len,
+                        version: meta.version,
+                        key_epoch,
+                    },
+                );
             }
-            let field_key = hash_field_key(self.db_index, key, version, field);
-            if existing_field_keys.contains(&field_key) {
+            len
+        };
+        let mut unique_fields = Vec::new();
+        let mut seen_fields = HashSet::new();
+        for (index, &field) in fields.iter().enumerate() {
+            if seen_fields.insert(field) {
+                unique_fields.push((field, index));
+            }
+        }
+        let field_keys = unique_fields
+            .iter()
+            .map(|(field, _)| hash_field_key(self.db_index, key, meta.version, field))
+            .collect::<Vec<_>>();
+        let values = self.store.multi_get_raw_async(&field_keys).await;
+        let expires = if meta.may_have_field_ttl {
+            let expire_keys = unique_fields
+                .iter()
+                .map(|(field, _)| hash_field_expire_key(self.db_index, key, meta.version, field))
+                .collect::<Vec<_>>();
+            self.store.multi_get_raw_async(&expire_keys).await
+        } else {
+            vec![None; unique_fields.len()]
+        };
+        let mut batch = WriteBatch::new();
+        let mut deleted_by_position = vec![false; fields.len()];
+        let mut deleted = 0usize;
+        let now = now_ms();
+        for (((field, index), field_key), (value, expire)) in unique_fields
+            .into_iter()
+            .zip(field_keys)
+            .zip(values.into_iter().zip(expires))
+        {
+            let expired = expire
+                .as_deref()
+                .and_then(decode_u64_be)
+                .is_some_and(|expire_ms| expire_ms > 0 && now >= expire_ms);
+            if value.is_some() && !expired {
                 batch.delete(&field_key);
-                batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+                batch.delete(&hash_field_expire_key(
+                    self.db_index,
+                    key,
+                    meta.version,
+                    field,
+                ));
+                deleted_by_position[index] = true;
                 deleted += 1;
             }
         }
 
-        if deleted > 0 && existing_fields.len() == deleted {
-            self.delete_main_key_with_ttl_to_batch(&mut batch, key, expire_ms);
+        if deleted > 0 && total_len == deleted {
+            self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         }
 
         if batch.count() > 0 {
-            if existing_fields.len() == deleted {
+            if total_len == deleted {
                 self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)?;
             } else {
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
@@ -459,7 +570,20 @@ impl Db {
             self.write_batch_if_not_empty_async(&batch).await;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
+            let new_epoch = self
+                .counter_cache
+                .hash_key_epoch(self.db_index, &cache_key.1);
+            if !meta.may_have_field_ttl && total_len > deleted {
+                self.counter_cache.hash_lengths.insert(
+                    cache_key,
+                    HashLenCacheEntry {
+                        len: total_len - deleted,
+                        version: meta.version,
+                        key_epoch: new_epoch,
+                    },
+                );
+            }
         }
-        Ok(deleted)
+        Ok(deleted_by_position)
     }
 }

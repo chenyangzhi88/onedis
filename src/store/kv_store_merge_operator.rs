@@ -5,6 +5,10 @@ impl OnedisIntegerMergeOperator {
     const NAME: &'static str = "onedis_integer";
     const TYPE_STRING: u8 = 1;
 
+    fn is_hash_field_key(key: &[u8]) -> bool {
+        key.starts_with(b"\x80\xffh\0")
+    }
+
     fn decode_operand(bytes: &[u8], context: &str) -> KvResult<i64> {
         let array: [u8; 8] = bytes.try_into().map_err(|_| {
             Status::InvalidArgument(format!("{context} must be an 8-byte big-endian i64"))
@@ -37,6 +41,15 @@ impl OnedisIntegerMergeOperator {
         encoded.extend_from_slice(value.as_bytes());
         encoded
     }
+
+    fn decode_hash_field(bytes: &[u8]) -> KvResult<i64> {
+        std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| text.parse::<i64>().ok())
+            .ok_or_else(|| {
+                Status::InvalidArgument("existing hash field value is not an integer".to_string())
+            })
+    }
 }
 
 impl MergeOperate for OnedisIntegerMergeOperator {
@@ -46,13 +59,18 @@ impl MergeOperate for OnedisIntegerMergeOperator {
 
     fn full_merge(
         &self,
-        _key: &[u8],
+        key: &[u8],
         existing_value: Option<&[u8]>,
         operands: &[&[u8]],
     ) -> KvResult<Option<Vec<u8>>> {
-        let (expire_ms, mut value) = match existing_value {
-            Some(existing) => Self::decode_existing(existing)?,
-            None => (0, 0),
+        let is_hash_field = Self::is_hash_field_key(key);
+        let (expire_ms, mut value) = if is_hash_field {
+            (0, existing_value.map(Self::decode_hash_field).transpose()?.unwrap_or(0))
+        } else {
+            match existing_value {
+                Some(existing) => Self::decode_existing(existing)?,
+                None => (0, 0),
+            }
         };
         for operand in operands {
             let delta = Self::decode_operand(operand, "merge operand")?;
@@ -60,7 +78,11 @@ impl MergeOperate for OnedisIntegerMergeOperator {
                 Status::InvalidArgument("integer merge would overflow".to_string())
             })?;
         }
-        Ok(Some(Self::encode_string(value, expire_ms)))
+        Ok(Some(if is_hash_field {
+            value.to_string().into_bytes()
+        } else {
+            Self::encode_string(value, expire_ms)
+        }))
     }
 
     fn partial_merge(&self, _key: &[u8], left: &[u8], right: &[u8]) -> KvResult<Vec<u8>> {

@@ -105,7 +105,19 @@ impl Db {
         fields: &[String],
         condition: ExpireCondition,
     ) -> Result<Vec<i64>, Error> {
-        let _hash_write_guard = self.set_write_lock(key).lock().await;
+        if expire_ms <= now_ms() {
+            let _hash_write_guard = self.set_write_lock(key).lock().await;
+            return self
+                .hash_expire_fields_at_ms_async_unlocked(key, expire_ms, fields, condition)
+                .await;
+        }
+        let _hash_read_guard = self.set_write_lock(key).read().await;
+        let field_shards = unique_hash_field_write_lock_shards(
+            self.db_index,
+            key,
+            fields.iter().map(String::as_str),
+        );
+        let _field_guards = self.lock_hash_field_write_shards(&field_shards).await;
         self.hash_expire_fields_at_ms_async_unlocked(key, expire_ms, fields, condition)
             .await
     }
@@ -129,30 +141,34 @@ impl Db {
             0
         };
         let mut deleted_fields = HashSet::new();
-        let mut staged = HashMap::<String, (bool, u64)>::new();
+        let mut unique_fields = Vec::new();
+        let mut seen_fields = HashSet::new();
+        for field in fields {
+            if seen_fields.insert(field) {
+                unique_fields.push(field);
+            }
+        }
+        let field_keys = unique_fields
+            .iter()
+            .map(|field| hash_field_key(self.db_index, key, version, field))
+            .collect::<Vec<_>>();
+        let expire_keys = unique_fields
+            .iter()
+            .map(|field| hash_field_expire_key(self.db_index, key, version, field))
+            .collect::<Vec<_>>();
+        let values = self.store.multi_get_raw_async(&field_keys).await;
+        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        let mut staged = HashMap::<String, (bool, u64)>::with_capacity(unique_fields.len());
+        for ((field, value), expire) in unique_fields.into_iter().zip(values).zip(expires) {
+            let current = expire.as_deref().and_then(decode_u64_be).unwrap_or(0);
+            let exists = value.is_some() && (current == 0 || current > now);
+            staged.insert(field.clone(), (exists, current));
+        }
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
             let field_key = hash_field_key(self.db_index, key, version, field);
-            let (exists, current) = if let Some(state) = staged.get(field) {
-                *state
-            } else {
-                let exists = self
-                    .hash_live_field_value_async(key, version, field)
-                    .await
-                    .is_some();
-                let current = if exists {
-                    self.store
-                        .get_raw_async(&hash_field_expire_key(self.db_index, key, version, field))
-                        .await
-                        .and_then(|raw| decode_u64_be(&raw))
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-                staged.insert(field.clone(), (exists, current));
-                (exists, current)
-            };
+            let (exists, current) = staged.get(field).copied().unwrap_or((false, 0));
             if !exists {
                 result.push(-2);
                 continue;
@@ -261,7 +277,13 @@ impl Db {
         key: &str,
         fields: &[String],
     ) -> Result<Vec<i64>, Error> {
-        let _hash_write_guard = self.set_write_lock(key).lock().await;
+        let _hash_read_guard = self.set_write_lock(key).read().await;
+        let field_shards = unique_hash_field_write_lock_shards(
+            self.db_index,
+            key,
+            fields.iter().map(String::as_str),
+        );
+        let _field_guards = self.lock_hash_field_write_shards(&field_shards).await;
         self.hash_persist_fields_async_unlocked(key, fields).await
     }
 
@@ -274,30 +296,34 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(vec![-2; fields.len()]);
         };
-        let mut staged = HashMap::<String, (bool, bool)>::new();
+        let now = now_ms();
+        let mut unique_fields = Vec::new();
+        let mut seen_fields = HashSet::new();
+        for field in fields {
+            if seen_fields.insert(field) {
+                unique_fields.push(field);
+            }
+        }
+        let field_keys = unique_fields
+            .iter()
+            .map(|field| hash_field_key(self.db_index, key, version, field))
+            .collect::<Vec<_>>();
+        let expire_keys = unique_fields
+            .iter()
+            .map(|field| hash_field_expire_key(self.db_index, key, version, field))
+            .collect::<Vec<_>>();
+        let values = self.store.multi_get_raw_async(&field_keys).await;
+        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        let mut staged = HashMap::<String, (bool, bool)>::with_capacity(unique_fields.len());
+        for ((field, value), expire) in unique_fields.into_iter().zip(values).zip(expires) {
+            let expire_ms = expire.as_deref().and_then(decode_u64_be).unwrap_or(0);
+            let exists = value.is_some() && (expire_ms == 0 || expire_ms > now);
+            staged.insert(field.clone(), (exists, exists && expire_ms > 0));
+        }
         let mut batch = WriteBatch::new();
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
-            let (exists, has_ttl) = if let Some(state) = staged.get(field) {
-                *state
-            } else {
-                let exists = self
-                    .hash_live_field_value_async(key, version, field)
-                    .await
-                    .is_some();
-                let has_ttl = exists
-                    && self
-                        .store
-                        .contains_key_async(&hash_field_expire_key(
-                            self.db_index,
-                            key,
-                            version,
-                            field,
-                        ))
-                        .await;
-                staged.insert(field.clone(), (exists, has_ttl));
-                (exists, has_ttl)
-            };
+            let (exists, has_ttl) = staged.get(field).copied().unwrap_or((false, false));
             if !exists {
                 result.push(-2);
                 continue;
@@ -378,44 +404,43 @@ impl Db {
             return Ok(vec![-2; fields.len()]);
         };
         let now = now_ms();
-        let mut result = Vec::with_capacity(fields.len());
-        for field in fields {
-            if self
-                .hash_live_field_value_async(key, version, field)
-                .await
-                .is_none()
-            {
-                result.push(-2);
-                continue;
-            }
-            let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-            let Some(expire_ms) = self
-                .store
-                .get_raw_async(&expire_key)
-                .await
-                .and_then(|raw| decode_u64_be(&raw))
-            else {
-                result.push(-1);
-                continue;
-            };
-            let value = if absolute {
-                if millis {
-                    expire_ms as i64
-                } else {
-                    (expire_ms / 1000) as i64
+        let field_keys = fields
+            .iter()
+            .map(|field| hash_field_key(self.db_index, key, version, field))
+            .collect::<Vec<_>>();
+        let expire_keys = fields
+            .iter()
+            .map(|field| hash_field_expire_key(self.db_index, key, version, field))
+            .collect::<Vec<_>>();
+        let values = self.store.multi_get_raw_async(&field_keys).await;
+        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        Ok(values
+            .into_iter()
+            .zip(expires)
+            .map(|(field_value, expire)| {
+                if field_value.is_none() {
+                    return -2;
                 }
-            } else if expire_ms <= now {
-                -2
-            } else {
-                let ttl_ms = expire_ms - now;
-                if millis {
-                    ttl_ms as i64
+                let Some(expire_ms) = expire.as_deref().and_then(decode_u64_be) else {
+                    return -1;
+                };
+                if expire_ms > 0 && expire_ms <= now {
+                    -2
+                } else if absolute {
+                    if millis {
+                        expire_ms as i64
+                    } else {
+                        (expire_ms / 1000) as i64
+                    }
                 } else {
-                    ttl_ms.div_ceil(1000) as i64
+                    let ttl_ms = expire_ms - now;
+                    if millis {
+                        ttl_ms as i64
+                    } else {
+                        ttl_ms.div_ceil(1000) as i64
+                    }
                 }
-            };
-            result.push(value);
-        }
-        Ok(result)
+            })
+            .collect())
     }
 }

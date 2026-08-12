@@ -494,6 +494,70 @@ async fn concurrent_hash_increment_async_keeps_all_increments() {
 }
 
 #[tokio::test]
+async fn cached_hash_increment_is_cut_off_by_hset_and_delete() {
+    let db = test_db();
+    db.hash_set_async("cached-hash", "field", "10")
+        .await
+        .unwrap();
+    assert_eq!(
+        db.hash_increment_by_async("cached-hash", "field", 1)
+            .await
+            .unwrap(),
+        11
+    );
+    db.hash_set_async("cached-hash", "field", "100")
+        .await
+        .unwrap();
+    assert_eq!(
+        db.hash_increment_by_async("cached-hash", "field", 1)
+            .await
+            .unwrap(),
+        101
+    );
+    assert_eq!(
+        db.hash_delete_async("cached-hash", &["field".to_string()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.hash_increment_by_async("cached-hash", "field", 1)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.hash_get_async("cached-hash", "field").await.unwrap(),
+        Some("1".to_string())
+    );
+}
+
+#[tokio::test]
+async fn cached_hash_length_tracks_sets_and_deletes() {
+    let db = test_db();
+    db.hash_set_async("length-cache", "a", "1").await.unwrap();
+    assert_eq!(db.hash_len_async("length-cache").await.unwrap(), 1);
+
+    db.hash_set_async("length-cache", "b", "2").await.unwrap();
+    assert_eq!(db.hash_len_async("length-cache").await.unwrap(), 2);
+    assert_eq!(
+        db.hash_delete_async("length-cache", &["a".to_string()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.hash_len_async("length-cache").await.unwrap(), 1);
+    assert_eq!(
+        db.hash_delete_async("length-cache", &["b".to_string()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.hash_len_async("length-cache").await.unwrap(), 0);
+    assert!(!db.exists_readonly_async("length-cache").await);
+}
+
+#[tokio::test]
 async fn concurrent_hash_set_nx_is_field_local_and_has_one_winner_per_field() {
     let db = Arc::new(test_db());
     let mut distinct = Vec::new();

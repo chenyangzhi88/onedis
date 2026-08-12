@@ -65,6 +65,35 @@ pub(crate) fn key_write_lock_shard_bytes(db_index: u16, key: &[u8]) -> usize {
     hash as usize & (KEY_WRITE_LOCK_SHARDS - 1)
 }
 
+pub(crate) fn hash_field_write_lock_shard(db_index: u16, key: &str, field: &str) -> usize {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in db_index
+        .to_be_bytes()
+        .into_iter()
+        .chain(key.len().to_be_bytes())
+        .chain(key.bytes())
+        .chain(field.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash as usize & (KEY_WRITE_LOCK_SHARDS - 1)
+}
+
+pub(crate) fn unique_hash_field_write_lock_shards<'a>(
+    db_index: u16,
+    key: &str,
+    fields: impl IntoIterator<Item = &'a str>,
+) -> Vec<usize> {
+    let mut shards = fields
+        .into_iter()
+        .map(|field| hash_field_write_lock_shard(db_index, key, field))
+        .collect::<Vec<_>>();
+    shards.sort_unstable();
+    shards.dedup();
+    shards
+}
+
 pub(crate) fn unique_key_write_lock_shards<'a>(
     db_index: u16,
     keys: impl IntoIterator<Item = &'a [u8]>,

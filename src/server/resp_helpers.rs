@@ -63,7 +63,7 @@ fn parse_borrowed_plain_hset_commands(bytes: &[u8]) -> Option<Vec<BorrowedHsetCo
         }
         let header_end = find_crlf(bytes, pos + 1)?;
         let argc = parse_usize_ascii(&bytes[pos + 1..header_end])?;
-        if argc != 4 {
+        if argc < 4 || argc % 2 != 0 {
             return None;
         }
         pos = header_end + 2;
@@ -73,11 +73,46 @@ fn parse_borrowed_plain_hset_commands(bytes: &[u8]) -> Option<Vec<BorrowedHsetCo
             return None;
         }
         let key = parse_borrowed_bulk_arg(bytes, &mut pos)?;
-        let field = parse_borrowed_bulk_arg(bytes, &mut pos)?;
-        let value = parse_borrowed_bulk_arg(bytes, &mut pos)?;
-        commands.push((key, field, value));
+        let mut fields = Vec::with_capacity((argc - 2) / 2);
+        for _ in 0..(argc - 2) / 2 {
+            let field = parse_borrowed_bulk_arg(bytes, &mut pos)?;
+            let value = parse_borrowed_bulk_arg(bytes, &mut pos)?;
+            fields.push((field, value));
+        }
+        commands.push((key, fields));
     }
     Some(commands)
+}
+
+fn parse_borrowed_plain_hdel_commands(bytes: &[u8]) -> Option<Vec<BorrowedHdelCommand<'_>>> {
+    parse_borrowed_resp_commands(bytes)?
+        .into_iter()
+        .map(|args| {
+            if args.len() < 3 || !args[0].eq_ignore_ascii_case(b"HDEL") {
+                return None;
+            }
+            Some((args[1], args[2..].to_vec()))
+        })
+        .collect()
+}
+
+fn parse_borrowed_plain_hgetdel_commands(bytes: &[u8]) -> Option<Vec<BorrowedHdelCommand<'_>>> {
+    parse_borrowed_resp_commands(bytes)?
+        .into_iter()
+        .map(|args| {
+            if args.len() < 5
+                || !args[0].eq_ignore_ascii_case(b"HGETDEL")
+                || !args[2].eq_ignore_ascii_case(b"FIELDS")
+            {
+                return None;
+            }
+            let count = parse_usize_ascii(args[3])?;
+            if count == 0 || args.len() != 4usize.checked_add(count)? {
+                return None;
+            }
+            Some((args[1], args[4..].to_vec()))
+        })
+        .collect()
 }
 
 fn parse_borrowed_bulk_arg<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
@@ -224,5 +259,5 @@ fn append_usize_decimal(out: &mut Vec<u8>, mut value: usize) {
     out.extend_from_slice(&buf[idx..]);
 }
 
-type BorrowedHsetCommand<'a> = (&'a [u8], &'a [u8], &'a [u8]);
-
+type BorrowedHsetCommand<'a> = (&'a [u8], Vec<(&'a [u8], &'a [u8])>);
+type BorrowedHdelCommand<'a> = (&'a [u8], Vec<&'a [u8]>);

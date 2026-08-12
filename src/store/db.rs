@@ -14,8 +14,9 @@ use serde_json::Value as JsonValue;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::key_write_locks::{
-    KEY_WRITE_LOCK_SHARDS, KeyWriteLock, KeyWriteLocks, key_write_lock_shard,
-    key_write_lock_shard_bytes, unique_key_write_lock_shards,
+    KEY_WRITE_LOCK_SHARDS, KeyWriteLock, KeyWriteLocks, hash_field_write_lock_shard,
+    key_write_lock_shard, key_write_lock_shard_bytes, unique_hash_field_write_lock_shards,
+    unique_key_write_lock_shards,
 };
 use super::kv_store::{CompareCondition, KvStore};
 use super::ttl::{
@@ -155,6 +156,7 @@ pub struct Db {
     vector_runtimes: Arc<VectorRuntimeRegistry>,
     fulltext_runtimes: Arc<FullTextRuntimeRegistry>,
     key_write_locks: KeyWriteLocks,
+    hash_field_write_locks: KeyWriteLocks,
     mutation_tracker: Arc<KeyMutationTracker>,
     pending_mutations: Arc<Mutex<PendingMutations>>,
 }

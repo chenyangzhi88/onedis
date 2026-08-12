@@ -96,14 +96,12 @@ impl Db {
         fields: &[String],
     ) -> Result<Vec<Option<Vec<u8>>>, Error> {
         let _hash_write_guard = self.set_write_lock(key).lock().await;
+        let mut values = self.hash_multi_get_bytes_async(key, fields).await?;
         let mut seen = HashSet::new();
-        let mut values = Vec::with_capacity(fields.len());
-        for field in fields {
-            values.push(if seen.insert(field) {
-                self.hash_get_bytes_async(key, field).await?
-            } else {
-                None
-            });
+        for (field, value) in fields.iter().zip(values.iter_mut()) {
+            if !seen.insert(field) {
+                *value = None;
+            }
         }
         self.hash_delete_async_unlocked(key, fields).await?;
         Ok(values)
@@ -179,18 +177,39 @@ impl Db {
         fields: &[String],
         expiration: Option<StringExpireUpdate>,
     ) -> Result<Vec<Option<Vec<u8>>>, Error> {
-        let _hash_write_guard = self.set_write_lock(key).lock().await;
         let resolved = expiration.map(resolve_hash_expiration).transpose()?;
         let delete_immediately = matches!(resolved, Some(ResolvedHashExpiration::At(expire_ms)) if expire_ms <= now_ms());
+        if delete_immediately {
+            let _hash_write_guard = self.set_write_lock(key).lock().await;
+            return self
+                .hash_get_ex_bytes_async_unlocked(key, fields, resolved)
+                .await;
+        }
+        let _hash_read_guard = self.set_write_lock(key).read().await;
+        let field_shards = unique_hash_field_write_lock_shards(
+            self.db_index,
+            key,
+            fields.iter().map(String::as_str),
+        );
+        let _field_guards = self.lock_hash_field_write_shards(&field_shards).await;
+        self.hash_get_ex_bytes_async_unlocked(key, fields, resolved)
+            .await
+    }
+
+    async fn hash_get_ex_bytes_async_unlocked(
+        &self,
+        key: &str,
+        fields: &[String],
+        resolved: Option<ResolvedHashExpiration>,
+    ) -> Result<Vec<Option<Vec<u8>>>, Error> {
+        let delete_immediately = matches!(resolved, Some(ResolvedHashExpiration::At(expire_ms)) if expire_ms <= now_ms());
         let values = if delete_immediately {
+            let mut values = self.hash_multi_get_bytes_async(key, fields).await?;
             let mut seen = HashSet::new();
-            let mut values = Vec::with_capacity(fields.len());
-            for field in fields {
-                values.push(if seen.insert(field) {
-                    self.hash_get_bytes_async(key, field).await?
-                } else {
-                    None
-                });
+            for (field, value) in fields.iter().zip(values.iter_mut()) {
+                if !seen.insert(field) {
+                    *value = None;
+                }
             }
             values
         } else {
@@ -366,7 +385,41 @@ impl Db {
         fxx: bool,
     ) -> Result<bool, Error> {
         let expiration = expiration.map(resolve_hash_expiration).transpose()?;
-        let _hash_write_guard = self.set_write_lock(key).lock().await;
+        let delete_immediately = matches!(expiration, Some(ResolvedHashExpiration::At(expire_ms)) if expire_ms <= now_ms());
+        if delete_immediately {
+            let _hash_write_guard = self.set_write_lock(key).lock().await;
+            return self
+                .hash_set_ex_bytes_async_unlocked(key, fields, expiration, keep_ttl, fnx, fxx)
+                .await;
+        }
+
+        let hash_read_guard = self.set_write_lock(key).read().await;
+        if self.hash_expire_ms_async(key).await?.is_none() {
+            drop(hash_read_guard);
+            let _hash_write_guard = self.set_write_lock(key).lock().await;
+            return self
+                .hash_set_ex_bytes_async_unlocked(key, fields, expiration, keep_ttl, fnx, fxx)
+                .await;
+        }
+        let field_shards = unique_hash_field_write_lock_shards(
+            self.db_index,
+            key,
+            fields.iter().map(|(field, _)| field.as_str()),
+        );
+        let _field_guards = self.lock_hash_field_write_shards(&field_shards).await;
+        self.hash_set_ex_bytes_async_unlocked(key, fields, expiration, keep_ttl, fnx, fxx)
+            .await
+    }
+
+    async fn hash_set_ex_bytes_async_unlocked(
+        &self,
+        key: &str,
+        fields: &[(String, Vec<u8>)],
+        expiration: Option<ResolvedHashExpiration>,
+        keep_ttl: bool,
+        fnx: bool,
+        fxx: bool,
+    ) -> Result<bool, Error> {
         let meta = self.hash_expire_ms_async(key).await?;
         if fields.is_empty() {
             return Ok(true);
@@ -376,11 +429,12 @@ impl Db {
             None => self.next_version_async().await,
         };
         if fnx || fxx {
-            for (field, _) in fields {
-                let exists = self
-                    .hash_live_field_value_async(key, version, field)
-                    .await
-                    .is_some();
+            let field_names = fields
+                .iter()
+                .map(|(field, _)| field.clone())
+                .collect::<Vec<_>>();
+            let existing = self.hash_multi_get_bytes_async(key, &field_names).await?;
+            for exists in existing.into_iter().map(|value| value.is_some()) {
                 if (fnx && exists) || (fxx && !exists) {
                     return Ok(false);
                 }

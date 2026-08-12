@@ -17,8 +17,10 @@ use super::{
     Handler, Server, append_array_len, append_bulk_string, append_error, append_integer,
     append_null, append_simple_string, append_usize_decimal, borrowed_list_push_supported,
     borrowed_lrange_supported, borrowed_plain_set_supported, borrowed_read_supported, find_crlf,
-    format_command_for_monitor, parse_borrowed_plain_hset_commands,
-    parse_borrowed_plain_set_commands, parse_borrowed_resp_commands, parse_i64_ascii,
+    format_command_for_monitor, parse_borrowed_plain_hdel_commands,
+    parse_borrowed_plain_hgetdel_commands,
+    parse_borrowed_plain_hset_commands, parse_borrowed_plain_set_commands,
+    parse_borrowed_resp_commands, parse_i64_ascii,
     parse_usize_ascii,
 };
 
@@ -293,6 +295,13 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
     assert!(Handler::can_apply_direct(&command(&["get", "k"])));
     assert!(Handler::can_apply_direct(&command(&["set", "k", "v"])));
     assert!(Handler::can_apply_direct(&command(&["hsetnx", "h", "f", "v"])));
+    assert!(Handler::can_apply_direct(&command(&["hget", "h", "f"])));
+    assert!(Handler::can_apply_direct(&command(&[
+        "hsetex", "h", "px", "1000", "fields", "1", "f", "v"
+    ])));
+    assert!(Handler::can_apply_direct(&command(&[
+        "hpexpire", "h", "1000", "fields", "1", "f"
+    ])));
     assert!(Handler::can_apply_on_worker(&command(&[
         "zrange", "z", "0", "-1"
     ])));
@@ -354,9 +363,30 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
     let hset = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$1\r\nf\r\n$1\r\nv\r\n";
     assert_eq!(
         parse_borrowed_plain_hset_commands(hset).unwrap(),
-        vec![(b"h".as_slice(), b"f".as_slice(), b"v".as_slice())]
+        vec![(
+            b"h".as_slice(),
+            vec![(b"f".as_slice(), b"v".as_slice())]
+        )]
+    );
+    let multi_hset = b"*6\r\n$4\r\nHSET\r\n$1\r\nh\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n";
+    assert_eq!(
+        parse_borrowed_plain_hset_commands(multi_hset).unwrap()[0].1.len(),
+        2
     );
     assert!(parse_borrowed_plain_hset_commands(set).is_none());
+    let hdel = b"*4\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$2\r\nf1\r\n$2\r\nf2\r\n";
+    assert_eq!(
+        parse_borrowed_plain_hdel_commands(hdel).unwrap(),
+        vec![(b"h".as_slice(), vec![b"f1".as_slice(), b"f2".as_slice()])]
+    );
+    assert!(parse_borrowed_plain_hdel_commands(set).is_none());
+    let hgetdel =
+        b"*6\r\n$7\r\nHGETDEL\r\n$1\r\nh\r\n$6\r\nFIELDS\r\n$1\r\n2\r\n$2\r\nf1\r\n$2\r\nf2\r\n";
+    assert_eq!(
+        parse_borrowed_plain_hgetdel_commands(hgetdel).unwrap(),
+        vec![(b"h".as_slice(), vec![b"f1".as_slice(), b"f2".as_slice()])]
+    );
+    assert!(parse_borrowed_plain_hgetdel_commands(set).is_none());
 
     assert!(borrowed_read_supported(&[
         b"GET".as_slice(),
@@ -480,6 +510,28 @@ fn handler_fast_paths_acl_pubsub_and_monitor_cover_private_routes() {
         rt.block_on(handler.get_session().get_db().hash_get_async("h", "f"))
             .unwrap(),
         Some("v3".to_string())
+    );
+    let hdel_batch = b"*3\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$1\r\nf\r\n\
+                       *3\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$1\r\nf\r\n\
+                       *3\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$1\r\ng\r\n";
+    assert_eq!(
+        rt.block_on(handler.try_handle_borrowed_fast_batch(hdel_batch))
+            .unwrap(),
+        b":1\r\n:0\r\n:1\r\n"
+    );
+    rt.block_on(
+        handler
+            .get_session()
+            .get_db()
+            .hash_set_async("h", "read-delete", "value"),
+    )
+    .unwrap();
+    let hgetdel_batch = b"*5\r\n$7\r\nHGETDEL\r\n$1\r\nh\r\n$6\r\nFIELDS\r\n$1\r\n1\r\n$11\r\nread-delete\r\n\
+                           *5\r\n$7\r\nHGETDEL\r\n$1\r\nh\r\n$6\r\nFIELDS\r\n$1\r\n1\r\n$11\r\nread-delete\r\n";
+    assert_eq!(
+        rt.block_on(handler.try_handle_borrowed_fast_batch(hgetdel_batch))
+            .unwrap(),
+        b"*1\r\n$5\r\nvalue\r\n*1\r\n$-1\r\n"
     );
     let list_bytes =
         b"*3\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n*3\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\nb\r\n";

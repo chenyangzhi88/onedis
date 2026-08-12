@@ -1,6 +1,18 @@
 use super::*;
 
 impl Db {
+    pub(in crate::store::db) async fn hash_meta_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<HashMeta>, Error> {
+        self.expire_if_needed_async(key).await;
+        self.store
+            .get_raw_async(&self.mk(key))
+            .await
+            .map(|raw| decode_hash_meta_checked(&raw))
+            .transpose()
+    }
+
     pub(in crate::store::db) fn hash_expire_ms(
         &self,
         key: &str,
@@ -80,6 +92,28 @@ impl Db {
             }
         }
         entries
+    }
+
+    pub(in crate::store::db) async fn hash_live_entries_for_meta_async(
+        &self,
+        key: &str,
+        meta: HashMeta,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let entries = self.hash_entries_raw_async(key, meta.version).await;
+        if !meta.may_have_field_ttl {
+            return entries;
+        }
+        let mut live = Vec::with_capacity(entries.len());
+        for (field, value) in entries {
+            let field_text = String::from_utf8_lossy(&field);
+            if self
+                .hash_field_is_live_async(key, meta.version, &field_text)
+                .await
+            {
+                live.push((field, value));
+            }
+        }
+        live
     }
 
     pub(in crate::store::db) fn hash_field_is_live(

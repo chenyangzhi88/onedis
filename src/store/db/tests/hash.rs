@@ -363,6 +363,32 @@ async fn hash_persist_fields_async_returns_all_redis_states() {
 }
 
 #[tokio::test]
+async fn async_hash_field_expiretime_reports_expired_fields_as_missing() {
+    let db = test_db();
+    db.hash_set_async("expired-time", "field", "value")
+        .await
+        .unwrap();
+    assert_eq!(
+        db.hash_expire_fields_at_ms_async(
+            "expired-time",
+            now_ms().saturating_add(20),
+            &["field".to_string()],
+            ExpireCondition::Always,
+        )
+        .await
+        .unwrap(),
+        vec![1]
+    );
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        db.hash_field_ttls_async("expired-time", &["field".to_string()], true, true)
+            .await
+            .unwrap(),
+        vec![-2]
+    );
+}
+
+#[tokio::test]
 async fn hash_async_conditionals_ttls_and_concurrent_increments_cover_edges() {
     let db = test_db();
 

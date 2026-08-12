@@ -53,6 +53,7 @@ impl Db {
         let key_layout =
             KeyEncodingLayout::open_or_initialize_for_table(&store.non_transactional_view());
         let key_write_locks = ttl_manager.key_write_locks();
+        let hash_field_write_locks = ttl_manager.hash_field_write_locks();
         Db {
             db_index,
             store,
@@ -66,6 +67,7 @@ impl Db {
             vector_runtimes,
             fulltext_runtimes: Arc::new(FullTextRuntimeRegistry::default()),
             key_write_locks,
+            hash_field_write_locks,
             mutation_tracker,
             pending_mutations: Arc::new(Mutex::new(PendingMutations::default())),
         }
@@ -89,6 +91,7 @@ impl Db {
             vector_runtimes: self.vector_runtimes.clone(),
             fulltext_runtimes: self.fulltext_runtimes.clone(),
             key_write_locks: self.key_write_locks.clone(),
+            hash_field_write_locks: self.hash_field_write_locks.clone(),
             mutation_tracker: self.mutation_tracker.clone(),
             pending_mutations: Arc::new(Mutex::new(PendingMutations::default())),
         })
@@ -96,6 +99,36 @@ impl Db {
 
     pub(in crate::store::db) fn set_write_lock(&self, key: &str) -> &KeyWriteLock {
         &self.key_write_locks[key_write_lock_shard(self.db_index, key)]
+    }
+
+    pub(in crate::store::db) fn hash_field_write_lock(
+        &self,
+        key: &str,
+        field: &str,
+    ) -> &KeyWriteLock {
+        &self.hash_field_write_locks[hash_field_write_lock_shard(self.db_index, key, field)]
+    }
+
+    pub(in crate::store::db) async fn lock_hash_field_write_shards(
+        &self,
+        shards: &[usize],
+    ) -> Vec<tokio::sync::RwLockWriteGuard<'_, ()>> {
+        let mut guards = Vec::with_capacity(shards.len());
+        for &shard in shards {
+            guards.push(self.hash_field_write_locks[shard].lock().await);
+        }
+        guards
+    }
+
+    pub(in crate::store::db) async fn lock_hash_field_read_shards(
+        &self,
+        shards: &[usize],
+    ) -> Vec<tokio::sync::RwLockReadGuard<'_, ()>> {
+        let mut guards = Vec::with_capacity(shards.len());
+        for &shard in shards {
+            guards.push(self.hash_field_write_locks[shard].read().await);
+        }
+        guards
     }
 
     pub(in crate::store::db) async fn lock_write_shards(
@@ -149,6 +182,7 @@ impl Db {
             list_meta_cache_maybe_non_empty: self.list_meta_cache_maybe_non_empty.clone(),
             counter_cache: self.counter_cache.clone(),
             key_write_locks: self.key_write_locks.clone(),
+            hash_field_write_locks: self.hash_field_write_locks.clone(),
         }
     }
 
@@ -293,6 +327,7 @@ impl Db {
             list_meta_cache_maybe_non_empty: self.list_meta_cache_maybe_non_empty.clone(),
             counter_cache: self.counter_cache.clone(),
             key_write_locks: self.key_write_locks.clone(),
+            hash_field_write_locks: self.hash_field_write_locks.clone(),
         }
     }
 }

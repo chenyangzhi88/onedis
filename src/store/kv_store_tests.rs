@@ -487,5 +487,13 @@ mod tests {
             )
             .is_err()
         );
+
+        let hash_field_key = b"\x80\xffh\0hash\0\0\0\0\0\0\0\0\x01field";
+        assert_eq!(
+            op.full_merge(hash_field_key, Some(b"9"), &[&2i64.to_be_bytes()])
+                .unwrap(),
+            Some(b"11".to_vec())
+        );
+        assert!(op.full_merge(hash_field_key, Some(b"nan"), &[]).is_err());
     }
 }

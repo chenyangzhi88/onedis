@@ -1,6 +1,12 @@
 use super::*;
 
-const HASH_FIELD_CAS_SHARED_ATTEMPTS: usize = 3;
+pub(in crate::store::db) fn hash_counter_route_key(key: &str, field: &str) -> Vec<u8> {
+    let mut route = Vec::with_capacity(8 + key.len() + field.len());
+    route.extend_from_slice(&(key.len() as u64).to_be_bytes());
+    route.extend_from_slice(key.as_bytes());
+    route.extend_from_slice(field.as_bytes());
+    route
+}
 
 enum HashFieldCasAttempt<T> {
     Applied(T),
@@ -11,6 +17,7 @@ struct HashFieldCasState {
     key_bytes: Vec<u8>,
     raw_meta: Option<Vec<u8>>,
     expired_at: Option<u64>,
+    key_expire_ms: u64,
     meta_exists: bool,
     version: u64,
     field_key: Vec<u8>,
@@ -49,20 +56,8 @@ impl Db {
         field: &str,
         value: &[u8],
     ) -> Result<bool, Error> {
-        for _ in 0..HASH_FIELD_CAS_SHARED_ATTEMPTS {
-            let structural_guard = self.set_write_lock(key).read().await;
-            match self
-                .hash_set_nx_bytes_async_attempt(key, field, value)
-                .await?
-            {
-                HashFieldCasAttempt::Applied(result) => return Ok(result),
-                HashFieldCasAttempt::Conflict => {}
-            }
-            drop(structural_guard);
-            tokio::task::yield_now().await;
-        }
-
-        let _structural_guard = self.set_write_lock(key).lock().await;
+        let _structural_guard = self.set_write_lock(key).read().await;
+        let _field_guard = self.hash_field_write_lock(key, field).lock().await;
         loop {
             match self
                 .hash_set_nx_bytes_async_attempt(key, field, value)
@@ -120,29 +115,206 @@ impl Db {
         field: &str,
         increment: i64,
     ) -> Result<i64, Error> {
-        for _ in 0..HASH_FIELD_CAS_SHARED_ATTEMPTS {
-            let structural_guard = self.set_write_lock(key).read().await;
-            match self
-                .hash_increment_by_async_attempt(key, field, increment)
+        if !self.store.is_transactional()
+            && matches!(increment, -1 | 1)
+            && !self.fulltext_hash_source_is_indexed(key)?
+        {
+            if let Some(result) = self
+                .hash_increment_by_cached_async(key, field, increment)
                 .await?
             {
-                HashFieldCasAttempt::Applied(result) => return Ok(result),
-                HashFieldCasAttempt::Conflict => {}
+                return Ok(result);
             }
-            drop(structural_guard);
-            tokio::task::yield_now().await;
         }
-
-        let _structural_guard = self.set_write_lock(key).lock().await;
+        let _structural_guard = self.set_write_lock(key).read().await;
+        let _field_guard = self.hash_field_write_lock(key, field).lock().await;
         loop {
             match self
                 .hash_increment_by_async_attempt(key, field, increment)
                 .await?
             {
                 HashFieldCasAttempt::Applied(result) => return Ok(result),
+                // An HSET may still update this field while holding the shared structural
+                // barrier. Keep the field lock and re-observe; competing increments cannot
+                // now create a retry storm.
                 HashFieldCasAttempt::Conflict => tokio::task::yield_now().await,
             }
         }
+    }
+
+    async fn hash_increment_by_cached_async(
+        &self,
+        key: &str,
+        field: &str,
+        increment: i64,
+    ) -> Result<Option<i64>, Error> {
+        let logical_key = key.as_bytes().to_vec();
+        let route_key = hash_counter_route_key(key, field);
+        let key_epoch = self
+            .counter_cache
+            .hash_key_epoch(self.db_index, &logical_key);
+
+        let structural_guard = self.set_write_lock(key).read_owned().await;
+        let field_guard = self.hash_field_write_lock(key, field).read_owned().await;
+        if let Some(raw_key) = self
+            .counter_cache
+            .hash_routes
+            .get(&(self.db_index, route_key.clone()))
+            .map(|route| route.clone())
+            && let Some((next, sequence, commit_state)) =
+                self.assign_cached_hash_counter(&raw_key, key_epoch, increment)?
+        {
+            self.spawn_hash_counter_merge(
+                logical_key,
+                raw_key,
+                increment,
+                sequence,
+                commit_state.clone(),
+                (structural_guard, field_guard),
+            );
+            commit_state.wait_for(sequence).await?;
+            return Ok(Some(next));
+        }
+        drop(field_guard);
+        drop(structural_guard);
+
+        let structural_guard = self.set_write_lock(key).read_owned().await;
+        let field_guard = self.hash_field_write_lock(key, field).lock_owned().await;
+        let key_epoch = self
+            .counter_cache
+            .hash_key_epoch(self.db_index, &logical_key);
+        if let Some(raw_key) = self
+            .counter_cache
+            .hash_routes
+            .get(&(self.db_index, route_key.clone()))
+            .map(|route| route.clone())
+            && let Some((next, sequence, commit_state)) =
+                self.assign_cached_hash_counter(&raw_key, key_epoch, increment)?
+        {
+            self.spawn_hash_counter_merge(
+                logical_key,
+                raw_key,
+                increment,
+                sequence,
+                commit_state.clone(),
+                (structural_guard, field_guard),
+            );
+            commit_state.wait_for(sequence).await?;
+            return Ok(Some(next));
+        }
+
+        let state = self.observe_hash_field_cas_state(key, field).await?;
+        if !state.meta_exists
+            || state.expired_at.is_some()
+            || state.key_expire_ms > 0
+            || state.may_have_field_ttl
+            || !state.live
+        {
+            return Ok(None);
+        }
+        let current = state
+            .field_raw
+            .as_deref()
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .ok_or_else(|| Error::msg("ERR hash value is not an integer"))?;
+        let next = current
+            .checked_add(increment)
+            .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
+        let raw_key = state.field_key;
+        let commit_state = Arc::new(CounterCommitState::default());
+        self.counter_cache.evict_hash_if_full();
+        self.counter_cache
+            .hash_ever_populated
+            .store(true, Ordering::Release);
+        self.counter_cache.hash_entries.insert(
+            (self.db_index, raw_key.clone()),
+            HashCounterCacheEntry {
+                value: next,
+                next_sequence: 1,
+                key_epoch,
+                commit_state: commit_state.clone(),
+            },
+        );
+        self.counter_cache
+            .hash_routes
+            .insert((self.db_index, route_key), raw_key.clone());
+        self.spawn_hash_counter_merge(
+            logical_key,
+            raw_key,
+            increment,
+            1,
+            commit_state.clone(),
+            (structural_guard, field_guard),
+        );
+        commit_state.wait_for(1).await?;
+        Ok(Some(next))
+    }
+
+    fn assign_cached_hash_counter(
+        &self,
+        raw_key: &[u8],
+        key_epoch: u64,
+        increment: i64,
+    ) -> Result<Option<(i64, u64, Arc<CounterCommitState>)>, Error> {
+        let cache_key = (self.db_index, raw_key.to_vec());
+        let Some(mut entry) = self.counter_cache.hash_entries.get_mut(&cache_key) else {
+            return Ok(None);
+        };
+        if entry.key_epoch != key_epoch {
+            drop(entry);
+            self.counter_cache.hash_entries.remove(&cache_key);
+            return Ok(None);
+        }
+        if let Some(error) = entry.commit_state.failure() {
+            return Err(Error::msg(error));
+        }
+        let next = entry
+            .value
+            .checked_add(increment)
+            .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
+        let sequence = entry
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::msg("ERR counter merge sequence exhausted"))?;
+        entry.value = next;
+        entry.next_sequence = sequence;
+        Ok(Some((next, sequence, entry.commit_state.clone())))
+    }
+
+    fn spawn_hash_counter_merge<G>(
+        &self,
+        logical_key: Vec<u8>,
+        raw_key: Vec<u8>,
+        increment: i64,
+        sequence: u64,
+        commit_state: Arc<CounterCommitState>,
+        guards: G,
+    ) where
+        G: Send + 'static,
+    {
+        let db = self.shared_task_view();
+        tokio::spawn(async move {
+            let _guards = guards;
+            match db
+                .store
+                .try_merge_raw_async(&raw_key, &increment.to_be_bytes())
+                .await
+            {
+                Ok(()) => {
+                    db.changes.fetch_add(1, Ordering::Relaxed);
+                    if db.mutation_tracker.has_watched_keys() {
+                        db.record_external_key_mutation(db.db_index, logical_key);
+                    }
+                    commit_state.complete(sequence);
+                }
+                Err(error) => {
+                    db.counter_cache
+                        .invalidate_hash_field(db.db_index, &raw_key);
+                    commit_state.fail(format!("ERR hash counter merge failed: {error}"));
+                }
+            }
+        });
     }
 
     pub fn hash_increment_by_float(
@@ -202,20 +374,8 @@ impl Db {
         field: &str,
         increment: f64,
     ) -> Result<String, Error> {
-        for _ in 0..HASH_FIELD_CAS_SHARED_ATTEMPTS {
-            let structural_guard = self.set_write_lock(key).read().await;
-            match self
-                .hash_increment_by_float_async_attempt(key, field, increment)
-                .await?
-            {
-                HashFieldCasAttempt::Applied(result) => return Ok(result),
-                HashFieldCasAttempt::Conflict => {}
-            }
-            drop(structural_guard);
-            tokio::task::yield_now().await;
-        }
-
-        let _structural_guard = self.set_write_lock(key).lock().await;
+        let _structural_guard = self.set_write_lock(key).read().await;
+        let _field_guard = self.hash_field_write_lock(key, field).lock().await;
         loop {
             match self
                 .hash_increment_by_float_async_attempt(key, field, increment)
@@ -235,6 +395,7 @@ impl Db {
         let key_bytes = self.mk(key);
         let raw_meta = self.store.get_raw_async(&key_bytes).await;
         let mut expired_at = None;
+        let mut key_expire_ms = 0;
         let (meta_exists, version, may_have_field_ttl) = match raw_meta.as_deref() {
             Some(raw) => {
                 let header = decode_meta_header(raw)
@@ -243,6 +404,7 @@ impl Db {
                     expired_at = Some(header.expire_ms);
                     (false, self.next_version_async().await, false)
                 } else {
+                    key_expire_ms = header.expire_ms;
                     if header.type_tag != TYPE_HASH {
                         return Err(Error::msg(WRONG_TYPE_ERROR));
                     }
@@ -275,6 +437,7 @@ impl Db {
             key_bytes,
             raw_meta,
             expired_at,
+            key_expire_ms,
             meta_exists,
             version,
             field_key,

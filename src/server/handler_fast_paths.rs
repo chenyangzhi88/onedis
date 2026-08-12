@@ -101,6 +101,20 @@ impl Handler {
             self.observe_fast_command_batch("HSET", count);
             return Some(response);
         }
+        if let Some(commands) = parse_borrowed_plain_hdel_commands(bytes) {
+            let count = commands.len();
+            let response = self.handle_borrowed_hdel_commands(commands).await;
+            self.record_fast_command_batch("HDEL", count, started, &response);
+            self.observe_fast_command_batch("HDEL", count);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_plain_hgetdel_commands(bytes) {
+            let count = commands.len();
+            let response = self.handle_borrowed_hgetdel_commands(commands).await;
+            self.record_fast_command_batch("HGETDEL", count, started, &response);
+            self.observe_fast_command_batch("HGETDEL", count);
+            return Some(response);
+        }
         if commands.iter().all(|args| borrowed_read_supported(args)) {
             let names = borrowed_fast_names(&commands);
             let response = self.handle_borrowed_read_commands(commands).await;
@@ -140,15 +154,17 @@ impl Handler {
     }
 
     fn observe_fast_command_batch(&mut self, command: &'static str, count: usize) {
-        for _ in 0..count {
-            self.session_manager.broadcast_monitor(
-                self.session.get_id(),
-                format_command_name_for_monitor_context(
-                    command,
-                    self.session.get_current_db(),
-                    self.session.peer_addr(),
-                ),
-            );
+        if self.session_manager.has_monitors() {
+            for _ in 0..count {
+                self.session_manager.broadcast_monitor(
+                    self.session.get_id(),
+                    format_command_name_for_monitor_context(
+                        command,
+                        self.session.get_current_db(),
+                        self.session.peer_addr(),
+                    ),
+                );
+            }
         }
         if count > 0 {
             self.session.set_last_cmd(command.to_ascii_lowercase());
@@ -157,15 +173,17 @@ impl Handler {
     }
 
     fn observe_fast_command_names(&mut self, commands: &[&'static str]) {
-        for command in commands {
-            self.session_manager.broadcast_monitor(
-                self.session.get_id(),
-                format_command_name_for_monitor_context(
-                    command,
-                    self.session.get_current_db(),
-                    self.session.peer_addr(),
-                ),
-            );
+        if self.session_manager.has_monitors() {
+            for command in commands {
+                self.session_manager.broadcast_monitor(
+                    self.session.get_id(),
+                    format_command_name_for_monitor_context(
+                        command,
+                        self.session.get_current_db(),
+                        self.session.peer_addr(),
+                    ),
+                );
+            }
         }
         if let Some(command) = commands.last() {
             self.session.set_last_cmd(command.to_ascii_lowercase());

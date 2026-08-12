@@ -8,6 +8,7 @@ impl Db {
         let augmented = self.batch_with_version_owner_markers(batch);
         let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch(batch);
         self.record_or_publish_mutations(batch);
@@ -43,6 +44,7 @@ impl Db {
             .flatten();
         let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch_async(batch).await;
         self.record_or_publish_mutations(batch);
@@ -83,6 +85,7 @@ impl Db {
             return;
         }
         self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch_async(batch).await;
         if !self.store.is_transactional() {
@@ -101,6 +104,7 @@ impl Db {
         let augmented = self.batch_with_version_owner_markers(batch);
         let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         match self
             .store
@@ -127,6 +131,7 @@ impl Db {
         let augmented = self.batch_with_version_owner_markers(batch);
         let batch = augmented.as_ref().unwrap_or(batch);
         self.invalidate_counter_cache_for_batch(batch);
+        self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         match self.store.compare_and_write_batch(conditions, batch) {
             Ok(()) => {
@@ -248,16 +253,73 @@ impl Db {
         }
     }
 
+    pub(in crate::store::db) fn invalidate_hash_counter_cache_for_batch(&self, batch: &WriteBatch) {
+        if self.store.is_transactional()
+            || !self
+                .counter_cache
+                .hash_ever_populated
+                .load(Ordering::Acquire)
+        {
+            return;
+        }
+        let mut logical_keys = HashSet::new();
+        let mut field_keys = HashSet::new();
+        let mut clear_db = false;
+        for (write_type, raw_key, _) in batch.iter() {
+            match write_type {
+                WriteType::Put
+                | WriteType::PutBlobMedium
+                | WriteType::PutBlobExternal
+                | WriteType::Delete
+                | WriteType::Merge => {
+                    if let Some(logical_key) =
+                        logical_main_key_from_raw_key(self.key_layout, self.db_index, raw_key)
+                    {
+                        logical_keys.insert(logical_key);
+                    } else if let Some(field_key) =
+                        hash_field_key_from_raw_sub_key(self.key_layout, self.db_index, raw_key)
+                    {
+                        field_keys.insert(field_key);
+                        if let Some(logical_key) =
+                            hash_owner_from_raw_sub_key(self.key_layout, self.db_index, raw_key)
+                        {
+                            logical_keys.insert(logical_key);
+                        }
+                    }
+                }
+                WriteType::RangeDelete => clear_db = true,
+            }
+        }
+        if clear_db {
+            self.counter_cache.invalidate_db(self.db_index);
+            return;
+        }
+        for logical_key in logical_keys {
+            self.counter_cache
+                .invalidate_hash_key(self.db_index, &logical_key);
+        }
+        for field_key in field_keys {
+            self.counter_cache
+                .invalidate_hash_field(self.db_index, &field_key);
+        }
+    }
+
     pub(in crate::store::db) fn invalidate_counter_cache_for_committed_mutations(
         &self,
         keys: &[(u16, Vec<u8>)],
         dbs: &[u16],
     ) {
-        if !self.counter_cache.ever_populated.load(Ordering::Acquire) {
+        if !self.counter_cache.ever_populated.load(Ordering::Acquire)
+            && !self
+                .counter_cache
+                .hash_ever_populated
+                .load(Ordering::Acquire)
+        {
             return;
         }
         for &(db_index, ref key) in keys {
             self.counter_cache.invalidate_key(db_index, key);
+            self.counter_cache.invalidate_hash_key(db_index, key);
         }
         for &db_index in dbs {
             self.counter_cache.invalidate_db(db_index);

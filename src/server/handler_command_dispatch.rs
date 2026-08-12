@@ -1,7 +1,7 @@
 impl Handler {
     async fn apply_command_response_bytes(&mut self, command: Command) -> Result<Vec<u8>, Error> {
-        self.session_manager
-            .broadcast_monitor(
+        if self.session_manager.has_monitors() {
+            self.session_manager.broadcast_monitor(
                 self.session.get_id(),
                 format_command_name_for_monitor_context(
                     command.effective_name(),
@@ -9,6 +9,7 @@ impl Handler {
                     self.session.peer_addr(),
                 ),
             );
+        }
         if let Some(bytes) = self.try_apply_pubsub_or_monitor(&command).await? {
             return Ok(bytes);
         }

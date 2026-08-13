@@ -1,6 +1,135 @@
 use super::*;
 
 impl Db {
+    /// Apply an ordered pipeline of positive relative expiration updates and PERSIST operations
+    /// using one observed read and one physical write for all affected keys.
+    pub(crate) async fn apply_key_expiration_batch_async(
+        &self,
+        mutations: &[KeyExpirationBatchMutation<'_>],
+    ) -> Vec<Result<i64, Error>> {
+        if mutations.is_empty() {
+            return Vec::new();
+        }
+        let mut key_positions = HashMap::<&str, usize>::with_capacity(mutations.len());
+        let mut keys = Vec::<&str>::with_capacity(mutations.len());
+        for mutation in mutations {
+            let key = mutation.key();
+            if !key_positions.contains_key(key) {
+                key_positions.insert(key, keys.len());
+                keys.push(key);
+            }
+        }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _write_guards = self.lock_write_shards(&shards).await;
+
+        for _ in 0..64 {
+            for key in &keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut states = observations
+                .iter()
+                .map(|observed| observed.value().map(|raw| raw.to_vec()))
+                .collect::<Vec<_>>();
+            let mut dirty = vec![false; keys.len()];
+            let mut replies = Vec::with_capacity(mutations.len());
+
+            for mutation in mutations {
+                let position = key_positions[mutation.key()];
+                let Some(raw) = states[position].as_mut() else {
+                    replies.push(Ok(0));
+                    continue;
+                };
+                let Some(header) = decode_meta_header(raw) else {
+                    replies.push(Ok(0));
+                    continue;
+                };
+                match mutation {
+                    KeyExpirationBatchMutation::Expire { ttl_ms, .. } => {
+                        let expire_ms = now_ms().saturating_add(*ttl_ms);
+                        let Some(patched) = patch_meta_expire_ms(raw, expire_ms) else {
+                            replies.push(Ok(0));
+                            continue;
+                        };
+                        *raw = patched;
+                        dirty[position] = true;
+                        replies.push(Ok(1));
+                    }
+                    KeyExpirationBatchMutation::Persist { .. } => {
+                        if header.expire_ms == 0 {
+                            replies.push(Ok(0));
+                            continue;
+                        }
+                        let Some(patched) = patch_meta_expire_ms(raw, 0) else {
+                            replies.push(Ok(0));
+                            continue;
+                        };
+                        *raw = patched;
+                        dirty[position] = true;
+                        replies.push(Ok(1));
+                    }
+                }
+            }
+
+            let dirty_positions = dirty
+                .iter()
+                .enumerate()
+                .filter_map(|(position, dirty)| dirty.then_some(position))
+                .collect::<Vec<_>>();
+            if dirty_positions.is_empty() {
+                return replies;
+            }
+            let mut batch = WriteBatch::new();
+            for &position in &dirty_positions {
+                let key = keys[position];
+                let raw = states[position]
+                    .as_deref()
+                    .expect("a dirty expiration state must contain metadata");
+                let initial_expire_ms = observations[position]
+                    .value()
+                    .map_or(0, |raw| decode_expire_ms(raw));
+                let final_expire_ms = decode_expire_ms(raw);
+                batch.put(&raw_keys[position], raw);
+                if initial_expire_ms > 0 && initial_expire_ms != final_expire_ms {
+                    self.ttl_manager.remove_known_to_batch(
+                        &mut batch,
+                        initial_expire_ms,
+                        self.db_index,
+                        key,
+                    );
+                }
+                if final_expire_ms > 0 {
+                    self.ttl_manager
+                        .add_to_batch(&mut batch, final_expire_ms, self.db_index, key);
+                }
+            }
+            let conditions = dirty_positions
+                .iter()
+                .map(|&position| CompareCondition::from_observed(&observations[position]))
+                .collect::<Vec<_>>();
+            match self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await
+            {
+                Ok(true) => return replies,
+                Ok(false) => continue,
+                Err(error) => {
+                    let message = error.to_string();
+                    return mutations
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+        }
+        mutations
+            .iter()
+            .map(|_| Err(Error::msg("ERR expiration batch write conflict")))
+            .collect()
+    }
+
     /**
      * 设置过期
      *

@@ -1129,7 +1129,11 @@ pub fn classify_error_response(bytes: &[u8]) -> Option<&'static str> {
 }
 
 pub fn borrowed_fast_command_name(command: &[u8]) -> Option<&'static str> {
-    if command.eq_ignore_ascii_case(b"GET") {
+    if command.eq_ignore_ascii_case(b"APPEND") {
+        Some("APPEND")
+    } else if command.eq_ignore_ascii_case(b"EXPIRE") {
+        Some("EXPIRE")
+    } else if command.eq_ignore_ascii_case(b"GET") {
         Some("GET")
     } else if command.eq_ignore_ascii_case(b"MGET") {
         Some("MGET")
@@ -1145,6 +1149,28 @@ pub fn borrowed_fast_command_name(command: &[u8]) -> Option<&'static str> {
         Some("TYPE")
     } else if command.eq_ignore_ascii_case(b"SET") {
         Some("SET")
+    } else if command.eq_ignore_ascii_case(b"GETSET") {
+        Some("GETSET")
+    } else if command.eq_ignore_ascii_case(b"GETDEL") {
+        Some("GETDEL")
+    } else if command.eq_ignore_ascii_case(b"PSETEX") {
+        Some("PSETEX")
+    } else if command.eq_ignore_ascii_case(b"PEXPIRE") {
+        Some("PEXPIRE")
+    } else if command.eq_ignore_ascii_case(b"PERSIST") {
+        Some("PERSIST")
+    } else if command.eq_ignore_ascii_case(b"SETNX") {
+        Some("SETNX")
+    } else if command.eq_ignore_ascii_case(b"SETBIT") {
+        Some("SETBIT")
+    } else if command.eq_ignore_ascii_case(b"SETRANGE") {
+        Some("SETRANGE")
+    } else if command.eq_ignore_ascii_case(b"SETEX") {
+        Some("SETEX")
+    } else if command.eq_ignore_ascii_case(b"XADD") {
+        Some("XADD")
+    } else if command.eq_ignore_ascii_case(b"JSON.SET") {
+        Some("JSON.SET")
     } else if command.eq_ignore_ascii_case(b"HSET") {
         Some("HSET")
     } else if command.eq_ignore_ascii_case(b"LPUSH") {

@@ -110,6 +110,130 @@ fn stream_add_len_and_range_use_ordered_ids() {
     );
 }
 
+#[tokio::test]
+async fn async_stream_range_pushes_inclusive_bounds_and_count_into_storage_scan() {
+    let db = test_db();
+    for seq in 0..100 {
+        db.stream_add_async(
+            "async-events",
+            Some(StreamId { ms: 10, seq }),
+            &[("v".to_string(), seq.to_string())],
+        )
+        .await
+        .unwrap();
+    }
+
+    let entries = db
+        .stream_range_async(
+            "async-events",
+            Some(StreamId { ms: 10, seq: 40 }),
+            Some(StreamId { ms: 10, seq: 80 }),
+            Some(3),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["10-40", "10-41", "10-42"]
+    );
+
+    assert!(
+        db.stream_range_async(
+            "async-events",
+            Some(StreamId { ms: 10, seq: 80 }),
+            Some(StreamId { ms: 10, seq: 40 }),
+            Some(3),
+            false,
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn async_reverse_stream_range_is_bounded_and_preserves_inclusive_ids() {
+    let db = test_db();
+    for seq in 0..100 {
+        db.stream_add_async(
+            "reverse-events",
+            Some(StreamId { ms: 10, seq }),
+            &[("v".to_string(), seq.to_string())],
+        )
+        .await
+        .unwrap();
+    }
+
+    let entries = db
+        .stream_range_async(
+            "reverse-events",
+            Some(StreamId { ms: 10, seq: 40 }),
+            Some(StreamId { ms: 10, seq: 80 }),
+            Some(3),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["10-80", "10-79", "10-78"]
+    );
+}
+
+#[tokio::test]
+async fn async_stream_add_batch_preserves_ordered_ids_replies_and_final_metadata() {
+    let db = test_db();
+    let replies = db
+        .stream_add_batch_async(&[
+            (
+                "batch-events",
+                Some(StreamId { ms: 10, seq: 0 }),
+                vec![("f", "a")],
+            ),
+            (
+                "batch-events",
+                Some(StreamId { ms: 9, seq: 0 }),
+                vec![("f", "rejected")],
+            ),
+            (
+                "batch-events",
+                Some(StreamId { ms: 10, seq: 1 }),
+                vec![("f", "b")],
+            ),
+            (
+                "batch-events-2",
+                Some(StreamId { ms: 1, seq: 0 }),
+                vec![("f", "other")],
+            ),
+        ])
+        .await;
+
+    assert_eq!(replies[0].as_ref().unwrap().to_redis_id(), "10-0");
+    assert!(replies[1].is_err());
+    assert_eq!(replies[2].as_ref().unwrap().to_redis_id(), "10-1");
+    assert_eq!(replies[3].as_ref().unwrap().to_redis_id(), "1-0");
+    assert_eq!(db.stream_len_async("batch-events").await.unwrap(), 2);
+    assert_eq!(db.stream_len_async("batch-events-2").await.unwrap(), 1);
+    let entries = db
+        .stream_range_async("batch-events", None, None, Some(10), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["10-0", "10-1"]
+    );
+}
+
 #[test]
 fn stream_reverse_range_and_xread_semantics() {
     let db = test_db();
@@ -363,4 +487,52 @@ async fn stream_async_missing_mkstream_trim_delete_and_group_edges() {
         1
     );
     assert_eq!(db.stream_len_async("events").await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn ordered_xdel_pipeline_batch_preserves_per_command_counts() {
+    let db = test_db();
+    for ms in 1..=4 {
+        db.stream_add_async(
+            "events",
+            Some(StreamId { ms, seq: 0 }),
+            &[("f".to_string(), ms.to_string())],
+        )
+        .await
+        .unwrap();
+    }
+
+    let replies = db
+        .stream_delete_batch_async(&[
+            (
+                "events",
+                vec![
+                    StreamId { ms: 1, seq: 0 },
+                    StreamId { ms: 1, seq: 0 },
+                    StreamId { ms: 9, seq: 0 },
+                ],
+            ),
+            (
+                "events",
+                vec![StreamId { ms: 1, seq: 0 }, StreamId { ms: 2, seq: 0 }],
+            ),
+            ("missing", vec![StreamId { ms: 1, seq: 0 }]),
+        ])
+        .await;
+    assert_eq!(
+        replies.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
+        vec![1, 1, 0]
+    );
+    assert_eq!(db.stream_len_async("events").await.unwrap(), 2);
+    let remaining = db
+        .stream_range_async("events", None, None, None, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["3-0", "4-0"]
+    );
 }

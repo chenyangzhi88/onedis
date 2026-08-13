@@ -60,6 +60,44 @@ impl Db {
         }))
     }
 
+    /// Fetch several vector documents with one metadata read and one storage multi-get.
+    pub async fn vector_elements_async(
+        &self,
+        index: &str,
+        ids: &[String],
+    ) -> Result<Vec<Option<VectorElement>>, Error> {
+        let (_, version, _) = match self.read_vector_meta_async(index).await {
+            Ok(value) => value,
+            Err(err) if err.to_string() == "ERR vector index does not exist" => {
+                return Ok(vec![None; ids.len()]);
+            }
+            Err(err) => return Err(err),
+        };
+        let keys = ids
+            .iter()
+            .map(|id| vector_doc_key(self.key_layout, self.db_index, index, version, id))
+            .collect::<Vec<_>>();
+        self.store
+            .multi_get_raw_async(&keys)
+            .await
+            .into_iter()
+            .map(|raw| {
+                let Some(raw) = raw else {
+                    return Ok(None);
+                };
+                let doc = decode_record::<VectorDocRecord>(&raw)?;
+                if doc.deleted {
+                    Ok(None)
+                } else {
+                    Ok(Some(VectorElement {
+                        vector: doc.vector,
+                        attrs_json: doc.attrs_json,
+                    }))
+                }
+            })
+            .collect()
+    }
+
     pub fn vector_set_attrs(
         &self,
         index: &str,

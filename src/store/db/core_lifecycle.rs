@@ -142,6 +142,17 @@ impl Db {
         guards
     }
 
+    pub(in crate::store::db) async fn lock_read_shards(
+        &self,
+        shards: &[usize],
+    ) -> Vec<tokio::sync::RwLockReadGuard<'_, ()>> {
+        let mut guards = Vec::with_capacity(shards.len());
+        for &shard in shards {
+            guards.push(self.key_write_locks[shard].read().await);
+        }
+        guards
+    }
+
     fn transaction_write_lock_shards(&self, keys: &[(u16, Vec<u8>)]) -> Vec<usize> {
         let mut shards = keys
             .iter()

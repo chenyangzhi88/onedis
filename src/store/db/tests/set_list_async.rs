@@ -1,6 +1,155 @@
 use super::*;
 
 #[tokio::test]
+async fn ordered_set_pipeline_batch_preserves_replies_and_final_members() {
+    let db = test_db();
+    let replies = db
+        .apply_set_batch_mutations_async(&[
+            SetBatchMutation::Add {
+                key: "batch-set",
+                members: vec!["a", "b", "a"],
+            },
+            SetBatchMutation::Add {
+                key: "batch-set",
+                members: vec!["b", "c"],
+            },
+            SetBatchMutation::Remove {
+                key: "batch-set",
+                members: vec!["a", "missing", "a"],
+            },
+        ])
+        .await;
+    assert!(matches!(replies[0], Ok(2)));
+    assert!(matches!(replies[1], Ok(1)));
+    assert!(matches!(replies[2], Ok(1)));
+    assert_eq!(db.set_len_async("batch-set").await.unwrap(), 2);
+    assert!(!db.set_contains_async("batch-set", "a").await.unwrap());
+    assert!(db.set_contains_async("batch-set", "b").await.unwrap());
+    assert!(db.set_contains_async("batch-set", "c").await.unwrap());
+
+    db.insert_string("wrong-set".to_string(), "value".to_string(), None);
+    let replies = db
+        .apply_set_batch_mutations_async(&[SetBatchMutation::Add {
+            key: "wrong-set",
+            members: vec!["x"],
+        }])
+        .await;
+    assert!(replies[0].is_err());
+
+    let replies = db
+        .apply_set_batch_mutations_async(&[
+            SetBatchMutation::Add {
+                key: "transient-set",
+                members: vec!["x"],
+            },
+            SetBatchMutation::Remove {
+                key: "transient-set",
+                members: vec!["x"],
+            },
+        ])
+        .await;
+    assert!(matches!(replies[0], Ok(1)));
+    assert!(matches!(replies[1], Ok(1)));
+    assert!(!db.exists_readonly("transient-set"));
+}
+
+#[tokio::test]
+async fn set_random_members_preserve_distinct_and_replacement_semantics() {
+    let db = test_db();
+    db.set_add(
+        "random-set",
+        &(0..20)
+            .map(|index| format!("m{index:02}"))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.set_random_members_async("random-set", None)
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
+        1
+    );
+    let distinct = db
+        .set_random_members_async("random-set", Some(10))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(distinct.len(), 10);
+    assert_eq!(distinct.iter().collect::<HashSet<_>>().len(), 10);
+    assert_eq!(
+        db.set_random_members_async("random-set", Some(-25))
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
+        25
+    );
+    let (next, members) = db.set_scan_async("random-set", 7, "*", 3).await.unwrap();
+    assert_eq!(next, 10);
+    assert_eq!(members, vec!["m07", "m08", "m09"]);
+}
+
+#[tokio::test]
+async fn ordered_list_pop_pipeline_batch_preserves_both_ends_and_empty_replies() {
+    let db = test_db();
+    db.list_push_right(
+        "batch-list",
+        &["a".to_string(), "b".to_string(), "c".to_string()],
+        false,
+    )
+    .unwrap();
+    let replies = db
+        .list_pop_batch_async(&[
+            ("batch-list", true),
+            ("batch-list", false),
+            ("batch-list", true),
+            ("batch-list", false),
+            ("missing-list", true),
+        ])
+        .await;
+    assert!(matches!(&replies[0], Ok(Some(value)) if value == b"a"));
+    assert!(matches!(&replies[1], Ok(Some(value)) if value == b"c"));
+    assert!(matches!(&replies[2], Ok(Some(value)) if value == b"b"));
+    assert!(matches!(replies[3], Ok(None)));
+    assert!(matches!(replies[4], Ok(None)));
+    assert!(!db.exists_readonly("batch-list"));
+
+    db.insert_string("wrong-list".to_string(), "value".to_string(), None);
+    let replies = db.list_pop_batch_async(&[("wrong-list", true)]).await;
+    assert!(replies[0].is_err());
+
+    db.list_push_right(
+        "counted-list",
+        &[
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ],
+        false,
+    )
+    .unwrap();
+    let replies = db
+        .list_pop_many_batch_async(&[
+            ("counted-list", true, 2),
+            ("counted-list", false, 1),
+            ("counted-list", true, 0),
+            ("counted-list", false, 4),
+        ])
+        .await;
+    assert_eq!(
+        replies[0].as_ref().unwrap(),
+        &[b"a".to_vec(), b"b".to_vec()]
+    );
+    assert_eq!(replies[1].as_ref().unwrap(), &[b"d".to_vec()]);
+    assert!(replies[2].as_ref().unwrap().is_empty());
+    assert_eq!(replies[3].as_ref().unwrap(), &[b"c".to_vec()]);
+    assert!(!db.exists_readonly("counted-list"));
+}
+
+#[tokio::test]
 async fn async_set_and_zset_scan_helpers_match_sync_results() {
     let db = test_db();
     db.set_add(

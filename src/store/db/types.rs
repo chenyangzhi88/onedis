@@ -92,6 +92,95 @@ pub enum StringExpireUpdate {
     AbsoluteMs(u64),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum StringBatchMutation<'a> {
+    Append {
+        key: &'a str,
+        value: &'a [u8],
+    },
+    GetSet {
+        key: &'a str,
+        value: &'a [u8],
+    },
+    GetDel {
+        key: &'a str,
+    },
+    SetNx {
+        key: &'a str,
+        value: &'a [u8],
+    },
+    SetBit {
+        key: &'a str,
+        offset: usize,
+        bit: u8,
+    },
+    SetRange {
+        key: &'a str,
+        offset: usize,
+        value: &'a [u8],
+    },
+    Psetex {
+        key: &'a str,
+        ttl_ms: u64,
+        value: &'a [u8],
+    },
+}
+
+impl StringBatchMutation<'_> {
+    pub(crate) fn key(&self) -> &str {
+        match self {
+            Self::Append { key, .. }
+            | Self::GetDel { key }
+            | Self::GetSet { key, .. }
+            | Self::SetNx { key, .. }
+            | Self::SetBit { key, .. }
+            | Self::SetRange { key, .. }
+            | Self::Psetex { key, .. } => key,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StringBatchReply {
+    Bulk(Option<Vec<u8>>),
+    Integer(i64),
+    Ok,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum KeyExpirationBatchMutation<'a> {
+    Expire { key: &'a str, ttl_ms: u64 },
+    Persist { key: &'a str },
+}
+
+#[derive(Clone)]
+pub(crate) enum SetBatchMutation<'a> {
+    Add { key: &'a str, members: Vec<&'a str> },
+    Remove { key: &'a str, members: Vec<&'a str> },
+}
+
+impl SetBatchMutation<'_> {
+    pub(crate) fn key(&self) -> &str {
+        match self {
+            Self::Add { key, .. } | Self::Remove { key, .. } => key,
+        }
+    }
+
+    pub(crate) fn members(&self) -> &[&str] {
+        match self {
+            Self::Add { members, .. } | Self::Remove { members, .. } => members,
+        }
+    }
+}
+
+impl KeyExpirationBatchMutation<'_> {
+    pub(crate) fn key(&self) -> &str {
+        match self {
+            Self::Expire { key, .. } | Self::Persist { key } => key,
+        }
+    }
+}
+
 /// Redis reserves the upper two bits of its 48-bit hash-field expiry timestamp.
 pub const HASH_FIELD_MAX_EXPIRE_MS: u64 = 0x3fff_ffff_ffff;
 
@@ -211,6 +300,10 @@ pub(crate) struct CounterCacheRuntime {
     pub(in crate::store::db) hash_lengths: DashMap<(u16, Vec<u8>), HashLenCacheEntry>,
     pub(in crate::store::db) hash_key_epochs: DashMap<(u16, Vec<u8>), u64>,
     pub(in crate::store::db) hash_ever_populated: AtomicBool,
+    pub(in crate::store::db) zset_lengths: DashMap<(u16, Vec<u8>), ZsetLenCacheEntry>,
+    pub(in crate::store::db) zset_key_epochs: DashMap<(u16, Vec<u8>), u64>,
+    pub(in crate::store::db) zset_db_epochs: DashMap<u16, u64>,
+    pub(in crate::store::db) zset_ever_populated: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -226,6 +319,14 @@ pub(in crate::store::db) struct HashLenCacheEntry {
     pub(in crate::store::db) len: usize,
     pub(in crate::store::db) version: u64,
     pub(in crate::store::db) key_epoch: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::store::db) struct ZsetLenCacheEntry {
+    pub(in crate::store::db) len: usize,
+    pub(in crate::store::db) version: u64,
+    pub(in crate::store::db) key_epoch: u64,
+    pub(in crate::store::db) db_epoch: u64,
 }
 
 impl CounterCacheRuntime {
@@ -249,6 +350,16 @@ impl CounterCacheRuntime {
                 .retain(|(cached_db, _), _| *cached_db != db_index);
             self.hash_key_epochs
                 .retain(|(cached_db, _), _| *cached_db != db_index);
+        }
+        if self.zset_ever_populated.load(Ordering::Acquire) {
+            self.zset_lengths
+                .retain(|(cached_db, _), _| *cached_db != db_index);
+            self.zset_key_epochs
+                .retain(|(cached_db, _), _| *cached_db != db_index);
+            self.zset_db_epochs
+                .entry(db_index)
+                .and_modify(|epoch| *epoch = epoch.wrapping_add(1))
+                .or_insert(1);
         }
     }
 
@@ -287,6 +398,37 @@ impl CounterCacheRuntime {
             self.hash_entries.clear();
             self.hash_routes.clear();
             self.hash_lengths.clear();
+        }
+    }
+
+    pub(crate) fn zset_key_epoch(&self, db_index: u16, key: &[u8]) -> u64 {
+        self.zset_key_epochs
+            .get(&(db_index, key.to_vec()))
+            .map(|epoch| *epoch)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn zset_db_epoch(&self, db_index: u16) -> u64 {
+        self.zset_db_epochs
+            .get(&db_index)
+            .map(|epoch| *epoch)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn invalidate_zset_key(&self, db_index: u16, key: &[u8]) {
+        if !self.zset_ever_populated.load(Ordering::Acquire) {
+            return;
+        }
+        self.zset_lengths.remove(&(db_index, key.to_vec()));
+        self.zset_key_epochs
+            .entry((db_index, key.to_vec()))
+            .and_modify(|epoch| *epoch = epoch.wrapping_add(1))
+            .or_insert(1);
+    }
+
+    pub(crate) fn evict_zset_if_full(&self) {
+        if self.zset_lengths.len() >= COUNTER_CACHE_MAX_ENTRIES {
+            self.zset_lengths.clear();
         }
     }
 }

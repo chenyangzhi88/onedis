@@ -1,4 +1,242 @@
 impl Handler {
+    async fn handle_borrowed_key_delete_commands(
+        &self,
+        commands: &[BorrowedKeyDeleteCommand<'_>],
+    ) -> Vec<u8> {
+        let keys = commands
+            .iter()
+            .map(|(_, keys)| keys.clone())
+            .collect::<Vec<_>>();
+        let replies = self
+            .session
+            .get_db()
+            .delete_key_commands_batch_async(&keys)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 4);
+        for reply in replies {
+            append_integer(&mut out, reply as i64);
+        }
+        out
+    }
+
+    async fn handle_borrowed_zset_increment_commands(
+        &self,
+        commands: &[BorrowedZsetIncrementCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .zset_increment_batch_async(commands)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 16);
+        for reply in replies {
+            match reply {
+                Ok(score) => append_bulk_string(&mut out, score.to_string().as_bytes()),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_xdel_commands(
+        &self,
+        commands: &[BorrowedStreamDeleteCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .stream_delete_batch_async(commands)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 4);
+        for reply in replies {
+            match reply {
+                Ok(deleted) => append_integer(&mut out, deleted as i64),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_zset_pop_commands(
+        &self,
+        commands: &[BorrowedZsetPopCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = self.session.get_db().zset_pop_batch_async(commands).await;
+        let mut out = Vec::new();
+        for reply in replies {
+            match reply {
+                Ok(entries) => {
+                    let response_bytes = entries.iter().try_fold(32usize, |bytes, (member, score)| {
+                        bytes
+                            .checked_add(member.len())?
+                            .checked_add(score.to_string().len())?
+                            .checked_add(64)
+                            .filter(|bytes| *bytes <= crate::frame::MAX_FRAME_BYTES)
+                    });
+                    if response_bytes.is_none() {
+                        append_error(&mut out, "ERR response exceeds configured limit");
+                        continue;
+                    }
+                    append_array_len(&mut out, entries.len().saturating_mul(2));
+                    for (member, score) in entries {
+                        append_bulk_string(&mut out, member.as_bytes());
+                        append_bulk_string(&mut out, score.to_string().as_bytes());
+                    }
+                }
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_list_pop_commands(
+        &self,
+        commands: &[BorrowedListPopCommand<'_>],
+    ) -> Vec<u8> {
+        let db_commands = commands
+            .iter()
+            .map(|(key, left, count)| (*key, *left, count.unwrap_or(1)))
+            .collect::<Vec<_>>();
+        let replies = self
+            .session
+            .get_db()
+            .list_pop_many_batch_async(&db_commands)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 16);
+        for ((_, _, count), reply) in commands.iter().zip(replies) {
+            match (count, reply) {
+                (None, Ok(values)) => {
+                    if let Some(value) = values.into_iter().next() {
+                        append_bulk_string(&mut out, &value);
+                    } else {
+                        append_null(&mut out);
+                    }
+                }
+                (Some(_), Ok(values)) => {
+                    append_array_len(&mut out, values.len());
+                    for value in values {
+                        append_bulk_string(&mut out, &value);
+                    }
+                }
+                (_, Err(error)) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_set_mutations(
+        &self,
+        mutations: &[SetBatchMutation<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .apply_set_batch_mutations_async(mutations)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 4);
+        for reply in replies {
+            match reply {
+                Ok(changed) => append_integer(&mut out, changed as i64),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_pfadd_commands(
+        &self,
+        commands: &[BorrowedHllAddCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = self.session.get_db().hll_add_batch_async(commands).await;
+        let mut out = Vec::with_capacity(replies.len() * 4);
+        for reply in replies {
+            match reply {
+                Ok(changed) => append_integer(&mut out, i64::from(changed)),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_root_json_set_commands(
+        &self,
+        commands: &[BorrowedRootJsonSetCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .json_set_root_batch_async(commands)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 8);
+        for reply in replies {
+            match reply {
+                Ok(()) => out.extend_from_slice(b"+OK\r\n"),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_xadd_commands(
+        &self,
+        commands: &[BorrowedStreamAddCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .stream_add_batch_async(commands)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 24);
+        for reply in replies {
+            match reply {
+                Ok(id) => append_bulk_string(&mut out, id.to_redis_id().as_bytes()),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_key_expiration_mutations(
+        &self,
+        mutations: &[KeyExpirationBatchMutation<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .apply_key_expiration_batch_async(mutations)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 4);
+        for reply in replies {
+            match reply {
+                Ok(value) => append_integer(&mut out, value),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_string_mutations(
+        &self,
+        mutations: &[StringBatchMutation<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .apply_string_batch_mutations_async(mutations)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 16);
+        for reply in replies {
+            match reply {
+                Ok(StringBatchReply::Bulk(Some(value))) => append_bulk_string(&mut out, &value),
+                Ok(StringBatchReply::Bulk(None)) => append_null(&mut out),
+                Ok(StringBatchReply::Integer(value)) => append_integer(&mut out, value),
+                Ok(StringBatchReply::Ok) => out.extend_from_slice(b"+OK\r\n"),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
     async fn handle_borrowed_set_commands(&self, commands: Vec<Vec<&[u8]>>) -> Vec<u8> {
         let db = self.session.get_db().clone();
         let mut out = Vec::with_capacity(commands.len() * 5);

@@ -34,14 +34,16 @@ impl Zmscore {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let mut result = Vec::with_capacity(self.members.len());
-        for member in self.members {
-            match db.zset_score_async(&self.key, &member).await {
-                Ok(Some(score)) => result.push(Frame::bulk_string(score.to_string())),
-                Ok(None) => result.push(Frame::Null),
-                Err(err) => return Ok(Frame::Error(err.to_string())),
-            }
+        match db.zset_multi_score_async(&self.key, &self.members).await {
+            Ok(scores) => Ok(Frame::Array(
+                scores
+                    .into_iter()
+                    .map(|score| {
+                        score.map_or(Frame::Null, |score| Frame::bulk_string(score.to_string()))
+                    })
+                    .collect(),
+            )),
+            Err(err) => Ok(Frame::Error(err.to_string())),
         }
-        Ok(Frame::Array(result))
     }
 }

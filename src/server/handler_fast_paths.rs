@@ -115,6 +115,99 @@ impl Handler {
             self.observe_fast_command_batch("HGETDEL", count);
             return Some(response);
         }
+        if let Some(mutations) = parse_borrowed_string_mutations(&commands) {
+            let names = borrowed_fast_names(&commands);
+            let response = self.handle_borrowed_string_mutations(&mutations).await;
+            self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
+            return Some(response);
+        }
+        if let Some(mutations) = parse_borrowed_key_expiration_mutations(&commands) {
+            let names = borrowed_fast_names(&commands);
+            let response = self
+                .handle_borrowed_key_expiration_mutations(&mutations)
+                .await;
+            self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_plain_xadd_commands(&commands) {
+            let count = commands.len();
+            let response = self.handle_borrowed_xadd_commands(&commands).await;
+            self.db_manager.notify_stream_waiters();
+            self.record_fast_command_batch("XADD", count, started, &response);
+            self.observe_fast_command_batch("XADD", count);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_plain_xdel_commands(&commands) {
+            let count = commands.len();
+            let response = self.handle_borrowed_xdel_commands(&commands).await;
+            self.record_fast_command_batch("XDEL", count, started, &response);
+            self.observe_fast_command_batch("XDEL", count);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_root_json_set_commands(&commands) {
+            let count = commands.len();
+            let response = self
+                .handle_borrowed_root_json_set_commands(&commands)
+                .await;
+            self.record_fast_command_batch("JSON.SET", count, started, &response);
+            self.observe_fast_command_batch("JSON.SET", count);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_plain_pfadd_commands(&commands) {
+            let count = commands.len();
+            let response = self.handle_borrowed_pfadd_commands(&commands).await;
+            self.record_fast_command_batch("PFADD", count, started, &response);
+            self.observe_fast_command_batch("PFADD", count);
+            return Some(response);
+        }
+        if let Some(mutations) = parse_borrowed_set_mutations(&commands) {
+            let names = borrowed_fast_names(&commands);
+            let response = self.handle_borrowed_set_mutations(&mutations).await;
+            self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_plain_list_pop_commands(&commands) {
+            let names = commands
+                .iter()
+                .map(|(_, left, _)| if *left { "LPOP" } else { "RPOP" })
+                .collect::<Vec<_>>();
+            let response = self.handle_borrowed_list_pop_commands(&commands).await;
+            self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_plain_zset_pop_commands(&commands) {
+            let names = commands
+                .iter()
+                .map(|(_, min, _)| if *min { "ZPOPMIN" } else { "ZPOPMAX" })
+                .collect::<Vec<_>>();
+            let response = self.handle_borrowed_zset_pop_commands(&commands).await;
+            self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_zset_increment_commands(&commands) {
+            let count = commands.len();
+            let response = self
+                .handle_borrowed_zset_increment_commands(&commands)
+                .await;
+            self.record_fast_command_batch("ZINCRBY", count, started, &response);
+            self.observe_fast_command_batch("ZINCRBY", count);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_key_delete_commands(&commands) {
+            let names = commands
+                .iter()
+                .map(|(unlink, _)| if *unlink { "UNLINK" } else { "DEL" })
+                .collect::<Vec<_>>();
+            let response = self.handle_borrowed_key_delete_commands(&commands).await;
+            self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
+            return Some(response);
+        }
         if commands.iter().all(|args| borrowed_read_supported(args)) {
             let names = borrowed_fast_names(&commands);
             let response = self.handle_borrowed_read_commands(commands).await;

@@ -6,9 +6,92 @@ pub type HashRandomFields = Vec<HashRandomField>;
 pub type HashRandomFieldBytes = (String, Option<Vec<u8>>);
 pub type HashRandomFieldsBytes = Vec<HashRandomFieldBytes>;
 
+enum HashMultiGetPlan {
+    Missing(usize),
+    Error(String),
+    Fields {
+        lookup: usize,
+        expire_lookup: usize,
+        count: usize,
+        may_have_field_ttl: bool,
+    },
+}
+
 const MAX_HASH_RANDOM_RESPONSE_ITEMS: u64 = 1_000_000;
 
 impl Db {
+    pub(crate) async fn hash_len_batch_async(
+        &self,
+        command_keys: &[&str],
+    ) -> Vec<Result<usize, Error>> {
+        let mut key_positions = HashMap::with_capacity(command_keys.len());
+        let mut keys = Vec::new();
+        for key in command_keys {
+            if !key_positions.contains_key(key) {
+                key_positions.insert(*key, keys.len());
+                keys.push(*key);
+            }
+        }
+        let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let now = now_ms();
+        let mut lengths = Vec::with_capacity(keys.len());
+        for (key, raw) in keys.iter().zip(metas) {
+            let result = match raw {
+                None => Ok(0),
+                Some(raw) => match decode_hash_meta_checked(&raw) {
+                    Err(error) => Err(error.to_string()),
+                    Ok(meta) if meta.expire_ms > 0 && now >= meta.expire_ms => Ok(0),
+                    Ok(meta) if meta.may_have_field_ttl => {
+                        Ok(self.hash_live_entries_for_meta_async(key, meta).await.len())
+                    }
+                    Ok(meta) => {
+                        let logical_key = key.as_bytes().to_vec();
+                        let key_epoch = self
+                            .counter_cache
+                            .hash_key_epoch(self.db_index, &logical_key);
+                        let cache_key = (self.db_index, logical_key);
+                        if let Some(cached) = self.counter_cache.hash_lengths.get(&cache_key)
+                            && cached.version == meta.version
+                            && cached.key_epoch == key_epoch
+                        {
+                            Ok(cached.len)
+                        } else {
+                            let prefix = hash_field_prefix(self.db_index, key, meta.version);
+                            let len = self
+                                .store
+                                .count_range_raw_keys_async(
+                                    &prefix,
+                                    prefix_exclusive_upper_bound(&prefix),
+                                )
+                                .await;
+                            self.counter_cache
+                                .hash_ever_populated
+                                .store(true, Ordering::Release);
+                            self.counter_cache.hash_lengths.insert(
+                                cache_key,
+                                HashLenCacheEntry {
+                                    len,
+                                    version: meta.version,
+                                    key_epoch,
+                                },
+                            );
+                            Ok(len)
+                        }
+                    }
+                },
+            };
+            lengths.push(result);
+        }
+        command_keys
+            .iter()
+            .map(|key| match &lengths[key_positions[key]] {
+                Ok(len) => Ok(*len),
+                Err(message) => Err(Error::msg(message.clone())),
+            })
+            .collect()
+    }
+
     pub fn hash_exists(&self, key: &str, field: &str) -> Result<bool, Error> {
         let meta = self.hash_expire_ms(key)?;
         let Some((_, version)) = meta else {
@@ -64,7 +147,11 @@ impl Db {
         {
             return Ok(cached.len);
         }
-        let len = self.hash_live_entries_for_meta_async(key, meta).await.len();
+        let prefix = hash_field_prefix(self.db_index, key, meta.version);
+        let len = self
+            .store
+            .count_range_raw_keys_async(&prefix, prefix_exclusive_upper_bound(&prefix))
+            .await;
         self.counter_cache
             .hash_ever_populated
             .store(true, Ordering::Release);
@@ -152,6 +239,103 @@ impl Db {
             }
         }
         Ok(values)
+    }
+
+    /// Batch independent Hash reads across a client pipeline. All metadata, field values and
+    /// optional field-expiry records are fetched in at most three storage multi-gets.
+    pub(crate) async fn hash_multi_get_bytes_batch_async(
+        &self,
+        commands: &[(&str, Vec<String>)],
+    ) -> Vec<Result<Vec<Option<Vec<u8>>>, Error>> {
+        let meta_keys = commands
+            .iter()
+            .map(|(key, _)| self.mk(key))
+            .collect::<Vec<_>>();
+        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let now = now_ms();
+        let mut field_keys = Vec::new();
+        let mut expire_keys = Vec::new();
+        let mut plans = Vec::with_capacity(commands.len());
+
+        for ((key, fields), raw) in commands.iter().zip(metas) {
+            let Some(raw) = raw else {
+                plans.push(HashMultiGetPlan::Missing(fields.len()));
+                continue;
+            };
+            let Some(header) = decode_meta_header(&raw) else {
+                plans.push(HashMultiGetPlan::Error(
+                    "Failed to decode hash metadata".to_string(),
+                ));
+                continue;
+            };
+            if header.expire_ms > 0 && now >= header.expire_ms {
+                plans.push(HashMultiGetPlan::Missing(fields.len()));
+                continue;
+            }
+            if header.type_tag != TYPE_HASH {
+                plans.push(HashMultiGetPlan::Error(WRONG_TYPE_ERROR.to_string()));
+                continue;
+            }
+            let Some(meta) = decode_hash_meta(&raw) else {
+                plans.push(HashMultiGetPlan::Error(
+                    "Failed to decode hash metadata".to_string(),
+                ));
+                continue;
+            };
+            let lookup = field_keys.len();
+            field_keys.extend(
+                fields
+                    .iter()
+                    .map(|field| hash_field_key(self.db_index, key, meta.version, field)),
+            );
+            let expire_lookup = expire_keys.len();
+            if meta.may_have_field_ttl {
+                expire_keys.extend(
+                    fields.iter().map(|field| {
+                        hash_field_expire_key(self.db_index, key, meta.version, field)
+                    }),
+                );
+            }
+            plans.push(HashMultiGetPlan::Fields {
+                lookup,
+                expire_lookup,
+                count: fields.len(),
+                may_have_field_ttl: meta.may_have_field_ttl,
+            });
+        }
+
+        let values = self.store.multi_get_raw_async(&field_keys).await;
+        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        plans
+            .into_iter()
+            .map(|plan| match plan {
+                HashMultiGetPlan::Missing(count) => Ok(vec![None; count]),
+                HashMultiGetPlan::Error(message) => Err(Error::msg(message)),
+                HashMultiGetPlan::Fields {
+                    lookup,
+                    expire_lookup,
+                    count,
+                    may_have_field_ttl,
+                } => {
+                    let mut reply = values[lookup..lookup.saturating_add(count)].to_vec();
+                    if may_have_field_ttl {
+                        for (value, expire) in reply
+                            .iter_mut()
+                            .zip(&expires[expire_lookup..expire_lookup.saturating_add(count)])
+                        {
+                            if expire
+                                .as_deref()
+                                .and_then(decode_u64_be)
+                                .is_some_and(|expire_ms| expire_ms > 0 && now >= expire_ms)
+                            {
+                                *value = None;
+                            }
+                        }
+                    }
+                    Ok(reply)
+                }
+            })
+            .collect()
     }
 
     /// 返回 hash 所有 field/value。

@@ -144,23 +144,17 @@ impl Zrange {
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let result = match self.range {
             ZrangeBounds::Rank(start, stop) => db.zset_range(&self.key, start, stop, self.reverse),
-            ZrangeBounds::Score(min, max) => db
-                .zset_range_by_score(&self.key, min.value, max.value)
-                .map(|mut entries| {
-                    entries.retain(|(_, score)| score_in_range(*score, min, max));
-                    if self.reverse {
-                        entries.reverse();
-                    }
-                    apply_limit(entries, self.limit)
-                }),
+            ZrangeBounds::Score(min, max) => db.zset_range_by_score_window(
+                &self.key,
+                min.value,
+                min.inclusive,
+                max.value,
+                max.inclusive,
+                self.reverse,
+                self.limit,
+            ),
             ZrangeBounds::Lex(min, max) => {
-                db.zset_range_by_lex(&self.key, &min, &max)
-                    .map(|mut entries| {
-                        if self.reverse {
-                            entries.reverse();
-                        }
-                        apply_limit(entries, self.limit)
-                    })
+                db.zset_range_by_lex_window(&self.key, &min, &max, self.reverse, self.limit)
             }
         };
         match result {
@@ -175,25 +169,22 @@ impl Zrange {
                 db.zset_range_async(&self.key, start, stop, self.reverse)
                     .await
             }
-            ZrangeBounds::Score(min, max) => db
-                .zset_range_by_score_async(&self.key, min.value, max.value)
+            ZrangeBounds::Score(min, max) => {
+                db.zset_range_by_score_window_async(
+                    &self.key,
+                    min.value,
+                    min.inclusive,
+                    max.value,
+                    max.inclusive,
+                    self.reverse,
+                    self.limit,
+                )
                 .await
-                .map(|mut entries| {
-                    entries.retain(|(_, score)| score_in_range(*score, min, max));
-                    if self.reverse {
-                        entries.reverse();
-                    }
-                    apply_limit(entries, self.limit)
-                }),
-            ZrangeBounds::Lex(min, max) => db
-                .zset_range_by_lex_async(&self.key, &min, &max)
-                .await
-                .map(|mut entries| {
-                    if self.reverse {
-                        entries.reverse();
-                    }
-                    apply_limit(entries, self.limit)
-                }),
+            }
+            ZrangeBounds::Lex(min, max) => {
+                db.zset_range_by_lex_window_async(&self.key, &min, &max, self.reverse, self.limit)
+                    .await
+            }
         };
         match result {
             Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
@@ -215,29 +206,6 @@ pub(crate) fn parse_score_bound(input: &str) -> Result<ScoreBound, Error> {
         return Err(Error::msg("ERR min or max is not a float"));
     }
     Ok(ScoreBound { value, inclusive })
-}
-
-pub(crate) fn score_in_range(score: f64, min: ScoreBound, max: ScoreBound) -> bool {
-    (score > min.value || (min.inclusive && score == min.value))
-        && (score < max.value || (max.inclusive && score == max.value))
-}
-
-pub(crate) fn apply_limit<T>(entries: Vec<T>, limit: Option<(i64, i64)>) -> Vec<T> {
-    let Some((offset, count)) = limit else {
-        return entries;
-    };
-    if offset < 0 || count == 0 {
-        return Vec::new();
-    }
-    let Ok(offset) = usize::try_from(offset) else {
-        return Vec::new();
-    };
-    let entries = entries.into_iter().skip(offset);
-    if count < 0 {
-        entries.collect()
-    } else {
-        entries.take(count as usize).collect()
-    }
 }
 
 pub(crate) fn flatten_entries(
@@ -285,38 +253,6 @@ pub(crate) fn parse_lex_bound(input: &str) -> Result<LexBound, Error> {
                 value: chars.collect(),
                 inclusive,
             })
-        }
-    }
-}
-
-pub(crate) fn lex_member_in_range(member: &str, min: &LexBound, max: &LexBound) -> bool {
-    lex_member_above_min(member, min) && lex_member_below_max(member, max)
-}
-
-fn lex_member_above_min(member: &str, min: &LexBound) -> bool {
-    match min {
-        LexBound::NegInfinity => true,
-        LexBound::PosInfinity => false,
-        LexBound::Value { value, inclusive } => {
-            if *inclusive {
-                member >= value.as_str()
-            } else {
-                member > value.as_str()
-            }
-        }
-    }
-}
-
-fn lex_member_below_max(member: &str, max: &LexBound) -> bool {
-    match max {
-        LexBound::PosInfinity => true,
-        LexBound::NegInfinity => false,
-        LexBound::Value { value, inclusive } => {
-            if *inclusive {
-                member <= value.as_str()
-            } else {
-                member < value.as_str()
-            }
         }
     }
 }

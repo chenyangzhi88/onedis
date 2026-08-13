@@ -15,6 +15,180 @@ const HLL_ALPHA_INF: f64 = 0.721_347_520_444_481_7;
 const INVALID_HLL_ERROR: &str = "WRONGTYPE Key is not a valid HyperLogLog string value.";
 
 impl Db {
+    pub(crate) async fn hll_count_batch_async(
+        &self,
+        commands: &[Vec<&str>],
+    ) -> Vec<Result<u64, Error>> {
+        let mut key_positions = HashMap::new();
+        let mut keys = Vec::new();
+        for command_keys in commands {
+            for key in command_keys {
+                if !key_positions.contains_key(key) {
+                    key_positions.insert(*key, keys.len());
+                    keys.push(*key);
+                }
+            }
+        }
+        let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let now = now_ms();
+        let decoded = self
+            .store
+            .multi_get_raw_async(&raw_keys)
+            .await
+            .into_iter()
+            .map(|raw| {
+                let Some(raw) = raw else {
+                    return Ok(None);
+                };
+                let expire_ms = decode_expire_ms(&raw);
+                if expire_ms > 0 && now >= expire_ms {
+                    return Ok(None);
+                }
+                let value =
+                    decode_string_bytes_slice(&raw).ok_or_else(|| WRONG_TYPE_ERROR.to_string())?;
+                decode_hll_registers(value)
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Vec<Result<Option<Vec<u8>>, String>>>();
+
+        let mut cached = HashMap::<Vec<usize>, Result<u64, String>>::new();
+        commands
+            .iter()
+            .map(|command_keys| {
+                let signature = command_keys
+                    .iter()
+                    .map(|key| key_positions[key])
+                    .collect::<Vec<_>>();
+                let result = cached.entry(signature.clone()).or_insert_with(|| {
+                    let mut registers = vec![0u8; HLL_REGISTERS];
+                    for position in &signature {
+                        let source = decoded[*position]
+                            .as_ref()
+                            .map_err(Clone::clone)?
+                            .as_deref();
+                        if let Some(source) = source {
+                            merge_registers(&mut registers, source)
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
+                    Ok(estimate_cardinality(&registers))
+                });
+                match result {
+                    Ok(count) => Ok(*count),
+                    Err(message) => Err(Error::msg(message.clone())),
+                }
+            })
+            .collect()
+    }
+
+    /// Apply an ordered PFADD pipeline with one decode and one storage write per distinct key.
+    /// Commands for the same key observe earlier commands and retain their individual 0/1 reply.
+    pub(crate) async fn hll_add_batch_async<'a>(
+        &self,
+        commands: &[(&'a str, Vec<&'a [u8]>)],
+    ) -> Vec<Result<bool, Error>> {
+        if commands.is_empty() {
+            return Vec::new();
+        }
+
+        let mut key_positions = HashMap::<&str, usize>::with_capacity(commands.len());
+        let mut keys = Vec::<&str>::with_capacity(commands.len());
+        for (key, _) in commands {
+            if !key_positions.contains_key(key) {
+                key_positions.insert(key, keys.len());
+                keys.push(key);
+            }
+        }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _write_guards = self.lock_write_shards(&shards).await;
+
+        for _ in 0..64 {
+            for key in &keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut states = observations
+                .iter()
+                .map(|observed| HllBatchState::from_raw(observed.value().map(AsRef::as_ref)))
+                .collect::<Vec<_>>();
+            let mut replies = Vec::with_capacity(commands.len());
+            let mut changed_commands = 0u64;
+
+            for (key, elements) in commands {
+                let state = &mut states[key_positions[key]];
+                let result = state.as_mut().map(|state| {
+                    let mut changed = !state.exists;
+                    for element in elements {
+                        changed |= register_add(&mut state.registers, element);
+                    }
+                    state.exists = true;
+                    state.dirty |= changed;
+                    changed
+                });
+                if result.as_ref().is_ok_and(|changed| *changed) {
+                    changed_commands += 1;
+                }
+                replies.push(result.map_err(|error| Error::msg(error.to_string())));
+            }
+
+            let dirty_positions = states
+                .iter()
+                .enumerate()
+                .filter_map(|(position, state)| {
+                    state
+                        .as_ref()
+                        .ok()
+                        .is_some_and(|state| state.dirty)
+                        .then_some(position)
+                })
+                .collect::<Vec<_>>();
+            if dirty_positions.is_empty() {
+                return replies;
+            }
+
+            let mut batch = WriteBatch::new();
+            for &position in &dirty_positions {
+                let state = states[position].as_ref().expect("dirty HLL state is valid");
+                self.write_string_to_batch_with_deferred_old_raw(
+                    &mut batch,
+                    keys[position],
+                    &encode_hll(&state.registers),
+                    state.expire_ms,
+                    observations[position].value().map(AsRef::as_ref),
+                );
+            }
+            let conditions = dirty_positions
+                .iter()
+                .map(|&position| CompareCondition::from_observed(&observations[position]))
+                .collect::<Vec<_>>();
+            match self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await
+            {
+                Ok(true) => {
+                    self.changes.fetch_add(changed_commands, Ordering::Relaxed);
+                    return replies;
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    let message = error.to_string();
+                    return commands
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+        }
+
+        commands
+            .iter()
+            .map(|_| Err(Error::msg("ERR HyperLogLog batch write conflict")))
+            .collect()
+    }
+
     pub fn hll_add(&self, key: &str, elements: &[Vec<u8>]) -> Result<bool, Error> {
         let existing = self.get_string_bytes(key)?;
         let created = existing.is_none();
@@ -69,10 +243,22 @@ impl Db {
 
     pub async fn hll_count_async(&self, keys: &[String]) -> Result<u64, Error> {
         let mut registers = vec![0u8; HLL_REGISTERS];
-        for key in keys {
-            if let Some(value) = self.get_string_bytes_async(key).await? {
-                merge_registers(&mut registers, &decode_hll_registers(&value)?)?;
+        let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let now = now_ms();
+        for raw in self
+            .store
+            .multi_get_raw_async(&raw_keys)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            let expire_ms = decode_expire_ms(&raw);
+            if expire_ms > 0 && now >= expire_ms {
+                continue;
             }
+            let value =
+                decode_string_bytes_slice(&raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+            merge_registers(&mut registers, &decode_hll_registers(value)?)?;
         }
         Ok(estimate_cardinality(&registers))
     }
@@ -106,13 +292,26 @@ impl Db {
         sources: &[String],
     ) -> Result<(), Error> {
         let mut source_registers = vec![0u8; HLL_REGISTERS];
-        for key in sources {
-            if key == destination {
+        let source_keys = sources
+            .iter()
+            .filter(|key| key.as_str() != destination)
+            .map(|key| self.mk(key))
+            .collect::<Vec<_>>();
+        let now = now_ms();
+        for raw in self
+            .store
+            .multi_get_raw_async(&source_keys)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            let expire_ms = decode_expire_ms(&raw);
+            if expire_ms > 0 && now >= expire_ms {
                 continue;
             }
-            if let Some(value) = self.get_string_bytes_async(key).await? {
-                merge_registers(&mut source_registers, &decode_hll_registers(&value)?)?;
-            }
+            let value =
+                decode_string_bytes_slice(&raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+            merge_registers(&mut source_registers, &decode_hll_registers(value)?)?;
         }
         self.mutate_string_bytes_if_changed_async(destination, |value, exists| {
             let mut registers = source_registers.clone();
@@ -123,6 +322,37 @@ impl Db {
             Ok(((), true))
         })
         .await
+    }
+}
+
+struct HllBatchState {
+    registers: Vec<u8>,
+    expire_ms: u64,
+    exists: bool,
+    dirty: bool,
+}
+
+impl HllBatchState {
+    fn from_raw(raw: Option<&[u8]>) -> Result<Self, Error> {
+        let Some(raw) = raw else {
+            return Ok(Self {
+                registers: vec![0u8; HLL_REGISTERS],
+                expire_ms: 0,
+                exists: false,
+                dirty: false,
+            });
+        };
+        let header = decode_meta_header(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+        if header.type_tag != TYPE_STRING {
+            return Err(Error::msg(WRONG_TYPE_ERROR));
+        }
+        let value = decode_string_bytes_slice(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+        Ok(Self {
+            registers: decode_hll_registers(value)?,
+            expire_ms: header.expire_ms,
+            exists: true,
+            dirty: false,
+        })
     }
 }
 

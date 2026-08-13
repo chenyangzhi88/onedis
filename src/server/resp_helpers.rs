@@ -137,10 +137,31 @@ fn borrowed_read_supported(args: &[&[u8]]) -> bool {
     command.eq_ignore_ascii_case(b"GET")
         || command.eq_ignore_ascii_case(b"MGET")
         || command.eq_ignore_ascii_case(b"EXISTS")
+        || command.eq_ignore_ascii_case(b"TOUCH")
         || command.eq_ignore_ascii_case(b"TTL")
         || command.eq_ignore_ascii_case(b"PTTL")
         || command.eq_ignore_ascii_case(b"STRLEN")
+        || command.eq_ignore_ascii_case(b"GETRANGE")
+        || command.eq_ignore_ascii_case(b"SUBSTR")
+        || command.eq_ignore_ascii_case(b"GETBIT")
+        || command.eq_ignore_ascii_case(b"BITCOUNT")
+        || command.eq_ignore_ascii_case(b"BITPOS")
         || command.eq_ignore_ascii_case(b"TYPE")
+        || command.eq_ignore_ascii_case(b"HGET")
+        || command.eq_ignore_ascii_case(b"HMGET")
+        || command.eq_ignore_ascii_case(b"HEXISTS")
+        || command.eq_ignore_ascii_case(b"HSTRLEN")
+        || command.eq_ignore_ascii_case(b"HLEN")
+        || command.eq_ignore_ascii_case(b"SISMEMBER")
+        || command.eq_ignore_ascii_case(b"SMISMEMBER")
+        || command.eq_ignore_ascii_case(b"SCARD")
+        || command.eq_ignore_ascii_case(b"ZSCORE")
+        || command.eq_ignore_ascii_case(b"ZMSCORE")
+        || command.eq_ignore_ascii_case(b"ZCARD")
+        || command.eq_ignore_ascii_case(b"LLEN")
+        || command.eq_ignore_ascii_case(b"XLEN")
+        || command.eq_ignore_ascii_case(b"PFCOUNT")
+        || command.eq_ignore_ascii_case(b"JSON.GET")
 }
 
 fn borrowed_plain_set_supported(args: &[&[u8]]) -> bool {
@@ -148,6 +169,332 @@ fn borrowed_plain_set_supported(args: &[&[u8]]) -> bool {
         && args
             .first()
             .is_some_and(|command| command.eq_ignore_ascii_case(b"SET"))
+}
+
+fn parse_borrowed_string_mutations<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<StringBatchMutation<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            let command = args.first()?;
+            let key = std::str::from_utf8(*args.get(1)?).ok()?;
+            if command.eq_ignore_ascii_case(b"APPEND") && args.len() == 3 {
+                Some(StringBatchMutation::Append {
+                    key,
+                    value: args[2],
+                })
+            } else if command.eq_ignore_ascii_case(b"GETSET") && args.len() == 3 {
+                Some(StringBatchMutation::GetSet {
+                    key,
+                    value: args[2],
+                })
+            } else if command.eq_ignore_ascii_case(b"GETDEL") && args.len() == 2 {
+                Some(StringBatchMutation::GetDel { key })
+            } else if command.eq_ignore_ascii_case(b"SETNX") && args.len() == 3 {
+                Some(StringBatchMutation::SetNx {
+                    key,
+                    value: args[2],
+                })
+            } else if command.eq_ignore_ascii_case(b"SETBIT") && args.len() == 4 {
+                let offset = parse_usize_ascii(args[2])?;
+                let bit = parse_u64_ascii(args[3])?;
+                if offset >= crate::frame::MAX_BULK_STRING_BYTES.saturating_mul(8) || bit > 1 {
+                    return None;
+                }
+                Some(StringBatchMutation::SetBit {
+                    key,
+                    offset,
+                    bit: bit as u8,
+                })
+            } else if command.eq_ignore_ascii_case(b"SETRANGE") && args.len() == 4 {
+                let offset = parse_i64_ascii(args[2])?;
+                Some(StringBatchMutation::SetRange {
+                    key,
+                    offset: usize::try_from(offset).ok()?,
+                    value: args[3],
+                })
+            } else if command.eq_ignore_ascii_case(b"PSETEX") && args.len() == 4 {
+                let ttl_ms = parse_u64_ascii(args[2])?;
+                (ttl_ms > 0).then_some(StringBatchMutation::Psetex {
+                    key,
+                    ttl_ms,
+                    value: args[3],
+                })
+            } else if command.eq_ignore_ascii_case(b"SETEX") && args.len() == 4 {
+                let seconds = parse_u64_ascii(args[2])?;
+                let ttl_ms = seconds.checked_mul(1000)?;
+                (ttl_ms > 0).then_some(StringBatchMutation::Psetex {
+                    key,
+                    ttl_ms,
+                    value: args[3],
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn parse_borrowed_key_expiration_mutations<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<KeyExpirationBatchMutation<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            let command = args.first()?;
+            let key = std::str::from_utf8(*args.get(1)?).ok()?;
+            if command.eq_ignore_ascii_case(b"PERSIST") && args.len() == 2 {
+                Some(KeyExpirationBatchMutation::Persist { key })
+            } else if command.eq_ignore_ascii_case(b"PEXPIRE") && args.len() == 3 {
+                let ttl_ms = parse_i64_ascii(args[2])?;
+                (ttl_ms > 0).then_some(KeyExpirationBatchMutation::Expire {
+                    key,
+                    ttl_ms: ttl_ms as u64,
+                })
+            } else if command.eq_ignore_ascii_case(b"EXPIRE") && args.len() == 3 {
+                let seconds = parse_i64_ascii(args[2])?;
+                let ttl_ms = (seconds > 0)
+                    .then(|| (seconds as u64).checked_mul(1000))
+                    .flatten()?;
+                Some(KeyExpirationBatchMutation::Expire { key, ttl_ms })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+type BorrowedStreamAddCommand<'a> =
+    (&'a str, Option<StreamId>, Vec<(&'a str, &'a str)>);
+type BorrowedStreamDeleteCommand<'a> = (&'a str, Vec<StreamId>);
+type BorrowedRootJsonSetCommand<'a> = (&'a str, &'a str);
+type BorrowedHllAddCommand<'a> = (&'a str, Vec<&'a [u8]>);
+type BorrowedListPopCommand<'a> = (&'a str, bool, Option<usize>);
+type BorrowedZsetPopCommand<'a> = (&'a str, bool, usize);
+type BorrowedZsetIncrementCommand<'a> = (&'a str, f64, &'a str);
+type BorrowedKeyDeleteCommand<'a> = (bool, Vec<&'a str>);
+
+fn parse_borrowed_key_delete_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedKeyDeleteCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() < 2 {
+                return None;
+            }
+            let unlink = if args[0].eq_ignore_ascii_case(b"DEL") {
+                false
+            } else if args[0].eq_ignore_ascii_case(b"UNLINK") {
+                true
+            } else {
+                return None;
+            };
+            let keys = args[1..]
+                .iter()
+                .map(|key| std::str::from_utf8(key).ok())
+                .collect::<Option<Vec<_>>>()?;
+            Some((unlink, keys))
+        })
+        .collect()
+}
+
+fn parse_borrowed_zset_increment_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedZsetIncrementCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() != 4 || !args[0].eq_ignore_ascii_case(b"ZINCRBY") {
+                return None;
+            }
+            let key = std::str::from_utf8(args[1]).ok()?;
+            let increment = std::str::from_utf8(args[2]).ok()?.parse::<f64>().ok()?;
+            if increment.is_nan() {
+                return None;
+            }
+            let member = std::str::from_utf8(args[3]).ok()?;
+            Some((key, increment, member))
+        })
+        .collect()
+}
+
+fn parse_borrowed_plain_zset_pop_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedZsetPopCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() != 2 && args.len() != 3 {
+                return None;
+            }
+            let key = std::str::from_utf8(args[1]).ok()?;
+            let min = if args[0].eq_ignore_ascii_case(b"ZPOPMIN") {
+                true
+            } else if args[0].eq_ignore_ascii_case(b"ZPOPMAX") {
+                false
+            } else {
+                return None;
+            };
+            let count = if args.len() == 3 {
+                parse_usize_ascii(args[2])?
+            } else {
+                1
+            };
+            if count > crate::frame::MAX_ARRAY_ELEMENTS / 2 {
+                return None;
+            }
+            Some((key, min, count))
+        })
+        .collect()
+}
+
+fn parse_borrowed_plain_list_pop_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedListPopCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() != 2 && args.len() != 3 {
+                return None;
+            }
+            let key = std::str::from_utf8(args[1]).ok()?;
+            let count = if args.len() == 3 {
+                let count = parse_usize_ascii(args[2])?;
+                (count <= crate::frame::MAX_ARRAY_ELEMENTS).then_some(count)?
+            } else {
+                return if args[0].eq_ignore_ascii_case(b"LPOP") {
+                    Some((key, true, None))
+                } else if args[0].eq_ignore_ascii_case(b"RPOP") {
+                    Some((key, false, None))
+                } else {
+                    None
+                };
+            };
+            if args[0].eq_ignore_ascii_case(b"LPOP") {
+                Some((key, true, Some(count)))
+            } else if args[0].eq_ignore_ascii_case(b"RPOP") {
+                Some((key, false, Some(count)))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn parse_borrowed_set_mutations<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<SetBatchMutation<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() < 3 {
+                return None;
+            }
+            let key = std::str::from_utf8(args[1]).ok()?;
+            let members = args[2..]
+                .iter()
+                .map(|member| std::str::from_utf8(member).ok())
+                .collect::<Option<Vec<_>>>()?;
+            if args[0].eq_ignore_ascii_case(b"SADD") {
+                Some(SetBatchMutation::Add { key, members })
+            } else if args[0].eq_ignore_ascii_case(b"SREM") {
+                Some(SetBatchMutation::Remove { key, members })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn parse_borrowed_plain_pfadd_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedHllAddCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() < 2 || !args[0].eq_ignore_ascii_case(b"PFADD") {
+                return None;
+            }
+            Some((
+                std::str::from_utf8(args[1]).ok()?,
+                args[2..].to_vec(),
+            ))
+        })
+        .collect()
+}
+
+fn parse_borrowed_root_json_set_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedRootJsonSetCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() != 4
+                || !args[0].eq_ignore_ascii_case(b"JSON.SET")
+                || !(args[2] == b"$" || args[2] == b".")
+            {
+                return None;
+            }
+            Some((
+                std::str::from_utf8(args[1]).ok()?,
+                std::str::from_utf8(args[3]).ok()?,
+            ))
+        })
+        .collect()
+}
+
+fn parse_borrowed_plain_xadd_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedStreamAddCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() < 5
+                || !(args.len() - 3).is_multiple_of(2)
+                || !args[0].eq_ignore_ascii_case(b"XADD")
+            {
+                return None;
+            }
+            let key = std::str::from_utf8(args[1]).ok()?;
+            let id_text = std::str::from_utf8(args[2]).ok()?;
+            let id = if id_text == "*" {
+                None
+            } else {
+                Some(StreamId::parse(id_text)?)
+            };
+            let fields = args[3..]
+                .chunks_exact(2)
+                .map(|pair| {
+                    Some((
+                        std::str::from_utf8(pair[0]).ok()?,
+                        std::str::from_utf8(pair[1]).ok()?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((key, id, fields))
+        })
+        .collect()
+}
+
+fn parse_borrowed_plain_xdel_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedStreamDeleteCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() < 3 || !args[0].eq_ignore_ascii_case(b"XDEL") {
+                return None;
+            }
+            let key = std::str::from_utf8(args[1]).ok()?;
+            let ids = args[2..]
+                .iter()
+                .map(|id| StreamId::parse(std::str::from_utf8(id).ok()?))
+                .collect::<Option<Vec<_>>>()?;
+            Some((key, ids))
+        })
+        .collect()
 }
 
 fn borrowed_list_push_supported(args: &[&[u8]]) -> bool {
@@ -209,6 +556,20 @@ fn parse_i64_ascii(bytes: &[u8]) -> Option<i64> {
     } else {
         Some(value)
     }
+}
+
+fn parse_u64_ascii(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value = 0u64;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
+    }
+    Some(value)
 }
 
 fn append_simple_string(out: &mut Vec<u8>, value: &str) {

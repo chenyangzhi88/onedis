@@ -23,12 +23,12 @@ impl Touch {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let mut count = 0i64;
-        for key in self.keys {
-            if db.touch_async(&key).await {
-                count += 1;
-            }
-        }
+        let count = db
+            .exists_readonly_many_async(&self.keys)
+            .await
+            .into_iter()
+            .filter(|exists| *exists)
+            .count() as i64;
         Ok(Frame::Integer(count))
     }
 }

@@ -52,13 +52,16 @@ impl Db {
         let mut acked = 0usize;
         let mut batch = WriteBatch::new();
         let mut seen_ids = std::collections::BTreeSet::new();
-        for id in ids {
-            if !seen_ids.insert(*id) {
-                continue;
-            }
-            let key = stream_pel_key(self.db_index, key, meta.version, group, *id);
-            if self.store.get_raw_async(&key).await.is_some() {
-                batch.delete(&key);
+        let pel_keys = ids
+            .iter()
+            .copied()
+            .filter(|id| seen_ids.insert(*id))
+            .map(|id| stream_pel_key(self.db_index, key, meta.version, group, id))
+            .collect::<Vec<_>>();
+        let existing = self.store.multi_get_raw_async(&pel_keys).await;
+        for (pel_key, value) in pel_keys.into_iter().zip(existing) {
+            if value.is_some() {
+                batch.delete(&pel_key);
                 acked += 1;
             }
         }
@@ -143,20 +146,51 @@ impl Db {
         self.stream_group_state(key, group)?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let now = now_ms();
-        Ok(self
-            .stream_pending_raw(key, meta.version, group)
-            .into_iter()
-            .filter(|(id, pel)| {
-                *id >= start && *id <= end && consumer.is_none_or(|name| pel.consumer == name)
-            })
-            .take(count)
-            .map(|(id, pel)| StreamPendingEntry {
-                id: id.to_redis_id(),
-                consumer: pel.consumer,
-                idle_ms: now.saturating_sub(pel.last_delivery_ms),
-                deliveries: pel.deliveries,
-            })
-            .collect())
+        let mut entries = Vec::with_capacity(count.min(1024));
+        let mut scan_start = start;
+        while entries.len() < count && scan_start <= end {
+            let scan_limit = if consumer.is_some() {
+                count
+                    .saturating_sub(entries.len())
+                    .saturating_mul(2)
+                    .clamp(64, 1024)
+            } else {
+                count.saturating_sub(entries.len())
+            };
+            let pending = self.stream_pending_between_limited(
+                key,
+                meta.version,
+                group,
+                scan_start,
+                end,
+                scan_limit,
+            );
+            if pending.is_empty() {
+                break;
+            }
+            let exhausted = pending.len() < scan_limit;
+            let last_id = pending.last().map(|(id, _)| *id);
+            entries.extend(
+                pending
+                    .into_iter()
+                    .filter(|(_, pel)| consumer.is_none_or(|name| pel.consumer == name))
+                    .map(|(id, pel)| StreamPendingEntry {
+                        id: id.to_redis_id(),
+                        consumer: pel.consumer,
+                        idle_ms: now.saturating_sub(pel.last_delivery_ms),
+                        deliveries: pel.deliveries,
+                    })
+                    .take(count.saturating_sub(entries.len())),
+            );
+            if entries.len() >= count || exhausted {
+                break;
+            }
+            let Some(next) = last_id.and_then(native_stream_helpers::stream_id_successor) else {
+                break;
+            };
+            scan_start = next;
+        }
+        Ok(entries)
     }
 
     pub async fn stream_pending_range_async(
@@ -175,21 +209,53 @@ impl Db {
             .await?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let now = now_ms();
-        Ok(self
-            .stream_pending_raw_async(key, meta.version, group)
-            .await
-            .into_iter()
-            .filter(|(id, pel)| {
-                *id >= start && *id <= end && consumer.is_none_or(|name| pel.consumer == name)
-            })
-            .take(count)
-            .map(|(id, pel)| StreamPendingEntry {
-                id: id.to_redis_id(),
-                consumer: pel.consumer,
-                idle_ms: now.saturating_sub(pel.last_delivery_ms),
-                deliveries: pel.deliveries,
-            })
-            .collect())
+        let mut entries = Vec::with_capacity(count.min(1024));
+        let mut scan_start = start;
+        while entries.len() < count && scan_start <= end {
+            let scan_limit = if consumer.is_some() {
+                count
+                    .saturating_sub(entries.len())
+                    .saturating_mul(2)
+                    .clamp(64, 1024)
+            } else {
+                count.saturating_sub(entries.len())
+            };
+            let pending = self
+                .stream_pending_between_limited_async(
+                    key,
+                    meta.version,
+                    group,
+                    scan_start,
+                    end,
+                    scan_limit,
+                )
+                .await;
+            if pending.is_empty() {
+                break;
+            }
+            let exhausted = pending.len() < scan_limit;
+            let last_id = pending.last().map(|(id, _)| *id);
+            entries.extend(
+                pending
+                    .into_iter()
+                    .filter(|(_, pel)| consumer.is_none_or(|name| pel.consumer == name))
+                    .map(|(id, pel)| StreamPendingEntry {
+                        id: id.to_redis_id(),
+                        consumer: pel.consumer,
+                        idle_ms: now.saturating_sub(pel.last_delivery_ms),
+                        deliveries: pel.deliveries,
+                    })
+                    .take(count.saturating_sub(entries.len())),
+            );
+            if entries.len() >= count || exhausted {
+                break;
+            }
+            let Some(next) = last_id.and_then(native_stream_helpers::stream_id_successor) else {
+                break;
+            };
+            scan_start = next;
+        }
+        Ok(entries)
     }
 
     pub fn stream_claim(
@@ -259,9 +325,23 @@ impl Db {
         let now = now_ms();
         let mut claimed = Vec::new();
         let mut batch = WriteBatch::new();
-        for id in ids {
-            let pel_key = stream_pel_key(self.db_index, key, meta.version, group, *id);
-            let Some(raw) = self.store.get_raw_async(&pel_key).await else {
+        let pel_keys = ids
+            .iter()
+            .map(|id| stream_pel_key(self.db_index, key, meta.version, group, *id))
+            .collect::<Vec<_>>();
+        let entry_keys = ids
+            .iter()
+            .map(|id| stream_entry_key(self.db_index, key, meta.version, *id))
+            .collect::<Vec<_>>();
+        let mut lookup_keys = pel_keys.clone();
+        lookup_keys.extend(entry_keys);
+        let mut lookup_values = self.store.multi_get_raw_async(&lookup_keys).await;
+        let entry_values = lookup_values.split_off(pel_keys.len());
+        let pel_values = lookup_values;
+        for (((id, pel_key), raw), entry_raw) in
+            ids.iter().zip(pel_keys).zip(pel_values).zip(entry_values)
+        {
+            let Some(raw) = raw else {
                 continue;
             };
             let Some(mut pel) = decode_stream_pel_state(&raw) else {
@@ -270,14 +350,20 @@ impl Db {
             if now.saturating_sub(pel.last_delivery_ms) < min_idle_ms {
                 continue;
             }
-            let Some(entry) = self.stream_entry_by_id_async(key, meta.version, *id).await else {
+            let Some(entry_raw) = entry_raw else {
+                continue;
+            };
+            let Some(fields) = decode_stream_entry(&entry_raw) else {
                 continue;
             };
             pel.consumer = consumer.to_string();
             pel.last_delivery_ms = now;
             pel.deliveries = pel.deliveries.saturating_add(1);
             batch.put(&pel_key, &encode_stream_pel_state(&pel));
-            claimed.push(entry);
+            claimed.push(StreamEntry {
+                id: id.to_redis_id(),
+                fields,
+            });
         }
         if batch.count() > 0 {
             batch.put(
@@ -308,33 +394,68 @@ impl Db {
         };
         self.stream_group_state(key, group)?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
+        if count == 0 {
+            return Ok(StreamClaimedEntries {
+                next_id: start.to_redis_id(),
+                entries: Vec::new(),
+            });
+        }
         let now = now_ms();
-        let mut entries = Vec::new();
-        let mut next_id = StreamId { ms: 0, seq: 0 };
+        let attempts = count.saturating_mul(10).max(1);
+        let pending = self.stream_pending_between_limited(
+            key,
+            meta.version,
+            group,
+            start,
+            StreamId {
+                ms: u64::MAX,
+                seq: u64::MAX,
+            },
+            attempts.saturating_add(1),
+        );
+        let mut entry_lookup = vec![None; pending.len().min(attempts)];
+        let mut entry_keys = Vec::new();
+        for (position, (id, pel)) in pending.iter().take(attempts).enumerate() {
+            if now.saturating_sub(pel.last_delivery_ms) >= min_idle_ms {
+                entry_lookup[position] = Some(entry_keys.len());
+                entry_keys.push(stream_entry_key(self.db_index, key, meta.version, *id));
+            }
+        }
+        let entry_values = self.store.multi_get_raw(&entry_keys);
+        let mut entries = Vec::with_capacity(count);
+        let mut processed = 0usize;
         let mut batch = WriteBatch::new();
-        for (id, mut pel) in self.stream_pending_raw(key, meta.version, group) {
-            if id < start {
-                continue;
-            }
-            next_id = id;
-            if now.saturating_sub(pel.last_delivery_ms) < min_idle_ms {
-                continue;
-            }
-            let Some(entry) = self.stream_entry_by_id(key, meta.version, id) else {
+        for (position, (id, pel)) in pending.iter().take(attempts).enumerate() {
+            processed = position + 1;
+            let Some(lookup) = entry_lookup[position] else {
                 continue;
             };
+            let Some(entry_raw) = entry_values[lookup].as_deref() else {
+                continue;
+            };
+            let Some(fields) = decode_stream_entry(entry_raw) else {
+                continue;
+            };
+            let mut pel = pel.clone();
             pel.consumer = consumer.to_string();
             pel.last_delivery_ms = now;
             pel.deliveries = pel.deliveries.saturating_add(1);
             batch.put(
-                &stream_pel_key(self.db_index, key, meta.version, group, id),
+                &stream_pel_key(self.db_index, key, meta.version, group, *id),
                 &encode_stream_pel_state(&pel),
             );
-            entries.push(entry);
+            entries.push(StreamEntry {
+                id: id.to_redis_id(),
+                fields,
+            });
             if entries.len() >= count {
                 break;
             }
         }
+        let next_id = pending
+            .get(processed)
+            .map(|(id, _)| *id)
+            .unwrap_or(StreamId { ms: 0, seq: 0 });
         if batch.count() > 0 {
             batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
@@ -369,36 +490,70 @@ impl Db {
         self.stream_group_state_async(key, group)
             .await?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
+        if count == 0 {
+            return Ok(StreamClaimedEntries {
+                next_id: start.to_redis_id(),
+                entries: Vec::new(),
+            });
+        }
         let now = now_ms();
-        let mut entries = Vec::new();
-        let mut next_id = StreamId { ms: 0, seq: 0 };
+        let attempts = count.saturating_mul(10).max(1);
+        let pending = self
+            .stream_pending_between_limited_async(
+                key,
+                meta.version,
+                group,
+                start,
+                StreamId {
+                    ms: u64::MAX,
+                    seq: u64::MAX,
+                },
+                attempts.saturating_add(1),
+            )
+            .await;
+        let mut entry_lookup = vec![None; pending.len().min(attempts)];
+        let mut entry_keys = Vec::new();
+        for (position, (id, pel)) in pending.iter().take(attempts).enumerate() {
+            if now.saturating_sub(pel.last_delivery_ms) >= min_idle_ms {
+                entry_lookup[position] = Some(entry_keys.len());
+                entry_keys.push(stream_entry_key(self.db_index, key, meta.version, *id));
+            }
+        }
+        let entry_values = self.store.multi_get_raw_async(&entry_keys).await;
+        let mut entries = Vec::with_capacity(count);
+        let mut processed = 0usize;
         let mut batch = WriteBatch::new();
-        for (id, mut pel) in self
-            .stream_pending_raw_async(key, meta.version, group)
-            .await
-        {
-            if id < start {
-                continue;
-            }
-            next_id = id;
-            if now.saturating_sub(pel.last_delivery_ms) < min_idle_ms {
-                continue;
-            }
-            let Some(entry) = self.stream_entry_by_id_async(key, meta.version, id).await else {
+        for (position, (id, pel)) in pending.iter().take(attempts).enumerate() {
+            processed = position + 1;
+            let Some(lookup) = entry_lookup[position] else {
                 continue;
             };
+            let Some(entry_raw) = entry_values[lookup].as_deref() else {
+                continue;
+            };
+            let Some(fields) = decode_stream_entry(entry_raw) else {
+                continue;
+            };
+            let mut pel = pel.clone();
             pel.consumer = consumer.to_string();
             pel.last_delivery_ms = now;
             pel.deliveries = pel.deliveries.saturating_add(1);
             batch.put(
-                &stream_pel_key(self.db_index, key, meta.version, group, id),
+                &stream_pel_key(self.db_index, key, meta.version, group, *id),
                 &encode_stream_pel_state(&pel),
             );
-            entries.push(entry);
+            entries.push(StreamEntry {
+                id: id.to_redis_id(),
+                fields,
+            });
             if entries.len() >= count {
                 break;
             }
         }
+        let next_id = pending
+            .get(processed)
+            .map(|(id, _)| *id)
+            .unwrap_or(StreamId { ms: 0, seq: 0 });
         if batch.count() > 0 {
             batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),

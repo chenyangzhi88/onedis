@@ -1,11 +1,15 @@
 use anyhow::Error;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    cmds::sorted_set::zrange::{ScoreBound, parse_score_bound},
+    frame::Frame,
+    store::db::Db,
+};
 
 pub struct Zcount {
     key: String,
-    min: f64,
-    max: f64,
+    min: ScoreBound,
+    max: ScoreBound,
 }
 
 impl Zcount {
@@ -17,24 +21,35 @@ impl Zcount {
             ));
         }
         let key = args[1].to_string(); // 键
-        let min = args[2]
-            .parse::<f64>()
-            .map_err(|_| Error::msg("ERR min is not a valid float"))?;
-        let max = args[3]
-            .parse::<f64>()
-            .map_err(|_| Error::msg("ERR max is not a valid float"))?;
+        let min = parse_score_bound(&args[2])?;
+        let max = parse_score_bound(&args[3])?;
         Ok(Zcount { key, min, max })
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.zset_count(&self.key, self.min, self.max) {
+        match db.zset_count_bounded(
+            &self.key,
+            self.min.value,
+            self.min.inclusive,
+            self.max.value,
+            self.max.inclusive,
+        ) {
             Ok(count) => Ok(Frame::Integer(count as i64)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        match db.zset_count_async(&self.key, self.min, self.max).await {
+        match db
+            .zset_count_bounded_async(
+                &self.key,
+                self.min.value,
+                self.min.inclusive,
+                self.max.value,
+                self.max.inclusive,
+            )
+            .await
+        {
             Ok(count) => Ok(Frame::Integer(count as i64)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }

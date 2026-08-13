@@ -3,7 +3,7 @@ use anyhow::Error;
 use crate::{
     cmds::sorted_set::{
         common::{text_arg, validate_entry_count},
-        zrange::{apply_limit, flatten_entries, parse_lex_bound},
+        zrange::{flatten_entries, parse_lex_bound},
     },
     frame::Frame,
     store::db::Db,
@@ -23,30 +23,25 @@ impl Zrangebylex {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.zset_range_by_lex(&self.key, &self.min, &self.max) {
-            Ok(mut entries) => {
-                if self.reverse {
-                    entries.reverse();
-                }
-                entries = apply_limit(entries, self.limit);
-                Ok(Frame::Array(flatten_entries(entries, false)?))
-            }
+        match db.zset_range_by_lex_window(&self.key, &self.min, &self.max, self.reverse, self.limit)
+        {
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, false)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db
-            .zset_range_by_lex_async(&self.key, &self.min, &self.max)
+            .zset_range_by_lex_window_async(
+                &self.key,
+                &self.min,
+                &self.max,
+                self.reverse,
+                self.limit,
+            )
             .await
         {
-            Ok(mut entries) => {
-                if self.reverse {
-                    entries.reverse();
-                }
-                entries = apply_limit(entries, self.limit);
-                Ok(Frame::Array(flatten_entries(entries, false)?))
-            }
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, false)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

@@ -13,6 +13,10 @@ pub struct Xread {
 }
 
 impl Xread {
+    pub(crate) fn is_single_stream(&self) -> bool {
+        self.streams.len() == 1
+    }
+
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         if frame.arg_len() < 4 {
             return Err(Error::msg(

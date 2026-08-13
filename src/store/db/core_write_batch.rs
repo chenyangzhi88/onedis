@@ -11,6 +11,7 @@ impl Db {
         self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch(batch);
+        self.invalidate_zset_length_cache_for_batch(batch);
         self.record_or_publish_mutations(batch);
     }
 
@@ -47,6 +48,7 @@ impl Db {
         self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch_async(batch).await;
+        self.invalidate_zset_length_cache_for_batch(batch);
         self.record_or_publish_mutations(batch);
     }
 
@@ -88,6 +90,7 @@ impl Db {
         self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch_async(batch).await;
+        self.invalidate_zset_length_cache_for_batch(batch);
         if !self.store.is_transactional() {
             self.reconcile_vector_runtimes_for_batch(batch);
         }
@@ -112,6 +115,7 @@ impl Db {
             .await
         {
             Ok(()) => {
+                self.invalidate_zset_length_cache_for_batch(batch);
                 self.record_or_publish_mutations(batch);
                 Ok(true)
             }
@@ -135,6 +139,7 @@ impl Db {
         self.invalidate_list_meta_cache_for_batch(batch);
         match self.store.compare_and_write_batch(conditions, batch) {
             Ok(()) => {
+                self.invalidate_zset_length_cache_for_batch(batch);
                 self.record_or_publish_mutations(batch);
                 Ok(true)
             }
@@ -314,15 +319,78 @@ impl Db {
                 .counter_cache
                 .hash_ever_populated
                 .load(Ordering::Acquire)
+            && !self
+                .counter_cache
+                .zset_ever_populated
+                .load(Ordering::Acquire)
         {
             return;
         }
         for &(db_index, ref key) in keys {
             self.counter_cache.invalidate_key(db_index, key);
             self.counter_cache.invalidate_hash_key(db_index, key);
+            self.counter_cache.invalidate_zset_key(db_index, key);
         }
         for &db_index in dbs {
             self.counter_cache.invalidate_db(db_index);
+        }
+    }
+
+    pub(in crate::store::db) fn invalidate_zset_length_cache_for_batch(&self, batch: &WriteBatch) {
+        if self.store.is_transactional()
+            || !self
+                .counter_cache
+                .zset_ever_populated
+                .load(Ordering::Acquire)
+        {
+            return;
+        }
+        let mut logical_keys = HashSet::new();
+        let mut clear_db = false;
+        for (write_type, raw_key, _) in batch.iter() {
+            match write_type {
+                WriteType::Put
+                | WriteType::PutBlobMedium
+                | WriteType::PutBlobExternal
+                | WriteType::Delete
+                | WriteType::Merge => {
+                    if let Some(logical_key) =
+                        logical_main_key_from_raw_key(self.key_layout, self.db_index, raw_key)
+                    {
+                        logical_keys.insert(logical_key);
+                    } else if let Some(logical_key) =
+                        zset_owner_from_raw_sub_key(self.key_layout, self.db_index, raw_key)
+                    {
+                        logical_keys.insert(logical_key);
+                    }
+                }
+                WriteType::RangeDelete => {
+                    if self
+                        .key_layout
+                        .is_db_range_delete_start(self.db_index, raw_key)
+                    {
+                        clear_db = true;
+                    } else if let Some(logical_key) =
+                        zset_owner_from_raw_sub_key(self.key_layout, self.db_index, raw_key)
+                    {
+                        logical_keys.insert(logical_key);
+                    }
+                }
+            }
+        }
+        if clear_db {
+            self.counter_cache.zset_lengths.clear();
+            self.counter_cache.zset_key_epochs.clear();
+            self.counter_cache
+                .zset_db_epochs
+                .entry(self.db_index)
+                .and_modify(|epoch| *epoch = epoch.wrapping_add(1))
+                .or_insert(1);
+            return;
+        }
+        for logical_key in logical_keys {
+            self.counter_cache
+                .invalidate_zset_key(self.db_index, &logical_key);
         }
     }
 

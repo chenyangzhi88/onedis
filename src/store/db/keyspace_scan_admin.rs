@@ -24,7 +24,10 @@ impl KeyScanState {
     fn new(cursor: u64, count: usize) -> Self {
         Self {
             requested_cursor: cursor,
-            position: 0,
+            // The storage cursor is pre-positioned at the requested physical offset. Keeping the
+            // logical position here lets `visit` include that first key and return Redis's next
+            // cursor without rescanning the prefix.
+            position: cursor,
             count,
             result_bytes: 0,
             keys: Vec::with_capacity(count.min(1024)),
@@ -127,11 +130,67 @@ impl Db {
             now: now_ms(),
         };
         let mut state = KeyScanState::new(cursor, count);
+        let mut remaining_cursor = cursor;
         for (lower, upper) in self.key_layout.logical_main_key_ranges(self.db_index) {
-            self.store
-                .scan_range_raw_visit(&lower, upper, usize::MAX, |raw_key, raw_value| {
-                    state.visit(&filter, raw_key, raw_value)
-                });
+            let scan_lower = if remaining_cursor == 0 {
+                lower
+            } else {
+                let Ok(offset) = usize::try_from(remaining_cursor) else {
+                    continue;
+                };
+                match self
+                    .store
+                    .scan_range_raw_start_at_offset(&lower, upper.clone(), offset)
+                {
+                    Some(start) => {
+                        remaining_cursor = 0;
+                        start
+                    }
+                    None => {
+                        remaining_cursor = remaining_cursor.saturating_sub(
+                            self.store.count_range_raw_keys(&lower, upper.clone()) as u64,
+                        );
+                        continue;
+                    }
+                }
+            };
+            let mut next_lower = scan_lower;
+            loop {
+                let remaining = state.count.saturating_sub(state.keys.len());
+                let batch_limit = if filter.matcher.is_none() && filter.type_filter.is_none() {
+                    remaining.max(1)
+                } else {
+                    remaining.saturating_mul(4).clamp(64, 1024)
+                };
+                let entries =
+                    self.store
+                        .scan_range_raw_limited(&next_lower, upper.clone(), batch_limit);
+                if entries.is_empty() {
+                    break;
+                }
+                let entry_count = entries.len();
+                let mut last_key = None;
+                for (raw_key, raw_value) in entries {
+                    last_key = Some(raw_key.clone());
+                    if !state.visit(&filter, &raw_key, &raw_value) {
+                        break;
+                    }
+                }
+                if state.stopped || entry_count < batch_limit {
+                    break;
+                }
+                let Some(mut last_key) = last_key else {
+                    break;
+                };
+                last_key.push(0);
+                if upper
+                    .as_ref()
+                    .is_some_and(|upper| last_key.as_slice() >= upper.as_slice())
+                {
+                    break;
+                }
+                next_lower = last_key;
+            }
             if state.stopped {
                 break;
             }
@@ -155,12 +214,71 @@ impl Db {
             now: now_ms(),
         };
         let mut state = KeyScanState::new(cursor, count);
+        let mut remaining_cursor = cursor;
         for (lower, upper) in self.key_layout.logical_main_key_ranges(self.db_index) {
-            self.store
-                .scan_range_raw_visit_async(&lower, upper, usize::MAX, |raw_key, raw_value| {
-                    state.visit(&filter, raw_key, raw_value)
-                })
-                .await;
+            let scan_lower = if remaining_cursor == 0 {
+                lower
+            } else {
+                let Ok(offset) = usize::try_from(remaining_cursor) else {
+                    continue;
+                };
+                match self
+                    .store
+                    .scan_range_raw_start_at_offset_async(&lower, upper.clone(), offset)
+                    .await
+                {
+                    Some(start) => {
+                        remaining_cursor = 0;
+                        start
+                    }
+                    None => {
+                        remaining_cursor = remaining_cursor.saturating_sub(
+                            self.store
+                                .count_range_raw_keys_async(&lower, upper.clone())
+                                .await as u64,
+                        );
+                        continue;
+                    }
+                }
+            };
+            let mut next_lower = scan_lower;
+            loop {
+                let remaining = state.count.saturating_sub(state.keys.len());
+                let batch_limit = if filter.matcher.is_none() && filter.type_filter.is_none() {
+                    remaining.max(1)
+                } else {
+                    remaining.saturating_mul(4).clamp(64, 1024)
+                };
+                let entries = self
+                    .store
+                    .scan_range_raw_limited_async(&next_lower, upper.clone(), batch_limit)
+                    .await;
+                if entries.is_empty() {
+                    break;
+                }
+                let entry_count = entries.len();
+                let mut last_key = None;
+                for (raw_key, raw_value) in entries {
+                    last_key = Some(raw_key.clone());
+                    if !state.visit(&filter, &raw_key, &raw_value) {
+                        break;
+                    }
+                }
+                if state.stopped || entry_count < batch_limit {
+                    break;
+                }
+                let Some(mut last_key) = last_key else {
+                    break;
+                };
+                last_key.push(0);
+                if upper
+                    .as_ref()
+                    .is_some_and(|upper| last_key.as_slice() >= upper.as_slice())
+                {
+                    break;
+                }
+                next_lower = last_key;
+            }
             if state.stopped {
                 break;
             }

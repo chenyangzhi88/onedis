@@ -135,22 +135,22 @@ impl Db {
             let entries = match start {
                 StreamReadGroupStart::New => {
                     let lower = group_state.last_delivered_id;
-                    let mut entries = self
-                        .stream_entries_between_async(
-                            key,
-                            meta.version,
-                            lower,
-                            StreamId {
-                                ms: u64::MAX,
-                                seq: u64::MAX,
-                            },
-                        )
-                        .await
-                        .into_iter()
-                        .filter(|entry| parse_stream_id(&entry.id).is_some_and(|id| id > lower))
-                        .collect::<Vec<_>>();
-                    entries.truncate(limit);
-                    entries
+                    match native_stream_helpers::stream_id_successor(lower) {
+                        Some(lower) => {
+                            self.stream_entries_between_limited_async(
+                                key,
+                                meta.version,
+                                lower,
+                                StreamId {
+                                    ms: u64::MAX,
+                                    seq: u64::MAX,
+                                },
+                                limit,
+                            )
+                            .await
+                        }
+                        None => Vec::new(),
+                    }
                 }
                 StreamReadGroupStart::Id(id) => {
                     let pending = self

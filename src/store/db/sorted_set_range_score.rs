@@ -13,6 +13,12 @@ impl Db {
             return Ok(Vec::new());
         };
 
+        if let Some(entries) =
+            self.zset_nonnegative_rank_range_limited(key, version, start, stop, reverse)
+        {
+            return Ok(entries);
+        }
+
         let mut entries = self.zset_ranked_members(key, version);
         if reverse {
             entries.reverse();
@@ -47,6 +53,13 @@ impl Db {
             return Ok(Vec::new());
         };
 
+        if let Some(entries) = self
+            .zset_nonnegative_rank_range_limited_async(key, version, start, stop, reverse)
+            .await
+        {
+            return Ok(entries);
+        }
+
         let mut entries = self.zset_ranked_members_async(key, version).await;
         if reverse {
             entries.reverse();
@@ -69,6 +82,83 @@ impl Db {
         Ok(entries[normalized_start as usize..=normalized_stop as usize].to_vec())
     }
 
+    fn zset_nonnegative_rank_range_limited(
+        &self,
+        key: &str,
+        version: u64,
+        start: i64,
+        stop: i64,
+        reverse: bool,
+    ) -> Option<Vec<(String, f64)>> {
+        if start < 0 || stop < 0 {
+            return None;
+        }
+        if start > stop {
+            return Some(Vec::new());
+        }
+        let limit = usize::try_from(stop.checked_add(1)?).ok()?;
+        let prefix = zset_rank_prefix(self.db_index, key, version);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let raw_entries = if reverse {
+            self.store
+                .scan_range_raw_limited_reverse(&prefix, upper, limit)
+        } else {
+            self.store.scan_range_raw_limited(&prefix, upper, limit)
+        };
+        Some(
+            raw_entries
+                .into_iter()
+                .skip(start as usize)
+                .filter_map(|(rank_key, _)| {
+                    Some((
+                        self.decode_rank_member(key, version, &rank_key)?,
+                        self.decode_rank_score(key, version, &rank_key)?,
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    async fn zset_nonnegative_rank_range_limited_async(
+        &self,
+        key: &str,
+        version: u64,
+        start: i64,
+        stop: i64,
+        reverse: bool,
+    ) -> Option<Vec<(String, f64)>> {
+        if start < 0 || stop < 0 {
+            return None;
+        }
+        if start > stop {
+            return Some(Vec::new());
+        }
+        let limit = usize::try_from(stop.checked_add(1)?).ok()?;
+        let prefix = zset_rank_prefix(self.db_index, key, version);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let raw_entries = if reverse {
+            self.store
+                .scan_range_raw_limited_reverse_async(&prefix, upper, limit)
+                .await
+        } else {
+            self.store
+                .scan_range_raw_limited_async(&prefix, upper, limit)
+                .await
+        };
+        Some(
+            raw_entries
+                .into_iter()
+                .skip(start as usize)
+                .filter_map(|(rank_key, _)| {
+                    Some((
+                        self.decode_rank_member(key, version, &rank_key)?,
+                        self.decode_rank_score(key, version, &rank_key)?,
+                    ))
+                })
+                .collect(),
+        )
+    }
+
     /// 按 score 区间返回成员和分数。
     pub fn zset_range_by_score(
         &self,
@@ -76,15 +166,53 @@ impl Db {
         min: f64,
         max: f64,
     ) -> Result<Vec<(String, f64)>, Error> {
+        self.zset_range_by_score_window(key, min, true, max, true, false, None)
+    }
+
+    pub(crate) fn zset_range_by_score_window(
+        &self,
+        key: &str,
+        min: f64,
+        min_inclusive: bool,
+        max: f64,
+        max_inclusive: bool,
+        reverse: bool,
+        limit: Option<(i64, i64)>,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let Some((offset, scan_limit)) = zset_score_scan_window(limit) else {
+            return Ok(Vec::new());
+        };
         let meta = self.zset_expire_ms(key)?;
         let Some((_, version)) = meta else {
             return Ok(Vec::new());
         };
 
-        Ok(self
-            .zset_ranked_members(key, version)
+        let Some((lower, upper)) = zset_score_scan_bounds(
+            self.db_index,
+            key,
+            version,
+            min,
+            min_inclusive,
+            max,
+            max_inclusive,
+        ) else {
+            return Ok(Vec::new());
+        };
+        let raw_entries = if reverse {
+            self.store
+                .scan_range_raw_limited_reverse(&lower, upper, scan_limit)
+        } else {
+            self.store.scan_range_raw_limited(&lower, upper, scan_limit)
+        };
+        Ok(raw_entries
             .into_iter()
-            .filter(|(_, score)| *score >= min && *score <= max)
+            .skip(offset)
+            .filter_map(|(rank_key, _)| {
+                Some((
+                    self.decode_rank_member(key, version, &rank_key)?,
+                    self.decode_rank_score(key, version, &rank_key)?,
+                ))
+            })
             .collect())
     }
 
@@ -94,16 +222,57 @@ impl Db {
         min: f64,
         max: f64,
     ) -> Result<Vec<(String, f64)>, Error> {
+        self.zset_range_by_score_window_async(key, min, true, max, true, false, None)
+            .await
+    }
+
+    pub(crate) async fn zset_range_by_score_window_async(
+        &self,
+        key: &str,
+        min: f64,
+        min_inclusive: bool,
+        max: f64,
+        max_inclusive: bool,
+        reverse: bool,
+        limit: Option<(i64, i64)>,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let Some((offset, scan_limit)) = zset_score_scan_window(limit) else {
+            return Ok(Vec::new());
+        };
         let meta = self.zset_expire_ms_async(key).await?;
         let Some((_, version)) = meta else {
             return Ok(Vec::new());
         };
 
-        Ok(self
-            .zset_ranked_members_async(key, version)
-            .await
+        let Some((lower, upper)) = zset_score_scan_bounds(
+            self.db_index,
+            key,
+            version,
+            min,
+            min_inclusive,
+            max,
+            max_inclusive,
+        ) else {
+            return Ok(Vec::new());
+        };
+        let raw_entries = if reverse {
+            self.store
+                .scan_range_raw_limited_reverse_async(&lower, upper, scan_limit)
+                .await
+        } else {
+            self.store
+                .scan_range_raw_limited_async(&lower, upper, scan_limit)
+                .await
+        };
+        Ok(raw_entries
             .into_iter()
-            .filter(|(_, score)| *score >= min && *score <= max)
+            .skip(offset)
+            .filter_map(|(rank_key, _)| {
+                Some((
+                    self.decode_rank_member(key, version, &rank_key)?,
+                    self.decode_rank_score(key, version, &rank_key)?,
+                ))
+            })
             .collect())
     }
 
@@ -113,9 +282,7 @@ impl Db {
         max: f64,
         min: f64,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let mut entries = self.zset_range_by_score(key, min, max)?;
-        entries.reverse();
-        Ok(entries)
+        self.zset_range_by_score_window(key, min, true, max, true, true, None)
     }
 
     pub async fn zset_rev_range_by_score_async(
@@ -124,8 +291,23 @@ impl Db {
         max: f64,
         min: f64,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let mut entries = self.zset_range_by_score_async(key, min, max).await?;
-        entries.reverse();
-        Ok(entries)
+        self.zset_range_by_score_window_async(key, min, true, max, true, true, None)
+            .await
     }
+}
+
+fn zset_score_scan_window(limit: Option<(i64, i64)>) -> Option<(usize, usize)> {
+    let Some((offset, count)) = limit else {
+        return Some((0, usize::MAX));
+    };
+    if offset < 0 || count == 0 {
+        return None;
+    }
+    let offset = usize::try_from(offset).ok()?;
+    let scan_limit = if count < 0 {
+        usize::MAX
+    } else {
+        offset.saturating_add(usize::try_from(count).ok()?)
+    };
+    Some((offset, scan_limit))
 }

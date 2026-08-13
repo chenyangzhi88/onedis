@@ -53,14 +53,14 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         let Some((storage_start, storage_end)) = self.resolve_list_range(meta, start, stop) else {
-            for storage_index in meta.head..meta.tail {
-                batch.delete(&list_item_key(
-                    self.db_index,
-                    key,
-                    meta.version,
-                    storage_index,
-                ));
-            }
+            delete_list_storage_range_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                meta.version,
+                meta.head,
+                meta.tail,
+            );
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty(&batch);
             if batch.count() > 0 {
@@ -69,22 +69,22 @@ impl Db {
             return Ok(());
         };
 
-        for storage_index in meta.head..storage_start {
-            batch.delete(&list_item_key(
-                self.db_index,
-                key,
-                meta.version,
-                storage_index,
-            ));
-        }
-        for storage_index in (storage_end + 1)..meta.tail {
-            batch.delete(&list_item_key(
-                self.db_index,
-                key,
-                meta.version,
-                storage_index,
-            ));
-        }
+        delete_list_storage_range_to_batch(
+            &mut batch,
+            self.db_index,
+            key,
+            meta.version,
+            meta.head,
+            storage_start,
+        );
+        delete_list_storage_range_to_batch(
+            &mut batch,
+            self.db_index,
+            key,
+            meta.version,
+            storage_end.saturating_add(1),
+            meta.tail,
+        );
         batch.put(
             &self.mk(key),
             &encode_list_meta(meta.expire_ms, meta.version, storage_start, storage_end + 1),
@@ -105,14 +105,14 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         let Some((storage_start, storage_end)) = self.resolve_list_range(meta, start, stop) else {
-            for storage_index in meta.head..meta.tail {
-                batch.delete(&list_item_key(
-                    self.db_index,
-                    key,
-                    meta.version,
-                    storage_index,
-                ));
-            }
+            delete_list_storage_range_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                meta.version,
+                meta.head,
+                meta.tail,
+            );
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_batch_if_not_empty_async(&batch).await;
             if batch.count() > 0 {
@@ -121,22 +121,22 @@ impl Db {
             return Ok(());
         };
 
-        for storage_index in meta.head..storage_start {
-            batch.delete(&list_item_key(
-                self.db_index,
-                key,
-                meta.version,
-                storage_index,
-            ));
-        }
-        for storage_index in (storage_end + 1)..meta.tail {
-            batch.delete(&list_item_key(
-                self.db_index,
-                key,
-                meta.version,
-                storage_index,
-            ));
-        }
+        delete_list_storage_range_to_batch(
+            &mut batch,
+            self.db_index,
+            key,
+            meta.version,
+            meta.head,
+            storage_start,
+        );
+        delete_list_storage_range_to_batch(
+            &mut batch,
+            self.db_index,
+            key,
+            meta.version,
+            storage_end.saturating_add(1),
+            meta.tail,
+        );
         batch.put(
             &self.mk(key),
             &encode_list_meta(meta.expire_ms, meta.version, storage_start, storage_end + 1),
@@ -282,5 +282,38 @@ impl Db {
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(removed)
+    }
+}
+
+/// Delete the half-open logical index interval `[start, end)` with at most two range tombstones.
+/// Signed big-endian indices place non-negative values before negative values in byte order, so a
+/// range crossing zero must be split at that boundary.
+fn delete_list_storage_range_to_batch(
+    batch: &mut WriteBatch,
+    db_index: u16,
+    key: &str,
+    version: u64,
+    start: i64,
+    end: i64,
+) {
+    if start >= end {
+        return;
+    }
+    if start < 0 {
+        let negative_end = end.min(0);
+        let lower = list_item_key(db_index, key, version, start);
+        let upper = if negative_end == 0 {
+            prefix_exclusive_upper_bound(&list_item_prefix(db_index, key, version))
+                .expect("list item prefix has an exclusive upper bound")
+        } else {
+            list_item_key(db_index, key, version, negative_end)
+        };
+        batch.delete_range(&lower, &upper);
+    }
+    if end > 0 {
+        let positive_start = start.max(0);
+        let lower = list_item_key(db_index, key, version, positive_start);
+        let upper = list_item_key(db_index, key, version, end);
+        batch.delete_range(&lower, &upper);
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 
-fn random_index(upper: usize) -> usize {
+pub(in crate::store::db) fn random_index(upper: usize) -> usize {
     debug_assert!(upper > 0);
     let upper = upper as u64;
     let threshold = upper.wrapping_neg() % upper;
@@ -9,14 +9,6 @@ fn random_index(upper: usize) -> usize {
         if value >= threshold {
             return (value % upper) as usize;
         }
-    }
-}
-
-fn shuffle_prefix<T>(items: &mut [T], count: usize) {
-    let target = count.min(items.len());
-    for index in 0..target {
-        let selected = index + random_index(items.len() - index);
-        items.swap(index, selected);
     }
 }
 
@@ -52,7 +44,7 @@ impl SetPopRandom {
     }
 }
 
-fn sample_set_pop_ordinals(len: usize, count: usize) -> Vec<usize> {
+pub(in crate::store::db) fn sample_distinct_ordinals(len: usize, count: usize) -> Vec<usize> {
     let count = count.min(len);
     if count == 0 {
         return Vec::new();
@@ -106,6 +98,39 @@ fn decode_selected_set_members(
 }
 
 impl Db {
+    fn select_set_members_at_ordinals(
+        &self,
+        key: &str,
+        version: u64,
+        ordinals: &[usize],
+    ) -> Result<Vec<SelectedSetMember>, Error> {
+        let prefix = set_member_prefix(self.db_index, key, version);
+        let raw_keys = self.store.scan_range_raw_keys_at_ordinals(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            ordinals,
+        );
+        decode_selected_set_members(&prefix, raw_keys, ordinals.len())
+    }
+
+    async fn select_set_members_at_ordinals_async(
+        &self,
+        key: &str,
+        version: u64,
+        ordinals: &[usize],
+    ) -> Result<Vec<SelectedSetMember>, Error> {
+        let prefix = set_member_prefix(self.db_index, key, version);
+        let raw_keys = self
+            .store
+            .scan_range_raw_keys_at_ordinals_async(
+                &prefix,
+                prefix_exclusive_upper_bound(&prefix),
+                ordinals,
+            )
+            .await;
+        decode_selected_set_members(&prefix, raw_keys, ordinals.len())
+    }
+
     fn select_set_members_for_pop(
         &self,
         key: &str,
@@ -113,14 +138,8 @@ impl Db {
         len: usize,
         count: usize,
     ) -> Result<Vec<SelectedSetMember>, Error> {
-        let prefix = set_member_prefix(self.db_index, key, version);
-        let ordinals = sample_set_pop_ordinals(len, count);
-        let raw_keys = self.store.scan_range_raw_keys_at_ordinals(
-            &prefix,
-            prefix_exclusive_upper_bound(&prefix),
-            &ordinals,
-        );
-        decode_selected_set_members(&prefix, raw_keys, ordinals.len())
+        let ordinals = sample_distinct_ordinals(len, count);
+        self.select_set_members_at_ordinals(key, version, &ordinals)
     }
 
     async fn select_set_members_for_pop_async(
@@ -130,17 +149,9 @@ impl Db {
         len: usize,
         count: usize,
     ) -> Result<Vec<SelectedSetMember>, Error> {
-        let prefix = set_member_prefix(self.db_index, key, version);
-        let ordinals = sample_set_pop_ordinals(len, count);
-        let raw_keys = self
-            .store
-            .scan_range_raw_keys_at_ordinals_async(
-                &prefix,
-                prefix_exclusive_upper_bound(&prefix),
-                &ordinals,
-            )
-            .await;
-        decode_selected_set_members(&prefix, raw_keys, ordinals.len())
+        let ordinals = sample_distinct_ordinals(len, count);
+        self.select_set_members_at_ordinals_async(key, version, &ordinals)
+            .await
     }
 
     pub fn set_random_members(
@@ -148,28 +159,28 @@ impl Db {
         key: &str,
         count: Option<i64>,
     ) -> Result<Option<Vec<String>>, Error> {
-        let mut members = self.set_members(key)?;
-        if members.is_empty() {
+        let Some(meta) = self.set_meta(key)? else {
+            return Ok(None);
+        };
+        if meta.len == 0 {
             return Ok(None);
         }
-        let Some(count) = count else {
-            shuffle_prefix(&mut members, 1);
-            members.truncate(1);
-            return Ok(Some(members));
-        };
-        if count >= 0 {
-            let target = (count as usize).min(members.len());
-            shuffle_prefix(&mut members, target);
-            members.truncate(target);
-            return Ok(Some(members));
+        let (picks, unique) = random_member_ordinals(meta.len, count);
+        let selected = self.select_set_members_at_ordinals(key, meta.version, &unique)?;
+        let by_ordinal = unique
+            .into_iter()
+            .zip(selected.into_iter().map(|selected| selected.member))
+            .collect::<HashMap<_, _>>();
+        let mut members = Vec::with_capacity(picks.len());
+        for ordinal in picks {
+            members.push(
+                by_ordinal
+                    .get(&ordinal)
+                    .expect("selected set ordinal is present")
+                    .clone(),
+            );
         }
-
-        let requested = count.unsigned_abs() as usize;
-        let mut result = Vec::with_capacity(requested);
-        for _ in 0..requested {
-            result.push(members[random_index(members.len())].clone());
-        }
-        Ok(Some(result))
+        Ok(Some(members))
     }
 
     pub async fn set_random_members_async(
@@ -177,28 +188,30 @@ impl Db {
         key: &str,
         count: Option<i64>,
     ) -> Result<Option<Vec<String>>, Error> {
-        let mut members = self.set_members_async(key).await?;
-        if members.is_empty() {
+        let Some(meta) = self.set_meta_async(key).await? else {
+            return Ok(None);
+        };
+        if meta.len == 0 {
             return Ok(None);
         }
-        let Some(count) = count else {
-            shuffle_prefix(&mut members, 1);
-            members.truncate(1);
-            return Ok(Some(members));
-        };
-        if count >= 0 {
-            let target = (count as usize).min(members.len());
-            shuffle_prefix(&mut members, target);
-            members.truncate(target);
-            return Ok(Some(members));
+        let (picks, unique) = random_member_ordinals(meta.len, count);
+        let selected = self
+            .select_set_members_at_ordinals_async(key, meta.version, &unique)
+            .await?;
+        let by_ordinal = unique
+            .into_iter()
+            .zip(selected.into_iter().map(|selected| selected.member))
+            .collect::<HashMap<_, _>>();
+        let mut members = Vec::with_capacity(picks.len());
+        for ordinal in picks {
+            members.push(
+                by_ordinal
+                    .get(&ordinal)
+                    .expect("selected set ordinal is present")
+                    .clone(),
+            );
         }
-
-        let requested = count.unsigned_abs() as usize;
-        let mut result = Vec::with_capacity(requested);
-        for _ in 0..requested {
-            result.push(members[random_index(members.len())].clone());
-        }
-        Ok(Some(result))
+        Ok(Some(members))
     }
 
     /// 弹出 count 个成员。
@@ -295,19 +308,23 @@ impl Db {
             return Ok((0, Vec::new()));
         };
         let prefix = set_member_prefix(self.db_index, key, meta.version);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+        let Some(lower) = self
+            .store
+            .scan_range_raw_start_at_offset(&prefix, upper.clone(), offset)
+        else {
+            return Ok((0, Vec::new()));
+        };
         let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
         let mut state = SetScanState::new(cursor, count);
-        self.store.scan_range_raw_visit(
-            &prefix,
-            prefix_exclusive_upper_bound(&prefix),
-            usize::MAX,
-            |member_key, _| {
+        self.store
+            .scan_range_raw_visit(&lower, upper, usize::MAX, |member_key, _| {
                 let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
                     return true;
                 };
                 state.visit(member, matcher.as_ref())
-            },
-        );
+            });
         state.finish()
     }
 
@@ -322,27 +339,47 @@ impl Db {
             return Ok((0, Vec::new()));
         };
         let prefix = set_member_prefix(self.db_index, key, meta.version);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+        let Some(lower) = self
+            .store
+            .scan_range_raw_start_at_offset_async(&prefix, upper.clone(), offset)
+            .await
+        else {
+            return Ok((0, Vec::new()));
+        };
         let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
         let mut state = SetScanState::new(cursor, count);
         self.store
-            .scan_range_raw_visit_async(
-                &prefix,
-                prefix_exclusive_upper_bound(&prefix),
-                usize::MAX,
-                |member_key, _| {
-                    let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
-                        return true;
-                    };
-                    state.visit(member, matcher.as_ref())
-                },
-            )
+            .scan_range_raw_visit_async(&lower, upper, usize::MAX, |member_key, _| {
+                let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
+                    return true;
+                };
+                state.visit(member, matcher.as_ref())
+            })
             .await;
         state.finish()
     }
 }
 
+pub(in crate::store::db) fn random_member_ordinals(
+    len: usize,
+    count: Option<i64>,
+) -> (Vec<usize>, Vec<usize>) {
+    let picks = match count {
+        None => vec![random_index(len)],
+        Some(count) if count >= 0 => sample_distinct_ordinals(len, count as usize),
+        Some(count) => (0..count.unsigned_abs() as usize)
+            .map(|_| random_index(len))
+            .collect(),
+    };
+    let mut unique = picks.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    (picks, unique)
+}
+
 struct SetScanState {
-    cursor: u64,
     position: u64,
     count: usize,
     bytes: usize,
@@ -354,8 +391,7 @@ struct SetScanState {
 impl SetScanState {
     fn new(cursor: u64, count: usize) -> Self {
         Self {
-            cursor,
-            position: 0,
+            position: cursor,
             count,
             bytes: 32,
             members: Vec::with_capacity(count.min(1024)),
@@ -366,9 +402,6 @@ impl SetScanState {
 
     fn visit(&mut self, raw_member: &[u8], matcher: Option<&pattern::Matcher>) -> bool {
         self.position = self.position.saturating_add(1);
-        if self.position <= self.cursor {
-            return true;
-        }
         let Ok(member) = std::str::from_utf8(raw_member) else {
             return true;
         };

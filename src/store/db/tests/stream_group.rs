@@ -220,3 +220,48 @@ async fn stream_group_pending_claim_autoclaim_and_async_paths_cover_edges() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn stream_autoclaim_returns_the_next_unscanned_pending_id() {
+    let db = test_db();
+    for ms in 1..=5 {
+        db.stream_add_async(
+            "auto",
+            Some(StreamId { ms, seq: 0 }),
+            &[("f".to_string(), ms.to_string())],
+        )
+        .await
+        .unwrap();
+    }
+    db.stream_group_create_async("auto", "g", StreamId { ms: 0, seq: 0 }, false)
+        .await
+        .unwrap();
+    db.stream_read_group_async(
+        "g",
+        "c1",
+        &[("auto".to_string(), StreamReadGroupStart::New)],
+        Some(5),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let first = db
+        .stream_auto_claim_async("auto", "g", "c2", 0, StreamId { ms: 0, seq: 0 }, 2)
+        .await
+        .unwrap();
+    assert_eq!(first.entries.len(), 2);
+    assert_eq!(first.next_id, "3-0");
+    let second = db
+        .stream_auto_claim_async("auto", "g", "c2", 0, StreamId { ms: 3, seq: 0 }, 2)
+        .await
+        .unwrap();
+    assert_eq!(second.entries.len(), 2);
+    assert_eq!(second.next_id, "5-0");
+    let last = db
+        .stream_auto_claim_async("auto", "g", "c2", 0, StreamId { ms: 5, seq: 0 }, 1)
+        .await
+        .unwrap();
+    assert_eq!(last.entries.len(), 1);
+    assert_eq!(last.next_id, "0-0");
+}

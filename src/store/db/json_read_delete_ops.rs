@@ -1,6 +1,66 @@
 use super::*;
 
 impl Db {
+    pub(crate) async fn json_get_batch_async(
+        &self,
+        commands: &[(&str, &str)],
+    ) -> Vec<Result<Option<String>, Error>> {
+        let mut key_positions = HashMap::new();
+        let mut keys = Vec::new();
+        for (key, _) in commands {
+            if !key_positions.contains_key(key) {
+                key_positions.insert(*key, keys.len());
+                keys.push(*key);
+            }
+        }
+        let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let now = now_ms();
+        let mut pair_positions = HashMap::new();
+        let mut pairs = Vec::new();
+        for pair in commands {
+            if !pair_positions.contains_key(pair) {
+                pair_positions.insert(*pair, pairs.len());
+                pairs.push(*pair);
+            }
+        }
+        let mut results = Vec::with_capacity(pairs.len());
+        for (key, path) in pairs {
+            let result = async {
+                let tokens = parse_json_path(path)?;
+                let Some(raw) = metas[key_positions[key]].as_deref() else {
+                    return Ok(None);
+                };
+                let (expire_ms, version, indexed) = Self::decode_json_meta(raw)?;
+                if expire_ms > 0 && now >= expire_ms {
+                    return Ok(None);
+                }
+                let value = if indexed {
+                    self.read_json_value_at_path_async(key, version, &tokens)
+                        .await?
+                } else {
+                    let document = Self::decode_legacy_json_document(raw)?;
+                    json_get_path(&document, &tokens).cloned()
+                };
+                value
+                    .map(|value| {
+                        serde_json::to_string(&value)
+                            .map_err(|_| Error::msg("ERR failed to encode JSON value"))
+                    })
+                    .transpose()
+            }
+            .await;
+            results.push(result.map_err(|error: Error| error.to_string()));
+        }
+        commands
+            .iter()
+            .map(|pair| match &results[pair_positions[pair]] {
+                Ok(value) => Ok(value.clone()),
+                Err(message) => Err(Error::msg(message.clone())),
+            })
+            .collect()
+    }
+
     pub fn json_get(&self, key: &str, path: &str) -> Result<Option<String>, Error> {
         let tokens = parse_json_path(path)?;
         self.expire_if_needed(key);

@@ -91,18 +91,21 @@ impl Db {
 
         let start_index = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
         let prefix = hash_field_prefix(self.db_index, key, meta.version);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let Some(lower) = self
+            .store
+            .scan_range_raw_start_at_offset_async(&prefix, upper.clone(), start_index)
+            .await
+        else {
+            return Ok((0, Vec::new()));
+        };
         let raw_entries = self
             .store
-            .scan_range_raw_limited_async(
-                &prefix,
-                prefix_exclusive_upper_bound(&prefix),
-                start_index.saturating_add(count).saturating_add(1),
-            )
+            .scan_range_raw_limited_async(&lower, upper, count.saturating_add(1))
             .await;
-        let has_more = raw_entries.len() > start_index.saturating_add(count);
+        let has_more = raw_entries.len() > count;
         let items = raw_entries
             .into_iter()
-            .skip(start_index)
             .take(count)
             .filter_map(|(raw_key, value)| {
                 let field = raw_key.strip_prefix(prefix.as_slice())?;

@@ -5,20 +5,26 @@ impl Db {
         let Some(mut meta) = self.stream_meta(key)? else {
             return Ok(0);
         };
-        let entries = self.stream_entries_raw(key, meta.version);
-        if entries.len() <= max_len {
+        if meta.length <= max_len as u64 {
             return Ok(0);
         }
-        let delete_count = entries.len() - max_len;
+        let delete_count = usize::try_from(meta.length - max_len as u64).unwrap_or(usize::MAX);
+        let prefix = stream_entry_prefix(self.db_index, key, meta.version);
+        let entries = self.store.scan_range_raw_limited(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            delete_count,
+        );
         let mut batch = WriteBatch::new();
-        for (id, _) in entries.into_iter().take(delete_count) {
-            batch.delete(&stream_entry_key(self.db_index, key, meta.version, id));
+        for (entry_key, _) in &entries {
+            batch.delete(entry_key);
         }
-        meta.length = meta.length.saturating_sub(delete_count as u64);
+        let deleted = entries.len();
+        meta.length = meta.length.saturating_sub(deleted as u64);
         batch.put(&self.mk(key), &encode_stream_meta(meta));
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
-        Ok(delete_count)
+        Ok(deleted)
     }
 
     pub async fn stream_trim_maxlen_async(
@@ -30,19 +36,28 @@ impl Db {
         let Some(mut meta) = self.stream_meta_async(key).await? else {
             return Ok(0);
         };
-        let entries = self.stream_entries_raw_async(key, meta.version).await;
-        if entries.len() <= max_len {
+        if meta.length <= max_len as u64 {
             return Ok(0);
         }
-        let delete_count = entries.len() - max_len;
+        let delete_count = usize::try_from(meta.length - max_len as u64).unwrap_or(usize::MAX);
+        let prefix = stream_entry_prefix(self.db_index, key, meta.version);
+        let entries = self
+            .store
+            .scan_range_raw_limited_async(
+                &prefix,
+                prefix_exclusive_upper_bound(&prefix),
+                delete_count,
+            )
+            .await;
         let mut batch = WriteBatch::new();
-        for (id, _) in entries.into_iter().take(delete_count) {
-            batch.delete(&stream_entry_key(self.db_index, key, meta.version, id));
+        for (entry_key, _) in &entries {
+            batch.delete(entry_key);
         }
-        meta.length = meta.length.saturating_sub(delete_count as u64);
+        let deleted = entries.len();
+        meta.length = meta.length.saturating_sub(deleted as u64);
         batch.put(&self.mk(key), &encode_stream_meta(meta));
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
-        Ok(delete_count)
+        Ok(deleted)
     }
 }

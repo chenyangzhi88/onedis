@@ -17,11 +17,18 @@ use super::{
     Handler, Server, append_array_len, append_bulk_string, append_error, append_integer,
     append_null, append_simple_string, append_usize_decimal, borrowed_list_push_supported,
     borrowed_lrange_supported, borrowed_plain_set_supported, borrowed_read_supported, find_crlf,
-    format_command_for_monitor, parse_borrowed_plain_hdel_commands,
+    format_command_for_monitor, parse_borrowed_key_delete_commands,
+    parse_borrowed_plain_hdel_commands,
+    parse_borrowed_key_expiration_mutations,
     parse_borrowed_plain_hgetdel_commands,
-    parse_borrowed_plain_hset_commands, parse_borrowed_plain_set_commands,
-    parse_borrowed_resp_commands, parse_i64_ascii,
-    parse_usize_ascii,
+    parse_borrowed_plain_hset_commands, parse_borrowed_plain_pfadd_commands,
+    parse_borrowed_plain_list_pop_commands, parse_borrowed_plain_set_commands,
+    parse_borrowed_plain_xadd_commands, parse_borrowed_plain_xdel_commands,
+    parse_borrowed_plain_zset_pop_commands, parse_borrowed_zset_increment_commands,
+    parse_borrowed_resp_commands, parse_borrowed_root_json_set_commands,
+    parse_borrowed_string_mutations, parse_i64_ascii,
+    parse_borrowed_set_mutations,
+    parse_u64_ascii, parse_usize_ascii,
 };
 
 fn test_db() -> Db {
@@ -294,6 +301,40 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
 
     assert!(Handler::can_apply_direct(&command(&["get", "k"])));
     assert!(Handler::can_apply_direct(&command(&["set", "k", "v"])));
+    assert!(Handler::can_apply_direct(&command(&["del", "k1", "k2"])));
+    assert!(Handler::can_apply_direct(&command(&["unlink", "k1", "k2"])));
+    for args in [
+        &["append", "k", "v"][..],
+        &["bitcount", "k"][..],
+        &["bitfield", "k", "incrby", "u8", "0", "1"][..],
+        &["bitpos", "k", "1"][..],
+        &["getbit", "k", "0"][..],
+        &["getdel", "k"][..],
+        &["getex", "k", "px", "1000"][..],
+        &["getrange", "k", "0", "1"][..],
+        &["getset", "k", "v"][..],
+        &["incrbyfloat", "k", "1.5"][..],
+        &["psetex", "k", "1000", "v"][..],
+        &["setbit", "k", "0", "1"][..],
+        &["setnx", "k", "v"][..],
+        &["setrange", "k", "0", "v"][..],
+        &["expire", "k", "10"][..],
+        &["expireat", "k", "2000000000"][..],
+        &["pexpire", "k", "10000"][..],
+        &["pexpireat", "k", "2000000000000"][..],
+        &["persist", "k"][..],
+        &["msetnx", "k1", "v1", "k2", "v2"][..],
+        &["msetex", "1", "k", "v", "px", "1000"][..],
+        &["zlexcount", "z", "-", "+"][..],
+        &["zrangebylex", "z", "-", "+", "limit", "0", "10"][..],
+        &["zrandmember", "z"][..],
+    ] {
+        assert!(
+            Handler::can_apply_direct(&command(args)),
+            "{} should use its atomic Db implementation directly",
+            args[0]
+        );
+    }
     assert!(Handler::can_apply_direct(&command(&["hsetnx", "h", "f", "v"])));
     assert!(Handler::can_apply_direct(&command(&["hget", "h", "f"])));
     assert!(Handler::can_apply_direct(&command(&[
@@ -301,6 +342,38 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
     ])));
     assert!(Handler::can_apply_direct(&command(&[
         "hpexpire", "h", "1000", "fields", "1", "f"
+    ])));
+    for args in [
+        &["geoadd", "g", "13", "38", "m"][..],
+        &["geopos", "g", "m"][..],
+        &["geosearch", "g", "frommember", "m", "byradius", "1", "km"][..],
+        &["pfadd", "hll", "v"][..],
+        &["pfcount", "hll"][..],
+        &["xadd", "s", "*", "f", "v"][..],
+        &["xlen", "s"][..],
+        &["json.set", "j", "$", "{\"v\":1}"][..],
+        &["json.get", "j", "$"][..],
+        &["vadd", "v", "values", "2", "1", "2", "e"][..],
+        &["vcard", "v"][..],
+    ] {
+        assert!(
+            Handler::can_apply_direct(&command(args)),
+            "{} should use its internally atomic Db implementation directly",
+            args[0]
+        );
+    }
+    assert!(!Handler::can_apply_direct(&command(&[
+        "geosearchstore",
+        "dst",
+        "g",
+        "frommember",
+        "m",
+        "byradius",
+        "1",
+        "km",
+    ])));
+    assert!(!Handler::can_apply_direct(&command(&[
+        "georadius", "g", "13", "38", "1", "km", "store", "dst"
     ])));
     assert!(Handler::can_apply_on_worker(&command(&[
         "zrange", "z", "0", "-1"
@@ -388,6 +461,112 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
     );
     assert!(parse_borrowed_plain_hgetdel_commands(set).is_none());
 
+    let string_mutations = parse_borrowed_resp_commands(
+        b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n$1\r\na\r\n*4\r\n$8\r\nSETRANGE\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\nb\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_string_mutations(&string_mutations)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(parse_borrowed_string_mutations(&parsed).is_none());
+    let xadds = parse_borrowed_resp_commands(
+        b"*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n2-0\r\n$1\r\nf\r\n$1\r\nw\r\n",
+    )
+    .unwrap();
+    let xadds = parse_borrowed_plain_xadd_commands(&xadds).unwrap();
+    assert_eq!(xadds.len(), 2);
+    assert_eq!(xadds[0].0, "s");
+    assert_eq!(xadds[0].1, None);
+    assert_eq!(xadds[1].1, Some(StreamId { ms: 2, seq: 0 }));
+    assert_eq!(xadds[1].2, vec![("f", "w")]);
+    let xdels = parse_borrowed_resp_commands(
+        b"*4\r\n$4\r\nXDEL\r\n$1\r\ns\r\n$3\r\n1-0\r\n$3\r\n2-0\r\n*3\r\n$4\r\nXDEL\r\n$1\r\ns\r\n$3\r\n2-0\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_plain_xdel_commands(&xdels),
+        Some(vec![
+            (
+                "s",
+                vec![StreamId { ms: 1, seq: 0 }, StreamId { ms: 2, seq: 0 }]
+            ),
+            ("s", vec![StreamId { ms: 2, seq: 0 }])
+        ])
+    );
+    let json_sets = parse_borrowed_resp_commands(
+        b"*4\r\n$8\r\nJSON.SET\r\n$1\r\nj\r\n$1\r\n$\r\n$7\r\n{\"v\":1}\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_root_json_set_commands(&json_sets),
+        Some(vec![("j", "{\"v\":1}")])
+    );
+    let pfadds = parse_borrowed_resp_commands(
+        b"*4\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$1\r\na\r\n$2\r\n\0b\r\n",
+    )
+    .unwrap();
+    let pfadds = parse_borrowed_plain_pfadd_commands(&pfadds).unwrap();
+    assert_eq!(pfadds, vec![("hll", vec![b"a".as_slice(), b"\0b".as_slice()])]);
+    let set_mutations = parse_borrowed_resp_commands(
+        b"*4\r\n$4\r\nSADD\r\n$1\r\ns\r\n$1\r\na\r\n$1\r\nb\r\n*3\r\n$4\r\nSREM\r\n$1\r\ns\r\n$1\r\na\r\n",
+    )
+    .unwrap();
+    assert_eq!(parse_borrowed_set_mutations(&set_mutations).unwrap().len(), 2);
+    let list_pops = parse_borrowed_resp_commands(
+        b"*2\r\n$4\r\nLPOP\r\n$1\r\nl\r\n*2\r\n$4\r\nRPOP\r\n$1\r\nl\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_plain_list_pop_commands(&list_pops),
+        Some(vec![("l", true, None), ("l", false, None)])
+    );
+    let counted_list_pops = parse_borrowed_resp_commands(
+        b"*3\r\n$4\r\nLPOP\r\n$1\r\nl\r\n$1\r\n2\r\n*3\r\n$4\r\nRPOP\r\n$1\r\nl\r\n$1\r\n0\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_plain_list_pop_commands(&counted_list_pops),
+        Some(vec![("l", true, Some(2)), ("l", false, Some(0))])
+    );
+    let zset_pops = parse_borrowed_resp_commands(
+        b"*2\r\n$7\r\nZPOPMIN\r\n$1\r\nz\r\n*3\r\n$7\r\nZPOPMAX\r\n$1\r\nz\r\n$1\r\n2\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_plain_zset_pop_commands(&zset_pops),
+        Some(vec![("z", true, 1), ("z", false, 2)])
+    );
+    let zset_increments = parse_borrowed_resp_commands(
+        b"*4\r\n$7\r\nZINCRBY\r\n$1\r\nz\r\n$3\r\n1.5\r\n$1\r\nm\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_zset_increment_commands(&zset_increments),
+        Some(vec![("z", 1.5, "m")])
+    );
+    let deletes = parse_borrowed_resp_commands(
+        b"*3\r\n$3\r\nDEL\r\n$1\r\na\r\n$1\r\nb\r\n*2\r\n$6\r\nUNLINK\r\n$1\r\na\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_key_delete_commands(&deletes),
+        Some(vec![(false, vec!["a", "b"]), (true, vec!["a"])])
+    );
+    let expiration_commands = parse_borrowed_resp_commands(
+        b"*3\r\n$7\r\nPEXPIRE\r\n$1\r\nk\r\n$4\r\n1000\r\n*2\r\n$7\r\nPERSIST\r\n$1\r\nk\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_key_expiration_mutations(&expiration_commands)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(parse_borrowed_key_expiration_mutations(&parsed).is_none());
+
     assert!(borrowed_read_supported(&[
         b"GET".as_slice(),
         b"k".as_slice()
@@ -398,6 +577,10 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
     ]));
     assert!(borrowed_read_supported(&[
         b"TYPE".as_slice(),
+        b"k".as_slice()
+    ]));
+    assert!(borrowed_read_supported(&[
+        b"TOUCH".as_slice(),
         b"k".as_slice()
     ]));
     assert!(!borrowed_read_supported(&[]));
@@ -430,6 +613,8 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
     assert_eq!(parse_i64_ascii(b"-42"), Some(-42));
     assert_eq!(parse_i64_ascii(b"-"), None);
     assert_eq!(parse_i64_ascii(b"9x"), None);
+    assert_eq!(parse_u64_ascii(b"18446744073709551615"), Some(u64::MAX));
+    assert_eq!(parse_u64_ascii(b"18446744073709551616"), None);
 
     let mut out = Vec::new();
     append_simple_string(&mut out, "OK");
@@ -969,6 +1154,7 @@ fn borrowed_fast_paths_cover_guards_and_error_branches() {
     let response = rt.block_on(handler.handle_borrowed_read_commands(vec![
         vec![b"GET".as_slice()],
         vec![b"EXISTS".as_slice()],
+        vec![b"TOUCH".as_slice()],
         vec![b"TTL".as_slice(), &[0xff]],
         vec![b"PTTL".as_slice(), b"k".as_slice(), b"extra".as_slice()],
         vec![b"STRLEN".as_slice(), &[0xff]],
@@ -979,10 +1165,131 @@ fn borrowed_fast_paths_cover_guards_and_error_branches() {
     let response_text = text(&response);
     assert!(response_text.contains("wrong number of arguments for 'get' command"));
     assert!(response_text.contains("wrong number of arguments for 'exists' command"));
+    assert!(response_text.contains("wrong number of arguments for 'touch' command"));
     assert!(response_text.contains("wrong number of arguments for ttl command"));
     assert!(response_text.matches("ERR invalid UTF-8 key").count() >= 3);
     assert!(response_text.contains(":0\r\n"));
     assert!(response_text.contains("*2\r\n$-1\r\n$-1\r\n"));
+
+    let db = handler.get_session().get_db();
+    rt.block_on(db.set_add_async(
+        "members",
+        &["one".to_string(), "two".to_string()],
+    ))
+    .unwrap();
+    rt.block_on(db.zset_add_async(
+        "scores",
+        &[(1.5, "one".to_string()), (2.0, "two".to_string())],
+    ))
+    .unwrap();
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&["hset", "hash", "field", "value"]),
+    ))
+    .unwrap();
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&["rpush", "list", "one", "two"]),
+    ))
+    .unwrap();
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&["xadd", "stream", "1-0", "field", "value"]),
+    ))
+    .unwrap();
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&["set", "string", "abcdef"]),
+    ))
+    .unwrap();
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&["set", "bitmap", "A"]),
+    ))
+    .unwrap();
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&["pfadd", "hll", "one"]),
+    ))
+    .unwrap();
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&["json.set", "json", "$", "{\"n\":1}"]),
+    ))
+    .unwrap();
+    let response = rt
+        .block_on(handler.try_handle_borrowed_fast_batch(
+            b"*4\r\n$10\r\nSMISMEMBER\r\n$7\r\nmembers\r\n$3\r\none\r\n$7\r\nmissing\r\n\
+              *4\r\n$7\r\nZMSCORE\r\n$6\r\nscores\r\n$3\r\none\r\n$7\r\nmissing\r\n\
+              *3\r\n$5\r\nTOUCH\r\n$7\r\nmembers\r\n$7\r\nmissing\r\n",
+        ))
+        .unwrap();
+    assert_eq!(
+        response,
+        b"*2\r\n:1\r\n:0\r\n*2\r\n$3\r\n1.5\r\n$-1\r\n:1\r\n"
+    );
+
+    let response = rt.block_on(handler.handle_borrowed_read_commands(vec![
+        vec![b"HGET".as_slice(), b"hash".as_slice(), b"field".as_slice()],
+        vec![
+            b"HMGET".as_slice(),
+            b"hash".as_slice(),
+            b"field".as_slice(),
+            b"missing".as_slice(),
+        ],
+        vec![
+            b"HEXISTS".as_slice(),
+            b"hash".as_slice(),
+            b"field".as_slice(),
+        ],
+        vec![
+            b"HSTRLEN".as_slice(),
+            b"hash".as_slice(),
+            b"field".as_slice(),
+        ],
+        vec![
+            b"SISMEMBER".as_slice(),
+            b"members".as_slice(),
+            b"one".as_slice(),
+        ],
+        vec![
+            b"ZSCORE".as_slice(),
+            b"scores".as_slice(),
+            b"one".as_slice(),
+        ],
+        vec![b"SCARD".as_slice(), b"members".as_slice()],
+        vec![b"HLEN".as_slice(), b"hash".as_slice()],
+        vec![b"ZCARD".as_slice(), b"scores".as_slice()],
+        vec![b"LLEN".as_slice(), b"list".as_slice()],
+        vec![b"XLEN".as_slice(), b"stream".as_slice()],
+    ]));
+    assert_eq!(
+        response,
+        b"$5\r\nvalue\r\n*2\r\n$5\r\nvalue\r\n$-1\r\n:1\r\n:5\r\n:1\r\n$3\r\n1.5\r\n:2\r\n:1\r\n:2\r\n:2\r\n:1\r\n"
+    );
+
+    let response = rt.block_on(handler.handle_borrowed_read_commands(vec![
+        vec![
+            b"GETRANGE".as_slice(),
+            b"string".as_slice(),
+            b"1".as_slice(),
+            b"3".as_slice(),
+        ],
+        vec![b"GETBIT".as_slice(), b"bitmap".as_slice(), b"1".as_slice()],
+        vec![b"BITCOUNT".as_slice(), b"bitmap".as_slice()],
+        vec![b"BITPOS".as_slice(), b"bitmap".as_slice(), b"1".as_slice()],
+    ]));
+    assert_eq!(response, b"$3\r\nbcd\r\n:1\r\n:2\r\n:1\r\n");
+
+    let response = rt.block_on(handler.handle_borrowed_read_commands(vec![
+        vec![b"PFCOUNT".as_slice(), b"hll".as_slice()],
+        vec![
+            b"JSON.GET".as_slice(),
+            b"json".as_slice(),
+            b"$.n".as_slice(),
+        ],
+    ]));
+    assert_eq!(response, b":1\r\n$1\r\n1\r\n");
 
     let invalid_key = [0xff];
     let response = rt.block_on(handler.handle_borrowed_set_commands(vec![vec![

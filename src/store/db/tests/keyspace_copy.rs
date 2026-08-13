@@ -942,3 +942,40 @@ async fn key_space_readonly_ttl_copy_move_scan_and_clear_cover_edges() {
     assert_eq!(db0.len_async().await, 0);
     assert!(db1.exists("set"));
 }
+
+#[tokio::test]
+async fn scan_cursor_resumes_at_the_requested_physical_main_key_offset() {
+    let db = test_db();
+    for index in 0..20 {
+        db.insert_string(format!("scan:{index:02}"), index.to_string(), None);
+    }
+
+    let (next, keys) = db.scan_keys_page_async(7, "*", 3, None).await.unwrap();
+    assert_eq!(next, 10);
+    assert_eq!(keys, vec!["scan:07", "scan:08", "scan:09"]);
+    let (done, keys) = db.scan_keys_page_async(18, "*", 10, None).await.unwrap();
+    assert_eq!(done, 0);
+    assert_eq!(keys, vec!["scan:18", "scan:19"]);
+}
+
+#[tokio::test]
+async fn ordered_delete_pipeline_batch_counts_each_key_once() {
+    let db = test_db();
+    db.insert_string("delete:a".to_string(), "a".to_string(), None);
+    db.insert_string("delete:b".to_string(), "b".to_string(), None);
+    db.list_push_right_async("delete:list", &["v".to_string()], false)
+        .await
+        .unwrap();
+
+    let replies = db
+        .delete_key_commands_batch_async(&[
+            vec!["delete:a", "delete:a", "missing"],
+            vec!["delete:a", "delete:b"],
+            vec!["delete:list"],
+        ])
+        .await;
+    assert_eq!(replies, vec![1, 1, 1]);
+    assert!(!db.exists_readonly("delete:a"));
+    assert!(!db.exists_readonly("delete:b"));
+    assert!(!db.exists_readonly("delete:list"));
+}

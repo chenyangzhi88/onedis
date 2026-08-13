@@ -127,17 +127,20 @@ impl Geopos {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let mut frames = Vec::with_capacity(self.members.len());
-        for member in self.members {
-            match db.zset_score_async(&self.key, &member).await {
-                Ok(Some(score)) => {
+        let scores = match db.zset_multi_score_async(&self.key, &self.members).await {
+            Ok(scores) => scores,
+            Err(err) => return Ok(Frame::Error(err.to_string())),
+        };
+        let frames = scores
+            .into_iter()
+            .map(|score| match score {
+                Some(score) => {
                     let (lon, lat) = decode_score(score as u64);
-                    frames.push(Frame::Array(vec![bulk_f(lon), bulk_f(lat)]));
+                    Frame::Array(vec![bulk_f(lon), bulk_f(lat)])
                 }
-                Ok(None) => frames.push(Frame::Null),
-                Err(err) => return Ok(Frame::Error(err.to_string())),
-            }
-        }
+                None => Frame::Null,
+            })
+            .collect();
         bounded_geo_frame(Frame::Array(frames))
     }
 }
@@ -177,10 +180,13 @@ impl Geodist {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let factor = unit_factor(&self.unit)?;
-        let Some(a) = db.zset_score_async(&self.key, &self.a).await? else {
+        let scores = db
+            .zset_multi_score_async(&self.key, &[self.a, self.b])
+            .await?;
+        let Some(a) = scores[0] else {
             return Ok(Frame::Null);
         };
-        let Some(b) = db.zset_score_async(&self.key, &self.b).await? else {
+        let Some(b) = scores[1] else {
             return Ok(Frame::Null);
         };
         let meters = distance_m(decode_score(a as u64), decode_score(b as u64));
@@ -219,17 +225,20 @@ impl Geohash {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let mut frames = Vec::with_capacity(self.members.len());
-        for member in self.members {
-            match db.zset_score_async(&self.key, &member).await {
-                Ok(Some(score)) => {
+        let scores = match db.zset_multi_score_async(&self.key, &self.members).await {
+            Ok(scores) => scores,
+            Err(err) => return Ok(Frame::Error(err.to_string())),
+        };
+        let frames = scores
+            .into_iter()
+            .map(|score| match score {
+                Some(score) => {
                     let (lon, lat) = decode_score(score as u64);
-                    frames.push(Frame::bulk_string(redis_geohash(lon, lat)));
+                    Frame::bulk_string(redis_geohash(lon, lat))
                 }
-                Ok(None) => frames.push(Frame::Null),
-                Err(err) => return Ok(Frame::Error(err.to_string())),
-            }
-        }
+                None => Frame::Null,
+            })
+            .collect();
         bounded_geo_frame(Frame::Array(frames))
     }
 }

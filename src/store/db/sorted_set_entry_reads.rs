@@ -1,3 +1,4 @@
+use super::set_random_pop_scan::random_member_ordinals;
 use super::*;
 
 impl Db {
@@ -120,28 +121,16 @@ impl Db {
         key: &str,
         count: Option<i64>,
     ) -> Result<Option<Vec<(String, f64)>>, Error> {
-        let mut entries = self.zset_all_entries(key)?;
-        if entries.is_empty() {
+        let Some((_, version)) = self.zset_expire_ms(key)? else {
+            return Ok(None);
+        };
+        let len = self.zset_card(key)?;
+        if len == 0 {
             return Ok(None);
         }
-        let seed = now_ms() as usize;
-        let len = entries.len();
-        entries.rotate_left(seed % len);
-
-        let Some(count) = count else {
-            return Ok(Some(vec![entries[0].clone()]));
-        };
-        if count >= 0 {
-            entries.truncate((count as usize).min(entries.len()));
-            return Ok(Some(entries));
-        }
-
-        let requested = count.unsigned_abs() as usize;
-        let mut result = Vec::with_capacity(requested);
-        for idx in 0..requested {
-            result.push(entries[idx % entries.len()].clone());
-        }
-        Ok(Some(result))
+        let (picks, unique) = random_member_ordinals(len, count);
+        self.zset_entries_at_ordinals(key, version, &picks, &unique)
+            .map(Some)
     }
 
     pub async fn zset_random_members_async(
@@ -149,27 +138,85 @@ impl Db {
         key: &str,
         count: Option<i64>,
     ) -> Result<Option<Vec<(String, f64)>>, Error> {
-        let mut entries = self.zset_all_entries_async(key).await?;
-        if entries.is_empty() {
+        let Some((_, version)) = self.zset_expire_ms_async(key).await? else {
+            return Ok(None);
+        };
+        let len = self.zset_card_async(key).await?;
+        if len == 0 {
             return Ok(None);
         }
-        let seed = now_ms() as usize;
-        let len = entries.len();
-        entries.rotate_left(seed % len);
+        let (picks, unique) = random_member_ordinals(len, count);
+        self.zset_entries_at_ordinals_async(key, version, &picks, &unique)
+            .await
+            .map(Some)
+    }
 
-        let Some(count) = count else {
-            return Ok(Some(vec![entries[0].clone()]));
-        };
-        if count >= 0 {
-            entries.truncate((count as usize).min(entries.len()));
-            return Ok(Some(entries));
-        }
+    fn zset_entries_at_ordinals(
+        &self,
+        key: &str,
+        version: u64,
+        picks: &[usize],
+        unique: &[usize],
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let prefix = zset_rank_prefix(self.db_index, key, version);
+        let rank_keys = self.store.scan_range_raw_keys_at_ordinals(
+            &prefix,
+            prefix_exclusive_upper_bound(&prefix),
+            unique,
+        );
+        self.decode_random_zset_selection(key, version, picks, unique, rank_keys)
+    }
 
-        let requested = count.unsigned_abs() as usize;
-        let mut result = Vec::with_capacity(requested);
-        for idx in 0..requested {
-            result.push(entries[idx % entries.len()].clone());
+    async fn zset_entries_at_ordinals_async(
+        &self,
+        key: &str,
+        version: u64,
+        picks: &[usize],
+        unique: &[usize],
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let prefix = zset_rank_prefix(self.db_index, key, version);
+        let rank_keys = self
+            .store
+            .scan_range_raw_keys_at_ordinals_async(
+                &prefix,
+                prefix_exclusive_upper_bound(&prefix),
+                unique,
+            )
+            .await;
+        self.decode_random_zset_selection(key, version, picks, unique, rank_keys)
+    }
+
+    fn decode_random_zset_selection(
+        &self,
+        key: &str,
+        version: u64,
+        picks: &[usize],
+        unique: &[usize],
+        rank_keys: Vec<Vec<u8>>,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        if rank_keys.len() != unique.len() {
+            return Err(Error::msg(
+                "ERR sorted set changed while selecting random members",
+            ));
         }
-        Ok(Some(result))
+        let mut entries = HashMap::with_capacity(unique.len());
+        for (ordinal, rank_key) in unique.iter().copied().zip(rank_keys) {
+            let member = self
+                .decode_rank_member(key, version, &rank_key)
+                .ok_or_else(|| Error::msg("ERR invalid sorted set rank key"))?;
+            let score = self
+                .decode_rank_score(key, version, &rank_key)
+                .ok_or_else(|| Error::msg("ERR invalid sorted set rank key"))?;
+            entries.insert(ordinal, (member, score));
+        }
+        Ok(picks
+            .iter()
+            .map(|ordinal| {
+                entries
+                    .get(ordinal)
+                    .expect("selected sorted set ordinal is present")
+                    .clone()
+            })
+            .collect())
     }
 }

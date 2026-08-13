@@ -26,6 +26,88 @@ impl Db {
         }
     }
 
+    /// Read binary main keys in one storage operation and filter logically expired values.
+    pub(crate) async fn read_live_raw_byte_keys_many_async(
+        &self,
+        keys: &[&[u8]],
+    ) -> Vec<Option<Vec<u8>>> {
+        let raw_keys = keys
+            .iter()
+            .map(|key| main_key_bytes(self.db_index, key))
+            .collect::<Vec<_>>();
+        let now = now_ms();
+        self.store
+            .multi_get_raw_async(&raw_keys)
+            .await
+            .into_iter()
+            .map(|raw| {
+                raw.filter(|raw| {
+                    let expire_ms = decode_expire_ms(raw);
+                    expire_ms == 0 || now < expire_ms
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn ttl_millis_from_live_raw(raw: &[u8]) -> i64 {
+        let expire_ms = decode_expire_ms(raw);
+        if expire_ms == 0 {
+            -1
+        } else {
+            expire_ms.saturating_sub(now_ms()) as i64
+        }
+    }
+
+    pub(crate) fn type_name_from_live_raw(raw: &[u8]) -> &'static str {
+        let Some(header) = decode_meta_header(raw) else {
+            return "none";
+        };
+        match header.type_tag {
+            TYPE_STRING => "string",
+            TYPE_HASH => "hash",
+            TYPE_SET => "set",
+            TYPE_SORTED_SET => "zset",
+            TYPE_LIST => "list",
+            TYPE_STREAM => "stream",
+            TYPE_VECTOR => "vector",
+            TYPE_JSON => "json",
+            _ => "none",
+        }
+    }
+
+    pub(crate) fn set_len_from_live_raw(raw: &[u8]) -> Result<usize, Error> {
+        let header =
+            decode_meta_header(raw).ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
+        if header.type_tag != TYPE_SET {
+            return Err(Error::msg(WRONG_TYPE_ERROR));
+        }
+        decode_set_meta(raw)
+            .map(|meta| meta.len)
+            .ok_or_else(|| Error::msg("Failed to decode set metadata"))
+    }
+
+    pub(crate) fn list_len_from_live_raw(raw: &[u8]) -> Result<usize, Error> {
+        let header =
+            decode_meta_header(raw).ok_or_else(|| Error::msg("Failed to decode list metadata"))?;
+        if header.type_tag != TYPE_LIST {
+            return Err(Error::msg(WRONG_TYPE_ERROR));
+        }
+        decode_list_meta(raw)
+            .map(|meta| meta.tail.saturating_sub(meta.head) as usize)
+            .ok_or_else(|| Error::msg("Failed to decode list metadata"))
+    }
+
+    pub(crate) fn stream_len_from_live_raw(raw: &[u8]) -> Result<usize, Error> {
+        let header = decode_meta_header(raw)
+            .ok_or_else(|| Error::msg("Failed to decode stream metadata"))?;
+        if header.type_tag != TYPE_STREAM {
+            return Err(Error::msg(WRONG_TYPE_ERROR));
+        }
+        decode_stream_meta(raw)
+            .and_then(|meta| usize::try_from(meta.length).ok())
+            .ok_or_else(|| Error::msg("Failed to decode stream metadata"))
+    }
+
     pub fn getex_string_bytes(
         &self,
         key: &str,
@@ -201,6 +283,24 @@ impl Db {
 
     pub async fn exists_readonly_async(&self, key: &str) -> bool {
         self.read_live_raw_async(key).await.is_some()
+    }
+
+    /// Return per-key liveness with one storage multi-get. Duplicate keys intentionally
+    /// retain duplicate results to match EXISTS/TOUCH semantics.
+    pub async fn exists_readonly_many_async(&self, keys: &[String]) -> Vec<bool> {
+        let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let now = now_ms();
+        self.store
+            .multi_get_raw_async(&raw_keys)
+            .await
+            .into_iter()
+            .map(|raw| {
+                raw.is_some_and(|raw| {
+                    let expire_ms = decode_expire_ms(&raw);
+                    expire_ms == 0 || now < expire_ms
+                })
+            })
+            .collect()
     }
 
     pub fn ttl_millis_readonly(&self, key: &str) -> i64 {

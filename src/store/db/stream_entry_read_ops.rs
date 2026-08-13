@@ -37,12 +37,13 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        let mut entries = self.stream_entries_between(key, meta.version, lower, upper);
         if reverse {
-            entries.reverse();
+            Ok(self.stream_entries_between_limited_reverse(key, meta.version, lower, upper, limit))
+        } else {
+            let mut entries = self.stream_entries_between(key, meta.version, lower, upper);
+            entries.truncate(limit);
+            Ok(entries)
         }
-        entries.truncate(limit);
-        Ok(entries)
     }
 
     pub async fn stream_range_async(
@@ -66,14 +67,21 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        let mut entries = self
-            .stream_entries_between_async(key, meta.version, lower, upper)
-            .await;
         if reverse {
-            entries.reverse();
+            Ok(self
+                .stream_entries_between_limited_reverse_async(
+                    key,
+                    meta.version,
+                    lower,
+                    upper,
+                    limit,
+                )
+                .await)
+        } else {
+            Ok(self
+                .stream_entries_between_limited_async(key, meta.version, lower, upper, limit)
+                .await)
         }
-        entries.truncate(limit);
-        Ok(entries)
     }
 
     pub fn stream_read(
@@ -133,17 +141,16 @@ impl Db {
                 StreamReadStart::Id(id) => *id,
                 StreamReadStart::Latest => meta.last_id,
             };
+            let Some(lower) = native_stream_helpers::stream_id_successor(lower) else {
+                continue;
+            };
             let upper = StreamId {
                 ms: u64::MAX,
                 seq: u64::MAX,
             };
-            let mut entries = self
-                .stream_entries_between_async(key, meta.version, lower, upper)
-                .await
-                .into_iter()
-                .filter(|entry| parse_stream_id(&entry.id).is_some_and(|id| id > lower))
-                .collect::<Vec<_>>();
-            entries.truncate(limit);
+            let entries = self
+                .stream_entries_between_limited_async(key, meta.version, lower, upper, limit)
+                .await;
             if !entries.is_empty() {
                 result.push((key.clone(), entries));
             }

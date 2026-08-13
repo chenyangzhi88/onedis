@@ -8,6 +8,55 @@ impl KvStore {
             .await
     }
 
+    /// Count visible keys in a bounded range without materializing their values.
+    pub fn count_range_raw_keys(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+    ) -> usize {
+        let storage_started = Instant::now();
+        let query = scan_request_with_projection(
+            Some(lower_bound.to_vec()),
+            upper_bound,
+            None,
+            KvProjection::KeyOnly,
+        );
+        let mut cursor = if self.txn.is_some() {
+            self.with_transaction_mut(|txn| {
+                txn.scan(query)
+                    .expect("failed to create kv_engine transaction key scan cursor")
+            })
+            .expect("missing kv_engine transaction")
+        } else {
+            self.table
+                .scan(query)
+                .expect("failed to create kv_engine key scan cursor")
+        };
+        let mut count = 0usize;
+        while let Some(batch) = cursor
+            .next_batch()
+            .expect("failed to advance kv_engine key scan cursor")
+        {
+            count = count.saturating_add(batch.len());
+        }
+        global_metrics().record_storage_read(elapsed_us(storage_started));
+        count
+    }
+
+    pub async fn count_range_raw_keys_async(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+    ) -> usize {
+        let store = self.clone();
+        let lower_bound = lower_bound.to_vec();
+        tokio::task::spawn_blocking(move || {
+            store.count_range_raw_keys(&lower_bound, upper_bound)
+        })
+        .await
+        .expect("kv_engine key count worker panicked")
+    }
+
     /// Scan a bounded raw range and stop after `limit` entries.
     pub fn scan_range_raw_limited(
         &self,
@@ -95,6 +144,56 @@ impl KvStore {
         .expect("kv_engine scan worker panicked")
     }
 
+    /// Scan a bounded raw range in descending key order and stop after `limit` entries.
+    pub fn scan_range_raw_limited_reverse(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        limit: usize,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let storage_started = Instant::now();
+        let mut query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
+        query.order = KeyOrder::Desc;
+        let entries = if self.txn.is_some() {
+            let cursor = self
+                .with_transaction_mut(|txn| {
+                    txn.scan(query)
+                        .expect("failed to create reverse kv_engine transaction scan cursor")
+                })
+                .expect("missing kv_engine transaction");
+            collect_scan_cursor(cursor, limit)
+        } else {
+            let cursor = self
+                .table
+                .scan(query)
+                .expect("failed to create reverse kv_engine scan cursor");
+            collect_scan_cursor(cursor, limit)
+        };
+        global_metrics().record_storage_read(elapsed_us(storage_started));
+        entries
+    }
+
+    pub async fn scan_range_raw_limited_reverse_async(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        limit: usize,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let store = self.clone();
+        let lower_bound = lower_bound.to_vec();
+        tokio::task::spawn_blocking(move || {
+            store.scan_range_raw_limited_reverse(&lower_bound, upper_bound, limit)
+        })
+        .await
+        .expect("kv_engine reverse scan worker panicked")
+    }
+
     /// Return the keys at the requested zero-based visible-key ranks from one bounded read view.
     ///
     /// `ordinals` must be strictly increasing. Exact clean scan units before a target are skipped
@@ -155,6 +254,36 @@ impl KvStore {
         })
         .await
         .expect("kv_engine ordinal key scan worker panicked")
+    }
+
+    /// Resolve the inclusive lower bound for a zero-based visible-key offset.
+    pub fn scan_range_raw_start_at_offset(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        offset: usize,
+    ) -> Option<Vec<u8>> {
+        if offset == 0 {
+            return Some(lower_bound.to_vec());
+        }
+        self.scan_range_raw_keys_at_ordinals(lower_bound, upper_bound, &[offset])
+            .into_iter()
+            .next()
+    }
+
+    pub async fn scan_range_raw_start_at_offset_async(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        offset: usize,
+    ) -> Option<Vec<u8>> {
+        if offset == 0 {
+            return Some(lower_bound.to_vec());
+        }
+        self.scan_range_raw_keys_at_ordinals_async(lower_bound, upper_bound, &[offset])
+            .await
+            .into_iter()
+            .next()
     }
 
     pub fn scan_range_raw_visit<F>(

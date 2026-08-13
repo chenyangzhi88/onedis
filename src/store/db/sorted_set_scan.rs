@@ -9,11 +9,30 @@ impl Db {
         pattern_str: &str,
         count: usize,
     ) -> Result<(u64, Vec<(String, f64)>), Error> {
+        let Some((_, version)) = self.zset_expire_ms(key)? else {
+            return Ok((0, Vec::new()));
+        };
+        let prefix = zset_rank_prefix(self.db_index, key, version);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+        let Some(lower) = self
+            .store
+            .scan_range_raw_start_at_offset(&prefix, upper.clone(), offset)
+        else {
+            return Ok((0, Vec::new()));
+        };
         let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
         let mut state = ZsetScanState::new(cursor, count);
-        self.zset_visit_entries(key, |member, score| {
-            state.visit(member, score, matcher.as_ref())
-        })?;
+        self.store
+            .scan_range_raw_visit(&lower, upper, usize::MAX, |rank_key, _| {
+                let Some(score) = self.decode_rank_score(key, version, rank_key) else {
+                    return true;
+                };
+                let Some(member) = self.decode_rank_member(key, version, rank_key) else {
+                    return true;
+                };
+                state.visit(member, score, matcher.as_ref())
+            });
         state.finish()
     }
 
@@ -24,18 +43,37 @@ impl Db {
         pattern_str: &str,
         count: usize,
     ) -> Result<(u64, Vec<(String, f64)>), Error> {
+        let Some((_, version)) = self.zset_expire_ms_async(key).await? else {
+            return Ok((0, Vec::new()));
+        };
+        let prefix = zset_rank_prefix(self.db_index, key, version);
+        let upper = prefix_exclusive_upper_bound(&prefix);
+        let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+        let Some(lower) = self
+            .store
+            .scan_range_raw_start_at_offset_async(&prefix, upper.clone(), offset)
+            .await
+        else {
+            return Ok((0, Vec::new()));
+        };
         let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
         let mut state = ZsetScanState::new(cursor, count);
-        self.zset_visit_entries_async(key, |member, score| {
-            state.visit(member, score, matcher.as_ref())
-        })
-        .await?;
+        self.store
+            .scan_range_raw_visit_async(&lower, upper, usize::MAX, |rank_key, _| {
+                let Some(score) = self.decode_rank_score(key, version, rank_key) else {
+                    return true;
+                };
+                let Some(member) = self.decode_rank_member(key, version, rank_key) else {
+                    return true;
+                };
+                state.visit(member, score, matcher.as_ref())
+            })
+            .await;
         state.finish()
     }
 }
 
 struct ZsetScanState {
-    cursor: u64,
     position: u64,
     count: usize,
     bytes: usize,
@@ -47,8 +85,7 @@ struct ZsetScanState {
 impl ZsetScanState {
     fn new(cursor: u64, count: usize) -> Self {
         Self {
-            cursor,
-            position: 0,
+            position: cursor,
             count,
             bytes: 32,
             entries: Vec::with_capacity(count.min(1024)),
@@ -59,8 +96,7 @@ impl ZsetScanState {
 
     fn visit(&mut self, member: String, score: f64, matcher: Option<&pattern::Matcher>) -> bool {
         self.position = self.position.saturating_add(1);
-        if self.position <= self.cursor || matcher.is_some_and(|matcher| !matcher.is_match(&member))
-        {
+        if matcher.is_some_and(|matcher| !matcher.is_match(&member)) {
             return true;
         }
         let cost = member

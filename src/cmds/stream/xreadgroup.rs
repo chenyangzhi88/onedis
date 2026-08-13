@@ -16,6 +16,10 @@ pub struct Xreadgroup {
 }
 
 impl Xreadgroup {
+    pub(crate) fn is_single_stream(&self) -> bool {
+        self.streams.len() == 1
+    }
+
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         if frame.arg_len() < 7 || !text_arg(&frame, 1)?.eq_ignore_ascii_case("GROUP") {
             return Err(Error::msg("ERR syntax error"));

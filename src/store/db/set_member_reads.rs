@@ -25,6 +25,93 @@ impl Db {
             .await)
     }
 
+    /// Check several members with one metadata lookup and one storage multi-get.
+    pub async fn set_multi_contains_async(
+        &self,
+        key: &str,
+        members: &[String],
+    ) -> Result<Vec<bool>, Error> {
+        let Some(meta) = self.set_meta_async(key).await? else {
+            return Ok(vec![false; members.len()]);
+        };
+        let member_keys = members
+            .iter()
+            .map(|member| set_member_key(self.db_index, key, meta.version, member))
+            .collect::<Vec<_>>();
+        Ok(self
+            .store
+            .multi_get_raw_async(&member_keys)
+            .await
+            .into_iter()
+            .map(|value| value.is_some())
+            .collect())
+    }
+
+    /// Batch several SMISMEMBER commands across a client pipeline. Metadata and member
+    /// probes are each collapsed into one storage multi-get while replies retain order.
+    pub(crate) async fn set_multi_contains_batch_async(
+        &self,
+        commands: &[(&str, Vec<String>)],
+    ) -> Vec<Result<Vec<bool>, Error>> {
+        let meta_keys = commands
+            .iter()
+            .map(|(key, _)| self.mk(key))
+            .collect::<Vec<_>>();
+        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let now = now_ms();
+        let mut member_keys = Vec::new();
+        let mut plans = Vec::with_capacity(commands.len());
+        for ((key, members), raw) in commands.iter().zip(metas) {
+            let Some(raw) = raw else {
+                plans.push(SetMultiContainsPlan::Missing(members.len()));
+                continue;
+            };
+            let Some(header) = decode_meta_header(&raw) else {
+                plans.push(SetMultiContainsPlan::Error(
+                    "Failed to decode set metadata".to_string(),
+                ));
+                continue;
+            };
+            if header.expire_ms > 0 && now >= header.expire_ms {
+                plans.push(SetMultiContainsPlan::Missing(members.len()));
+                continue;
+            }
+            if header.type_tag != TYPE_SET {
+                plans.push(SetMultiContainsPlan::Error(WRONG_TYPE_ERROR.to_string()));
+                continue;
+            }
+            let Some(meta) = decode_set_meta(&raw) else {
+                plans.push(SetMultiContainsPlan::Error(
+                    "Failed to decode set metadata".to_string(),
+                ));
+                continue;
+            };
+            let lookup = member_keys.len();
+            member_keys.extend(
+                members
+                    .iter()
+                    .map(|member| set_member_key(self.db_index, key, meta.version, member)),
+            );
+            plans.push(SetMultiContainsPlan::Members {
+                lookup,
+                count: members.len(),
+            });
+        }
+        let values = self.store.multi_get_raw_async(&member_keys).await;
+        plans
+            .into_iter()
+            .map(|plan| match plan {
+                SetMultiContainsPlan::Missing(count) => Ok(vec![false; count]),
+                SetMultiContainsPlan::Error(message) => Err(Error::msg(message)),
+                SetMultiContainsPlan::Members { lookup, count } => Ok(values
+                    [lookup..lookup.saturating_add(count)]
+                    .iter()
+                    .map(Option::is_some)
+                    .collect()),
+            })
+            .collect()
+    }
+
     /// 返回 set 成员数量。
     pub fn set_len(&self, key: &str) -> Result<usize, Error> {
         Ok(self.set_meta(key)?.map_or(0, |meta| meta.len))
@@ -143,4 +230,10 @@ impl Db {
             None => Ok(None),
         }
     }
+}
+
+enum SetMultiContainsPlan {
+    Missing(usize),
+    Error(String),
+    Members { lookup: usize, count: usize },
 }

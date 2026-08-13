@@ -124,6 +124,106 @@ impl Db {
             .collect()
     }
 
+    /// Scan only the requested inclusive stream-ID window and stop after `limit` entries.
+    /// Stream entry IDs are the final, big-endian 16 bytes of the storage key, so the Redis
+    /// ordering and the storage ordering are identical.
+    pub(in crate::store::db) async fn stream_entries_between_limited_async(
+        &self,
+        key: &str,
+        version: u64,
+        start: StreamId,
+        end: StreamId,
+        limit: usize,
+    ) -> Vec<StreamEntry> {
+        if limit == 0 || start > end {
+            return Vec::new();
+        }
+        let prefix = stream_entry_prefix(self.db_index, key, version);
+        let lower = stream_entry_key(self.db_index, key, version, start);
+        let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
+            prefix_exclusive_upper_bound(&prefix)
+        } else {
+            prefix_exclusive_upper_bound(&stream_entry_key(self.db_index, key, version, end))
+        };
+        self.store
+            .scan_range_raw_limited_async(&lower, upper, limit)
+            .await
+            .into_iter()
+            .filter_map(|(entry_key, value)| {
+                let id = decode_stream_entry_id(&prefix, &entry_key)?;
+                Some(StreamEntry {
+                    id: id.to_redis_id(),
+                    fields: decode_stream_entry(&value)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Scan an inclusive stream-ID window in descending order and stop at `limit`.
+    pub(in crate::store::db) fn stream_entries_between_limited_reverse(
+        &self,
+        key: &str,
+        version: u64,
+        start: StreamId,
+        end: StreamId,
+        limit: usize,
+    ) -> Vec<StreamEntry> {
+        if limit == 0 || start > end {
+            return Vec::new();
+        }
+        let prefix = stream_entry_prefix(self.db_index, key, version);
+        let lower = stream_entry_key(self.db_index, key, version, start);
+        let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
+            prefix_exclusive_upper_bound(&prefix)
+        } else {
+            prefix_exclusive_upper_bound(&stream_entry_key(self.db_index, key, version, end))
+        };
+        self.store
+            .scan_range_raw_limited_reverse(&lower, upper, limit)
+            .into_iter()
+            .filter_map(|(entry_key, value)| {
+                let id = decode_stream_entry_id(&prefix, &entry_key)?;
+                Some(StreamEntry {
+                    id: id.to_redis_id(),
+                    fields: decode_stream_entry(&value)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Async counterpart of the reverse bounded stream scan.
+    pub(in crate::store::db) async fn stream_entries_between_limited_reverse_async(
+        &self,
+        key: &str,
+        version: u64,
+        start: StreamId,
+        end: StreamId,
+        limit: usize,
+    ) -> Vec<StreamEntry> {
+        if limit == 0 || start > end {
+            return Vec::new();
+        }
+        let prefix = stream_entry_prefix(self.db_index, key, version);
+        let lower = stream_entry_key(self.db_index, key, version, start);
+        let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
+            prefix_exclusive_upper_bound(&prefix)
+        } else {
+            prefix_exclusive_upper_bound(&stream_entry_key(self.db_index, key, version, end))
+        };
+        self.store
+            .scan_range_raw_limited_reverse_async(&lower, upper, limit)
+            .await
+            .into_iter()
+            .filter_map(|(entry_key, value)| {
+                let id = decode_stream_entry_id(&prefix, &entry_key)?;
+                Some(StreamEntry {
+                    id: id.to_redis_id(),
+                    fields: decode_stream_entry(&value)?,
+                })
+            })
+            .collect()
+    }
+
     pub(in crate::store::db) fn stream_entry_by_id(
         &self,
         key: &str,
@@ -260,5 +360,86 @@ impl Db {
                 ))
             })
             .collect()
+    }
+
+    /// Read a bounded inclusive PEL ID window without scanning entries before `start`.
+    pub(in crate::store::db) fn stream_pending_between_limited(
+        &self,
+        key: &str,
+        version: u64,
+        group: &str,
+        start: StreamId,
+        end: StreamId,
+        limit: usize,
+    ) -> Vec<(StreamId, StreamPelState)> {
+        if limit == 0 || start > end {
+            return Vec::new();
+        }
+        let prefix = stream_pel_group_prefix(self.db_index, key, version, group);
+        let lower = stream_pel_key(self.db_index, key, version, group, start);
+        let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
+            prefix_exclusive_upper_bound(&prefix)
+        } else {
+            prefix_exclusive_upper_bound(&stream_pel_key(self.db_index, key, version, group, end))
+        };
+        self.store
+            .scan_range_raw_limited(&lower, upper, limit)
+            .into_iter()
+            .filter_map(|(pel_key, raw)| {
+                Some((
+                    decode_stream_pel_id(&prefix, &pel_key)?,
+                    decode_stream_pel_state(&raw)?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Async counterpart of the bounded PEL scan.
+    pub(in crate::store::db) async fn stream_pending_between_limited_async(
+        &self,
+        key: &str,
+        version: u64,
+        group: &str,
+        start: StreamId,
+        end: StreamId,
+        limit: usize,
+    ) -> Vec<(StreamId, StreamPelState)> {
+        if limit == 0 || start > end {
+            return Vec::new();
+        }
+        let prefix = stream_pel_group_prefix(self.db_index, key, version, group);
+        let lower = stream_pel_key(self.db_index, key, version, group, start);
+        let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
+            prefix_exclusive_upper_bound(&prefix)
+        } else {
+            prefix_exclusive_upper_bound(&stream_pel_key(self.db_index, key, version, group, end))
+        };
+        self.store
+            .scan_range_raw_limited_async(&lower, upper, limit)
+            .await
+            .into_iter()
+            .filter_map(|(pel_key, raw)| {
+                Some((
+                    decode_stream_pel_id(&prefix, &pel_key)?,
+                    decode_stream_pel_state(&raw)?,
+                ))
+            })
+            .collect()
+    }
+}
+
+pub(in crate::store::db) fn stream_id_successor(id: StreamId) -> Option<StreamId> {
+    if id.seq < u64::MAX {
+        Some(StreamId {
+            ms: id.ms,
+            seq: id.seq + 1,
+        })
+    } else if id.ms < u64::MAX {
+        Some(StreamId {
+            ms: id.ms + 1,
+            seq: 0,
+        })
+    } else {
+        None
     }
 }

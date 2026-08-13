@@ -10,7 +10,7 @@ use common::types::status::{Result as KvResult, Status};
 use common::types::write_batch::{WriteBatch, WriteType};
 use kv_engine::{
     api::{
-        DbImpl, ReadOptions, WriteOptions,
+        DbImpl, KeyOrder, ReadOptions, WriteOptions,
         schemaless::{
             KeyRange, KvBatch, KvProjection, KvScanCursor, KvScanRequest,
             ObservedKeyState as EngineObservedKeyState, ObservedKvValue as EngineObservedKvValue,

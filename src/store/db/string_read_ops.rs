@@ -81,4 +81,49 @@ impl Db {
             Err(Error::msg(WRONG_TYPE_ERROR))
         }
     }
+
+    /// MGET-compatible bulk read. Missing, expired, and non-string keys become nil.
+    pub async fn get_string_bytes_many_async(&self, keys: &[String]) -> Vec<Option<Vec<u8>>> {
+        let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let now = now_ms();
+        self.store
+            .multi_get_raw_async(&raw_keys)
+            .await
+            .into_iter()
+            .map(|raw| {
+                let raw = raw?;
+                let expire_ms = decode_expire_ms(&raw);
+                if expire_ms > 0 && now >= expire_ms {
+                    return None;
+                }
+                decode_string_bytes(&raw)
+            })
+            .collect()
+    }
+
+    /// Bulk string read for commands where a non-string source is an error.
+    pub async fn get_string_bytes_many_checked_async(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<Option<Vec<u8>>>, Error> {
+        let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let now = now_ms();
+        self.store
+            .multi_get_raw_async(&raw_keys)
+            .await
+            .into_iter()
+            .map(|raw| -> Result<Option<Vec<u8>>, Error> {
+                let Some(raw) = raw else {
+                    return Ok(None);
+                };
+                let expire_ms = decode_expire_ms(&raw);
+                if expire_ms > 0 && now >= expire_ms {
+                    return Ok(None);
+                }
+                decode_string_bytes(&raw)
+                    .map(Some)
+                    .ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))
+            })
+            .collect()
+    }
 }

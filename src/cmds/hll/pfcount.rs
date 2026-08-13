@@ -4,6 +4,10 @@ pub struct Pfcount {
     keys: Vec<String>,
 }
 impl Pfcount {
+    pub(crate) fn is_single_key(&self) -> bool {
+        self.keys.len() == 1
+    }
+
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
         if frame.arg_len() < 2 {
             return Err(Error::msg(

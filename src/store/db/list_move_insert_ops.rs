@@ -347,22 +347,7 @@ impl Db {
         count: usize,
     ) -> Result<Option<(String, Vec<String>)>, Error> {
         for key in keys {
-            if self.list_len(key)? == 0 {
-                continue;
-            }
-
-            let mut values = Vec::new();
-            for _ in 0..count {
-                let value = if left {
-                    self.list_pop_left(key)?
-                } else {
-                    self.list_pop_right(key)?
-                };
-                match value {
-                    Some(value) => values.push(value),
-                    None => break,
-                }
-            }
+            let values = self.list_pop_many(key, left, count)?;
             if !values.is_empty() {
                 return Ok(Some((key.clone(), values)));
             }
@@ -388,22 +373,7 @@ impl Db {
         }
 
         for key in keys {
-            if self.list_len_async(key).await? == 0 {
-                continue;
-            }
-
-            let mut values = Vec::with_capacity(count.min(1024));
-            for _ in 0..count {
-                let value = if left {
-                    self.list_pop_left_async_unlocked(key).await?
-                } else {
-                    self.list_pop_right_async_unlocked(key).await?
-                };
-                match value {
-                    Some(value) => values.push(value),
-                    None => break,
-                }
-            }
+            let values = self.list_pop_many_async_unlocked(key, left, count).await?;
             if !values.is_empty() {
                 return Ok(Some((key.clone(), values)));
             }

@@ -225,6 +225,242 @@ async fn concurrent_async_bit_updates_do_not_lose_writes() {
 }
 
 #[tokio::test]
+async fn ordered_string_pipeline_batches_preserve_per_command_replies_and_final_state() {
+    let db = test_db();
+    db.insert_string("batch".to_string(), "a".to_string(), Some(30_000));
+    db.insert_string("delete-batch".to_string(), "gone".to_string(), Some(30_000));
+
+    let replies = db
+        .apply_string_batch_mutations_async(&[
+            StringBatchMutation::Append {
+                key: "batch",
+                value: b"b",
+            },
+            StringBatchMutation::GetSet {
+                key: "batch",
+                value: b"c",
+            },
+            StringBatchMutation::SetNx {
+                key: "batch",
+                value: b"ignored",
+            },
+            StringBatchMutation::SetBit {
+                key: "bitmap-batch",
+                offset: 9,
+                bit: 1,
+            },
+            StringBatchMutation::SetRange {
+                key: "batch",
+                offset: 1,
+                value: b"z",
+            },
+            StringBatchMutation::Psetex {
+                key: "batch",
+                ttl_ms: 30_000,
+                value: b"q",
+            },
+            StringBatchMutation::Append {
+                key: "batch",
+                value: b"r",
+            },
+            StringBatchMutation::GetDel {
+                key: "delete-batch",
+            },
+            StringBatchMutation::GetDel {
+                key: "delete-missing",
+            },
+            StringBatchMutation::SetRange {
+                key: "missing-empty",
+                offset: 100,
+                value: b"",
+            },
+        ])
+        .await;
+
+    assert_eq!(replies.len(), 10);
+    assert!(matches!(replies[0], Ok(StringBatchReply::Integer(2))));
+    assert!(matches!(
+        &replies[1],
+        Ok(StringBatchReply::Bulk(Some(value))) if value == b"ab"
+    ));
+    assert!(matches!(replies[2], Ok(StringBatchReply::Integer(0))));
+    assert!(matches!(replies[3], Ok(StringBatchReply::Integer(0))));
+    assert!(matches!(replies[4], Ok(StringBatchReply::Integer(2))));
+    assert!(matches!(replies[5], Ok(StringBatchReply::Ok)));
+    assert!(matches!(replies[6], Ok(StringBatchReply::Integer(2))));
+    assert!(matches!(
+        &replies[7],
+        Ok(StringBatchReply::Bulk(Some(value))) if value == b"gone"
+    ));
+    assert!(matches!(replies[8], Ok(StringBatchReply::Bulk(None))));
+    assert!(matches!(replies[9], Ok(StringBatchReply::Integer(0))));
+    assert_eq!(db.get_string("batch").unwrap().as_deref(), Some("qr"));
+    assert!(db.ttl_millis_readonly("batch") > 0);
+    assert!(!db.exists_readonly("missing-empty"));
+    assert!(!db.exists_readonly("delete-batch"));
+    assert_eq!(db.string_get_bit("bitmap-batch", 9).unwrap(), 1);
+
+    db.insert(
+        "wrong-type".to_string(),
+        Structure::Set(HashSet::from(["member".to_string()])),
+    );
+    let replies = db
+        .apply_string_batch_mutations_async(&[
+            StringBatchMutation::Append {
+                key: "wrong-type",
+                value: b"x",
+            },
+            StringBatchMutation::Psetex {
+                key: "wrong-type",
+                ttl_ms: 30_000,
+                value: b"replaced",
+            },
+        ])
+        .await;
+    assert!(replies[0].is_err());
+    assert!(matches!(replies[1], Ok(StringBatchReply::Ok)));
+    assert_eq!(
+        db.get_string("wrong-type").unwrap().as_deref(),
+        Some("replaced")
+    );
+
+    let oversized_offset = crate::frame::MAX_BULK_STRING_BYTES;
+    let replies = db
+        .apply_string_batch_mutations_async(&[
+            StringBatchMutation::SetRange {
+                key: "rollback-after-error",
+                offset: oversized_offset,
+                value: b"x",
+            },
+            StringBatchMutation::SetNx {
+                key: "rollback-after-error",
+                value: b"winner",
+            },
+        ])
+        .await;
+    assert!(replies[0].is_err());
+    assert!(matches!(replies[1], Ok(StringBatchReply::Integer(1))));
+    assert_eq!(
+        db.get_string("rollback-after-error").unwrap().as_deref(),
+        Some("winner")
+    );
+}
+
+#[tokio::test]
+async fn ordered_key_expiration_batches_preserve_per_command_replies_and_ttl_index_state() {
+    let db = test_db();
+    db.insert_string("ttl-batch".to_string(), "value".to_string(), None);
+
+    let replies = db
+        .apply_key_expiration_batch_async(&[
+            KeyExpirationBatchMutation::Persist { key: "ttl-batch" },
+            KeyExpirationBatchMutation::Expire {
+                key: "ttl-batch",
+                ttl_ms: 30_000,
+            },
+            KeyExpirationBatchMutation::Persist { key: "ttl-batch" },
+            KeyExpirationBatchMutation::Persist { key: "ttl-batch" },
+            KeyExpirationBatchMutation::Expire {
+                key: "missing-ttl-batch",
+                ttl_ms: 30_000,
+            },
+        ])
+        .await;
+
+    assert_eq!(replies.len(), 5);
+    assert!(matches!(replies[0], Ok(0)));
+    assert!(matches!(replies[1], Ok(1)));
+    assert!(matches!(replies[2], Ok(1)));
+    assert!(matches!(replies[3], Ok(0)));
+    assert!(matches!(replies[4], Ok(0)));
+    assert_eq!(db.ttl_millis_readonly("ttl-batch"), -1);
+
+    let replies = db
+        .apply_key_expiration_batch_async(&[
+            KeyExpirationBatchMutation::Expire {
+                key: "ttl-batch",
+                ttl_ms: 30_000,
+            },
+            KeyExpirationBatchMutation::Expire {
+                key: "ttl-batch",
+                ttl_ms: 60_000,
+            },
+        ])
+        .await;
+    assert!(replies.into_iter().all(|reply| matches!(reply, Ok(1))));
+    assert!(db.ttl_millis_readonly("ttl-batch") > 50_000);
+}
+
+#[tokio::test]
+async fn ordered_hll_pipeline_batch_preserves_replies_ttl_and_errors() {
+    let db = test_db();
+    db.insert_string("hll-batch".to_string(), "not-an-hll".to_string(), None);
+    let invalid = db
+        .hll_add_batch_async(&[("hll-batch", vec![b"a".as_slice()])])
+        .await;
+    assert!(invalid[0].is_err());
+
+    db.delete_key("hll-batch");
+    let replies = db
+        .hll_add_batch_async(&[
+            ("hll-batch", vec![b"a".as_slice()]),
+            ("hll-batch", vec![b"a".as_slice()]),
+            ("hll-batch", vec![b"b".as_slice()]),
+            ("other-hll", vec![b"x".as_slice(), b"y".as_slice()]),
+        ])
+        .await;
+    assert!(matches!(replies[0], Ok(true)));
+    assert!(matches!(replies[1], Ok(false)));
+    assert!(matches!(replies[2], Ok(true)));
+    assert!(matches!(replies[3], Ok(true)));
+    assert_eq!(
+        db.hll_count_async(&["hll-batch".to_string()])
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.hll_count_async(&["other-hll".to_string()])
+            .await
+            .unwrap(),
+        2
+    );
+
+    db.expire("hll-batch".to_string(), 30_000);
+    let replies = db
+        .hll_add_batch_async(&[("hll-batch", vec![b"c".as_slice()])])
+        .await;
+    assert!(replies[0].is_ok());
+    assert!(db.ttl_millis_readonly("hll-batch") > 0);
+}
+
+#[tokio::test]
+async fn multi_key_delete_is_atomic_deduplicated_and_cleans_native_subkeys() {
+    let db = test_db();
+    db.insert_string("delete-string".to_string(), "value".to_string(), None);
+    db.set_add_async("delete-set", &["a".to_string(), "b".to_string()])
+        .await
+        .unwrap();
+    db.list_push_right_async("delete-list", &["a".to_string(), "b".to_string()], false)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.delete_keys_async(&[
+            "delete-string".to_string(),
+            "delete-set".to_string(),
+            "delete-set".to_string(),
+            "missing".to_string(),
+            "delete-list".to_string(),
+        ])
+        .await,
+        3
+    );
+    assert!(!db.exists_readonly("delete-string"));
+    assert!(!db.exists_readonly("delete-set"));
+    assert!(!db.exists_readonly("delete-list"));
+}
+
+#[tokio::test]
 async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
     let db = test_db();
 

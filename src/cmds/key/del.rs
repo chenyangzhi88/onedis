@@ -42,14 +42,9 @@ impl Del {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let mut deleted = 0i64;
-        for key in self.keys {
-            if db.delete_key_async(&key).await {
-                deleted += 1;
-            }
-        }
-
-        Ok(Frame::Integer(deleted))
+        Ok(Frame::Integer(
+            db.delete_keys_async(&self.keys).await as i64,
+        ))
     }
 }
 

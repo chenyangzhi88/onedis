@@ -1,6 +1,77 @@
 use super::*;
 
 impl Db {
+    pub(crate) fn string_get_bit_from_live_raw(
+        raw: Option<&[u8]>,
+        offset: usize,
+    ) -> Result<u8, Error> {
+        let bytes = match raw {
+            Some(raw) => {
+                decode_string_bytes_slice(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?
+            }
+            None => &[],
+        };
+        let byte = bytes.get(offset / 8).copied().unwrap_or(0);
+        Ok((byte >> (7 - (offset % 8))) & 1)
+    }
+
+    pub(crate) fn string_bitcount_from_live_raw(
+        raw: Option<&[u8]>,
+        start: Option<i64>,
+        end: Option<i64>,
+        bit_unit: bool,
+    ) -> Result<u64, Error> {
+        let bytes = match raw {
+            Some(raw) => {
+                decode_string_bytes_slice(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?
+            }
+            None => &[],
+        };
+        Ok(if bit_unit {
+            bitcount_range(bytes, start, end)
+        } else {
+            byte_bitcount_range(bytes, start, end)
+        })
+    }
+
+    pub(crate) fn string_bitpos_from_live_raw(
+        raw: Option<&[u8]>,
+        bit: u8,
+        start: Option<i64>,
+        end: Option<i64>,
+        bit_unit: bool,
+    ) -> Result<i64, Error> {
+        if bit > 1 {
+            return Err(Error::msg("ERR bit is not an integer or out of range"));
+        }
+        let Some(raw) = raw else {
+            return Ok(if bit == 0 { 0 } else { -1 });
+        };
+        let bytes = decode_string_bytes_slice(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
+        Ok(if bit_unit {
+            bitpos_range(bytes, bit, start, end)
+        } else {
+            byte_bitpos_range(bytes, bit, start, end)
+        })
+    }
+
+    pub(crate) fn string_range_from_live_raw(
+        raw: Option<&[u8]>,
+        start: i64,
+        end: i64,
+    ) -> Result<&[u8], Error> {
+        let bytes = match raw {
+            Some(raw) => {
+                decode_string_bytes_slice(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?
+            }
+            None => &[],
+        };
+        let Some((start, end)) = redis_range(bytes.len(), Some(start), Some(end)) else {
+            return Ok(&[]);
+        };
+        Ok(&bytes[start..=end])
+    }
+
     pub async fn string_get_bit_async(&self, key: &str, offset: usize) -> Result<u8, Error> {
         let bytes = self.get_string_bytes_async(key).await?.unwrap_or_default();
         let byte = bytes.get(offset / 8).copied().unwrap_or(0);
@@ -211,22 +282,79 @@ impl Db {
         keys: &[String],
     ) -> Result<usize, Error> {
         let op = validate_bitop(op, keys.len())?;
-        let mut out = Vec::new();
-        for (source_index, key) in keys.iter().enumerate() {
-            let source = self.get_string_bytes_async(key).await?.unwrap_or_default();
-            combine_bitop(&mut out, &source, op, source_index)?;
+        let mut logical_keys = Vec::with_capacity(keys.len().saturating_add(1));
+        logical_keys.push(dest);
+        for key in keys {
+            if !logical_keys.contains(&key.as_str()) {
+                logical_keys.push(key);
+            }
         }
-        if op == BitOperation::Not {
-            out.iter_mut().for_each(|byte| *byte = !*byte);
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            logical_keys.iter().map(|key| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
+        let raw_keys = logical_keys
+            .iter()
+            .map(|key| self.mk(key))
+            .collect::<Vec<_>>();
+
+        for _ in 0..64 {
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let now = now_ms();
+            let mut out = Vec::new();
+            for (source_index, key) in keys.iter().enumerate() {
+                let position = logical_keys
+                    .iter()
+                    .position(|candidate| *candidate == key)
+                    .expect("BITOP source key is observed");
+                let source = match observations[position].value() {
+                    Some(raw) if decode_expire_ms(raw) == 0 || now < decode_expire_ms(raw) => {
+                        decode_string_bytes_slice(raw)
+                            .ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?
+                    }
+                    _ => &[],
+                };
+                combine_bitop(&mut out, source, op, source_index)?;
+            }
+            if op == BitOperation::Not {
+                out.iter_mut().for_each(|byte| *byte = !*byte);
+            }
+            let len = out.len();
+            let old_dest_raw = observations[0].value().map(AsRef::as_ref);
+            let old_expire_ms = old_dest_raw
+                .and_then(decode_meta_header)
+                .map_or(0, |header| header.expire_ms);
+            let mut batch = WriteBatch::new();
+            if len == 0 {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, dest, old_expire_ms);
+            } else {
+                self.prepare_string_overwrite_to_batch(&mut batch, dest, old_dest_raw);
+                self.write_string_to_batch_with_deferred_old_raw(
+                    &mut batch,
+                    dest,
+                    &out,
+                    0,
+                    old_dest_raw,
+                );
+            }
+            let conditions = observations
+                .iter()
+                .map(CompareCondition::from_observed)
+                .collect::<Vec<_>>();
+            match self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await
+            {
+                Ok(true) => {
+                    self.changes.fetch_add(1, Ordering::Relaxed);
+                    return Ok(len);
+                }
+                Ok(false) => continue,
+                Err(error) => return Err(error),
+            }
         }
-        let len = out.len();
-        if len == 0 {
-            self.delete_key_async(dest).await;
-        } else {
-            self.insert_string_bytes_async(dest.to_string(), out, None)
-                .await?;
-        }
-        Ok(len)
+        Err(Error::msg("ERR BITOP write conflict"))
     }
 
     pub fn string_read_bits(
@@ -503,7 +631,10 @@ pub(crate) fn write_bits_into(
     Ok(())
 }
 
-fn resize_bitmap(bytes: &mut Vec<u8>, required_bytes: usize) -> Result<(), Error> {
+pub(in crate::store::db) fn resize_bitmap(
+    bytes: &mut Vec<u8>,
+    required_bytes: usize,
+) -> Result<(), Error> {
     if required_bytes <= bytes.len() {
         return Ok(());
     }

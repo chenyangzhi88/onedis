@@ -2,7 +2,7 @@ use anyhow::Error;
 
 use crate::{
     cmds::sorted_set::common::validate_entry_count,
-    cmds::sorted_set::zrange::{LexBound, apply_limit, parse_lex_bound},
+    cmds::sorted_set::zrange::{LexBound, parse_lex_bound},
     frame::Frame,
     store::db::Db,
 };
@@ -131,23 +131,17 @@ impl Zrangestore {
             ZrangestoreBounds::Rank(start, stop) => {
                 db.zset_range(&self.source, start, stop, self.reverse)
             }
-            ZrangestoreBounds::Score(min, max) => db
-                .zset_range_by_score(&self.source, min.value, max.value)
-                .map(|mut entries| {
-                    entries.retain(|(_, score)| score_in_range(*score, min, max));
-                    if self.reverse {
-                        entries.reverse();
-                    }
-                    apply_limit(entries, self.limit)
-                }),
+            ZrangestoreBounds::Score(min, max) => db.zset_range_by_score_window(
+                &self.source,
+                min.value,
+                min.inclusive,
+                max.value,
+                max.inclusive,
+                self.reverse,
+                self.limit,
+            ),
             ZrangestoreBounds::Lex(min, max) => {
-                db.zset_range_by_lex(&self.source, &min, &max)
-                    .map(|mut entries| {
-                        if self.reverse {
-                            entries.reverse();
-                        }
-                        apply_limit(entries, self.limit)
-                    })
+                db.zset_range_by_lex_window(&self.source, &min, &max, self.reverse, self.limit)
             }
         };
 
@@ -163,25 +157,28 @@ impl Zrangestore {
                 db.zset_range_async(&self.source, start, stop, self.reverse)
                     .await
             }
-            ZrangestoreBounds::Score(min, max) => db
-                .zset_range_by_score_async(&self.source, min.value, max.value)
+            ZrangestoreBounds::Score(min, max) => {
+                db.zset_range_by_score_window_async(
+                    &self.source,
+                    min.value,
+                    min.inclusive,
+                    max.value,
+                    max.inclusive,
+                    self.reverse,
+                    self.limit,
+                )
                 .await
-                .map(|mut entries| {
-                    entries.retain(|(_, score)| score_in_range(*score, min, max));
-                    if self.reverse {
-                        entries.reverse();
-                    }
-                    apply_limit(entries, self.limit)
-                }),
-            ZrangestoreBounds::Lex(min, max) => db
-                .zset_range_by_lex_async(&self.source, &min, &max)
+            }
+            ZrangestoreBounds::Lex(min, max) => {
+                db.zset_range_by_lex_window_async(
+                    &self.source,
+                    &min,
+                    &max,
+                    self.reverse,
+                    self.limit,
+                )
                 .await
-                .map(|mut entries| {
-                    if self.reverse {
-                        entries.reverse();
-                    }
-                    apply_limit(entries, self.limit)
-                }),
+            }
         };
 
         match result {
@@ -210,9 +207,4 @@ fn parse_score_bound(input: &str) -> Result<ScoreBound, Error> {
         return Err(Error::msg("ERR min or max is not a float"));
     }
     Ok(ScoreBound { value, inclusive })
-}
-
-fn score_in_range(score: f64, min: ScoreBound, max: ScoreBound) -> bool {
-    (score > min.value || (min.inclusive && score == min.value))
-        && (score < max.value || (max.inclusive && score == max.value))
 }

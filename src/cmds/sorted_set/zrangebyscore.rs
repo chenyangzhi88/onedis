@@ -3,7 +3,7 @@ use anyhow::Error;
 use crate::{
     cmds::sorted_set::{
         common::{text_arg, validate_entry_count},
-        zrange::{ScoreBound, apply_limit, flatten_entries, parse_score_bound, score_in_range},
+        zrange::{ScoreBound, flatten_entries, parse_score_bound},
     },
     frame::Frame,
     store::db::Db,
@@ -28,36 +28,34 @@ impl Zrangebyscore {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.zset_range_by_score(&self.key, self.min.value, self.max.value) {
-            Ok(mut entries) => {
-                entries.retain(|(_, score)| score_in_range(*score, self.min, self.max));
-                if self.reverse {
-                    entries.reverse();
-                }
-                Ok(Frame::Array(flatten_entries(
-                    apply_limit(entries, self.limit),
-                    self.withscores,
-                )?))
-            }
+        match db.zset_range_by_score_window(
+            &self.key,
+            self.min.value,
+            self.min.inclusive,
+            self.max.value,
+            self.max.inclusive,
+            self.reverse,
+            self.limit,
+        ) {
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db
-            .zset_range_by_score_async(&self.key, self.min.value, self.max.value)
+            .zset_range_by_score_window_async(
+                &self.key,
+                self.min.value,
+                self.min.inclusive,
+                self.max.value,
+                self.max.inclusive,
+                self.reverse,
+                self.limit,
+            )
             .await
         {
-            Ok(mut entries) => {
-                entries.retain(|(_, score)| score_in_range(*score, self.min, self.max));
-                if self.reverse {
-                    entries.reverse();
-                }
-                Ok(Frame::Array(flatten_entries(
-                    apply_limit(entries, self.limit),
-                    self.withscores,
-                )?))
-            }
+            Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
     }

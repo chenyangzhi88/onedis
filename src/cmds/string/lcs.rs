@@ -67,14 +67,12 @@ impl Lcs {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let left = db
-            .get_string_bytes_async(&self.key1)
+        let mut values = db
+            .get_string_bytes_many_checked_async(&[self.key1.clone(), self.key2.clone()])
             .await?
-            .unwrap_or_default();
-        let right = db
-            .get_string_bytes_async(&self.key2)
-            .await?
-            .unwrap_or_default();
+            .into_iter();
+        let left = values.next().flatten().unwrap_or_default();
+        let right = values.next().flatten().unwrap_or_default();
         self.response(&left, &right)
     }
 

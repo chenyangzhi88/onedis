@@ -33,16 +33,14 @@ impl Smismember {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let set = match db.set_members_async(&self.key).await {
-            Ok(members) => members
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>(),
+        let results = match db.set_multi_contains_async(&self.key, &self.members).await {
+            Ok(results) => results,
             Err(err) => return Ok(Frame::Error(err.to_string())),
         };
         Ok(Frame::Array(
-            self.members
+            results
                 .into_iter()
-                .map(|member| Frame::Integer(set.contains(&member) as i64))
+                .map(|present| Frame::Integer(present as i64))
                 .collect(),
         ))
     }

@@ -127,9 +127,22 @@ async fn redis_vsim_results_frame_async(
 ) -> Result<Frame, Error> {
     let multiplier = 1 + usize::from(with_scores) + usize::from(with_attrs);
     validate_vector_response_count(results.len(), multiplier)?;
+    let attrs = if with_attrs {
+        let ids = results
+            .iter()
+            .map(|result| result.id.clone())
+            .collect::<Vec<_>>();
+        db.vector_elements_async(key, &ids)
+            .await?
+            .into_iter()
+            .map(|element| element.map(|element| element.attrs_json))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut frames = Vec::with_capacity(results.len().saturating_mul(multiplier));
     let mut response_bytes = 32usize;
-    for result in results {
+    for (position, result) in results.into_iter().enumerate() {
         response_bytes = response_bytes
             .checked_add(result.id.len().saturating_add(32))
             .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
@@ -144,10 +157,7 @@ async fn redis_vsim_results_frame_async(
             frames.push(Frame::bulk_string(score));
         }
         if with_attrs {
-            let attrs = db
-                .vector_element_async(key, &result.id)
-                .await?
-                .map(|element| element.attrs_json);
+            let attrs = attrs[position].clone();
             response_bytes = response_bytes
                 .checked_add(
                     attrs

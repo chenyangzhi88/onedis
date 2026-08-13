@@ -1,6 +1,194 @@
 use super::*;
 
 impl Db {
+    /// Apply ordered SADD/SREM commands with one metadata read and one atomic write per batch.
+    pub(crate) async fn apply_set_batch_mutations_async(
+        &self,
+        mutations: &[SetBatchMutation<'_>],
+    ) -> Vec<Result<usize, Error>> {
+        if mutations.is_empty() {
+            return Vec::new();
+        }
+
+        let mut key_positions = HashMap::<&str, usize>::with_capacity(mutations.len());
+        let mut keys = Vec::<&str>::with_capacity(mutations.len());
+        for mutation in mutations {
+            let key = mutation.key();
+            if !key_positions.contains_key(key) {
+                key_positions.insert(key, keys.len());
+                keys.push(key);
+            }
+        }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _write_guards = self.lock_write_shards(&shards).await;
+
+        for _ in 0..64 {
+            for key in &keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut states = Vec::with_capacity(keys.len());
+            for (position, key) in keys.iter().enumerate() {
+                states.push(
+                    SetBatchState::from_raw(
+                        observations[position].value().map(AsRef::as_ref),
+                        || self.next_version_async(),
+                    )
+                    .await
+                    .map(|state| (*key, state)),
+                );
+            }
+
+            let mut candidate_members = vec![HashSet::<&str>::new(); keys.len()];
+            for mutation in mutations {
+                let position = key_positions[mutation.key()];
+                if states[position].is_ok() {
+                    candidate_members[position].extend(mutation.members().iter().copied());
+                }
+            }
+            let mut member_lookups = Vec::new();
+            for (position, candidates) in candidate_members.iter().enumerate() {
+                let Ok((key, state)) = &states[position] else {
+                    continue;
+                };
+                if !state.initially_exists {
+                    continue;
+                }
+                member_lookups.extend(candidates.iter().map(|member| {
+                    (
+                        position,
+                        (*member).to_string(),
+                        set_member_key(self.db_index, key, state.version, member),
+                    )
+                }));
+            }
+            let member_keys = member_lookups
+                .iter()
+                .map(|(_, _, key)| key.clone())
+                .collect::<Vec<_>>();
+            let member_values = self.store.multi_get_raw_async(&member_keys).await;
+            for ((position, member, _), value) in member_lookups.into_iter().zip(member_values) {
+                if value.is_some()
+                    && let Ok((_, state)) = &mut states[position]
+                {
+                    state.initial_members.insert(member.clone());
+                    state.members.insert(member);
+                }
+            }
+
+            let mut replies = Vec::with_capacity(mutations.len());
+            let mut changed_commands = 0u64;
+            for mutation in mutations {
+                let position = key_positions[mutation.key()];
+                let result = match &mut states[position] {
+                    Err(error) => Err(Error::msg(error.to_string())),
+                    Ok((_, state)) => {
+                        let mut seen = HashSet::with_capacity(mutation.members().len());
+                        let mut changed = 0usize;
+                        for member in mutation.members() {
+                            if !seen.insert(*member) {
+                                continue;
+                            }
+                            let did_change = match mutation {
+                                SetBatchMutation::Add { .. } => {
+                                    state.members.insert((*member).to_string())
+                                }
+                                SetBatchMutation::Remove { .. } => state.members.remove(*member),
+                            };
+                            changed += usize::from(did_change);
+                        }
+                        state.touched |= changed > 0;
+                        if changed > 0 {
+                            changed_commands += 1;
+                        }
+                        Ok(changed)
+                    }
+                };
+                replies.push(result);
+            }
+
+            let dirty_positions = states
+                .iter()
+                .enumerate()
+                .filter_map(|(position, state)| {
+                    state
+                        .as_ref()
+                        .ok()
+                        .is_some_and(|(_, state)| state.touched)
+                        .then_some(position)
+                })
+                .collect::<Vec<_>>();
+            if dirty_positions.is_empty() {
+                return replies;
+            }
+
+            let mut batch = WriteBatch::new();
+            for &position in &dirty_positions {
+                let (key, state) = states[position].as_ref().expect("dirty set state is valid");
+                for member in state.members.difference(&state.initial_members) {
+                    batch.put(
+                        &set_member_key(self.db_index, key, state.version, member),
+                        INDEX_MARKER_VALUE,
+                    );
+                }
+                for member in state.initial_members.difference(&state.members) {
+                    batch.delete(&set_member_key(self.db_index, key, state.version, member));
+                }
+                let added = state.members.difference(&state.initial_members).count();
+                let removed = state.initial_members.difference(&state.members).count();
+                let final_len = state
+                    .initial_len
+                    .saturating_add(added)
+                    .saturating_sub(removed);
+                if final_len == 0 {
+                    self.delete_main_key_with_ttl_to_batch(&mut batch, key, state.expire_ms);
+                    if state.initially_exists {
+                        delete_sub_keys_to_batch(
+                            &mut batch,
+                            self.db_index,
+                            key,
+                            state.version,
+                            TYPE_SET,
+                        );
+                    }
+                } else {
+                    batch.put(
+                        &self.mk(key),
+                        &encode_set_meta(state.expire_ms, state.version, final_len),
+                    );
+                }
+            }
+            let conditions = dirty_positions
+                .iter()
+                .map(|&position| CompareCondition::from_observed(&observations[position]))
+                .collect::<Vec<_>>();
+            match self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await
+            {
+                Ok(true) => {
+                    self.changes.fetch_add(changed_commands, Ordering::Relaxed);
+                    return replies;
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    let message = error.to_string();
+                    return mutations
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+        }
+
+        mutations
+            .iter()
+            .map(|_| Err(Error::msg("ERR set batch write conflict")))
+            .collect()
+    }
+
     pub fn set_add(&self, key: &str, members: &[String]) -> Result<usize, Error> {
         let meta = self.set_meta(key)?;
         let version = match meta {
@@ -376,5 +564,46 @@ impl Db {
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(true)
+    }
+}
+
+struct SetBatchState {
+    version: u64,
+    expire_ms: u64,
+    initial_len: usize,
+    initially_exists: bool,
+    initial_members: HashSet<String>,
+    members: HashSet<String>,
+    touched: bool,
+}
+
+impl SetBatchState {
+    async fn from_raw<F, Fut>(raw: Option<&[u8]>, next_version: F) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = u64>,
+    {
+        let (version, expire_ms, initial_len, initially_exists) = match raw {
+            Some(raw) => {
+                let header = decode_meta_header(raw)
+                    .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
+                if header.type_tag != TYPE_SET {
+                    return Err(Error::msg(WRONG_TYPE_ERROR));
+                }
+                let meta = decode_set_meta(raw)
+                    .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
+                (meta.version, meta.expire_ms, meta.len, true)
+            }
+            None => (next_version().await, 0, 0, false),
+        };
+        Ok(Self {
+            version,
+            expire_ms,
+            initial_len,
+            initially_exists,
+            initial_members: HashSet::new(),
+            members: HashSet::new(),
+            touched: false,
+        })
     }
 }

@@ -1,6 +1,220 @@
 use super::*;
 
 impl Db {
+    /// Apply ordered DEL/UNLINK commands as one storage batch. Duplicate keys count once in the
+    /// first command that removes them, matching sequential Redis pipeline semantics.
+    pub(crate) async fn delete_key_commands_batch_async(
+        &self,
+        commands: &[Vec<&str>],
+    ) -> Vec<usize> {
+        if commands.is_empty() {
+            return Vec::new();
+        }
+        let mut key_positions = HashMap::new();
+        let mut keys = Vec::new();
+        for command_keys in commands {
+            for key in command_keys {
+                if !key_positions.contains_key(key) {
+                    key_positions.insert(*key, keys.len());
+                    keys.push(*key);
+                }
+            }
+        }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _write_guards = self.lock_write_shards(&shards).await;
+
+        for _ in 0..64 {
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let now = now_ms();
+            let live_headers = observations
+                .iter()
+                .map(|observed| {
+                    observed.value().and_then(|raw| {
+                        let header = decode_meta_header(raw)?;
+                        (header.expire_ms == 0 || now < header.expire_ms).then_some(header)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut removed = HashSet::new();
+            let mut replies = Vec::with_capacity(commands.len());
+            for command_keys in commands {
+                let mut seen_in_command = HashSet::new();
+                let mut deleted = 0usize;
+                for key in command_keys {
+                    let position = key_positions[key];
+                    if seen_in_command.insert(*key)
+                        && live_headers[position].is_some()
+                        && removed.insert(position)
+                    {
+                        deleted += 1;
+                    }
+                }
+                replies.push(deleted);
+            }
+            if removed.is_empty() {
+                return replies;
+            }
+
+            let mut positions = removed.into_iter().collect::<Vec<_>>();
+            positions.sort_unstable();
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::with_capacity(positions.len());
+            let mut deleted = Vec::with_capacity(positions.len());
+            for position in positions {
+                let header = live_headers[position].expect("removed key has live metadata");
+                let key = keys[position];
+                batch.delete(&raw_keys[position]);
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    header.expire_ms,
+                    self.db_index,
+                    key,
+                );
+                delete_sub_keys_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    key,
+                    header.version,
+                    header.type_tag,
+                );
+                let fulltext = match header.type_tag {
+                    TYPE_HASH => self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key),
+                    TYPE_JSON => self.fulltext_enqueue_json_delete_to_batch(&mut batch, key),
+                    _ => Ok(()),
+                };
+                if let Err(error) = fulltext {
+                    log::error!("failed to enqueue fulltext delete for {key}: {error}");
+                    return vec![0; commands.len()];
+                }
+                conditions.push(observations[position].condition());
+                deleted.push((key, header.type_tag));
+            }
+            match self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await
+            {
+                Ok(true) => {
+                    self.changes
+                        .fetch_add(deleted.len() as u64, Ordering::Relaxed);
+                    for (key, type_tag) in deleted {
+                        self.remove_list_meta_cache_if_non_transactional(key);
+                        let refresh = match type_tag {
+                            TYPE_HASH => self.fulltext_request_refresh(key),
+                            TYPE_JSON => self.fulltext_request_json_refresh(key),
+                            _ => Ok(()),
+                        };
+                        if let Err(error) = refresh {
+                            log::error!("failed to refresh fulltext delete for {key}: {error}");
+                        }
+                    }
+                    return replies;
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    log::error!("failed to delete key pipeline batch: {error}");
+                    return vec![0; commands.len()];
+                }
+            }
+        }
+        log::warn!("gave up deleting repeatedly modified key pipeline batch");
+        vec![0; commands.len()]
+    }
+
+    /// Atomically delete multiple logical keys without materializing their values or subkeys.
+    pub async fn delete_keys_async(&self, keys: &[String]) -> usize {
+        let mut seen = HashSet::with_capacity(keys.len());
+        let keys = keys
+            .iter()
+            .filter(|key| seen.insert(key.as_str()))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return 0;
+        }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _write_guards = self.lock_write_shards(&shards).await;
+
+        for _ in 0..64 {
+            for key in &keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::new();
+            let mut deleted = Vec::new();
+
+            for (position, observed) in observations.iter().enumerate() {
+                let Some(raw) = observed.value() else {
+                    continue;
+                };
+                let Some(header) = decode_meta_header(raw) else {
+                    continue;
+                };
+                let key = keys[position];
+                batch.delete(&raw_keys[position]);
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    header.expire_ms,
+                    self.db_index,
+                    key,
+                );
+                delete_sub_keys_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    key,
+                    header.version,
+                    header.type_tag,
+                );
+                let fulltext = match header.type_tag {
+                    TYPE_HASH => self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key),
+                    TYPE_JSON => self.fulltext_enqueue_json_delete_to_batch(&mut batch, key),
+                    _ => Ok(()),
+                };
+                if let Err(error) = fulltext {
+                    log::error!("failed to enqueue fulltext delete for {key}: {error}");
+                    return 0;
+                }
+                conditions.push(CompareCondition::from_observed(observed));
+                deleted.push((key, header.type_tag));
+            }
+            if deleted.is_empty() {
+                return 0;
+            }
+            match self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await
+            {
+                Ok(true) => {
+                    self.changes
+                        .fetch_add(deleted.len() as u64, Ordering::Relaxed);
+                    for (key, type_tag) in &deleted {
+                        self.remove_list_meta_cache_if_non_transactional(key);
+                        let refresh = match *type_tag {
+                            TYPE_HASH => self.fulltext_request_refresh(key),
+                            TYPE_JSON => self.fulltext_request_json_refresh(key),
+                            _ => Ok(()),
+                        };
+                        if let Err(error) = refresh {
+                            log::error!("failed to refresh fulltext delete for {key}: {error}");
+                        }
+                    }
+                    return deleted.len();
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    log::error!("failed to delete key batch: {error}");
+                    return 0;
+                }
+            }
+        }
+        log::warn!("gave up deleting repeatedly modified key batch");
+        0
+    }
+
     pub(in crate::store::db) fn delete_main_key_with_ttl_to_batch(
         &self,
         batch: &mut WriteBatch,
@@ -78,9 +292,6 @@ impl Db {
         };
 
         delete_sub_keys_to_batch(&mut batch, self.db_index, key, version, type_tag);
-        if type_tag == TYPE_JSON {
-            delete_json_nodes_to_batch(&self.store, &mut batch, self.db_index, key, version);
-        }
         match type_tag {
             TYPE_HASH => {
                 if let Err(error) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key) {
@@ -163,16 +374,6 @@ impl Db {
                 header.version,
                 header.type_tag,
             );
-            if header.type_tag == TYPE_JSON {
-                delete_json_nodes_to_batch_async(
-                    &self.store,
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    header.version,
-                )
-                .await;
-            }
             match header.type_tag {
                 TYPE_HASH => {
                     if let Err(error) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)
@@ -243,15 +444,6 @@ impl Db {
                 header.version,
                 header.type_tag,
             );
-            if header.type_tag == TYPE_JSON {
-                delete_json_nodes_to_batch(
-                    &self.store,
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    header.version,
-                );
-            }
             match header.type_tag {
                 TYPE_HASH => {
                     if let Err(err) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key) {
@@ -314,16 +506,6 @@ impl Db {
                 header.version,
                 header.type_tag,
             );
-            if header.type_tag == TYPE_JSON {
-                delete_json_nodes_to_batch_async(
-                    &self.store,
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    header.version,
-                )
-                .await;
-            }
             match header.type_tag {
                 TYPE_HASH => {
                     if let Err(err) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key) {

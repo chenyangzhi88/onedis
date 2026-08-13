@@ -62,6 +62,40 @@ fn json_set_get_type_and_del_paths() {
     assert_eq!(db.json_get("doc", "$.profile.zip").unwrap(), None);
 }
 
+#[tokio::test]
+async fn root_json_set_batch_keeps_last_valid_value_and_per_command_errors() {
+    let db = test_db();
+    db.insert_string("wrong-json-type".to_string(), "value".to_string(), None);
+
+    let replies = db
+        .json_set_root_batch_async(&[
+            ("batch-json", r#"{"v":1}"#),
+            ("batch-json", "not-json"),
+            ("batch-json", r#"{"v":3,"nested":[1,2]}"#),
+            ("wrong-json-type", r#"{"v":4}"#),
+        ])
+        .await;
+
+    assert!(replies[0].is_ok());
+    assert!(replies[1].is_err());
+    assert!(replies[2].is_ok());
+    assert!(
+        replies[3]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("WRONGTYPE")
+    );
+    assert_eq!(
+        db.json_get_async("batch-json", "$").await.unwrap(),
+        Some(r#"{"nested":[1,2],"v":3}"#.to_string())
+    );
+    assert_eq!(
+        db.get_string("wrong-json-type").unwrap().as_deref(),
+        Some("value")
+    );
+}
+
 #[test]
 fn json_paths_reject_ambiguous_and_resource_amplifying_inputs() {
     assert!(parse_json_path("").is_err());

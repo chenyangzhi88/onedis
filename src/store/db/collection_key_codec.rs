@@ -122,3 +122,51 @@ pub(in crate::store::db) fn zset_rank_key(
     composite_key.extend_from_slice(member.as_bytes());
     composite_key
 }
+
+pub(in crate::store::db) fn zset_score_scan_bounds(
+    db_index: u16,
+    key: &str,
+    version: u64,
+    min: f64,
+    min_inclusive: bool,
+    max: f64,
+    max_inclusive: bool,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    if min.is_nan()
+        || max.is_nan()
+        || min > max
+        || (min == max && (!min_inclusive || !max_inclusive))
+    {
+        return None;
+    }
+    let min_for_encoding = if min == 0.0 && min_inclusive {
+        -0.0
+    } else if min == 0.0 {
+        0.0
+    } else {
+        min
+    };
+    let mut min_prefix = zset_rank_prefix(db_index, key, version);
+    min_prefix.extend_from_slice(&encode_sorted_f64(min_for_encoding));
+    let lower = if min_inclusive {
+        min_prefix
+    } else {
+        prefix_exclusive_upper_bound(&min_prefix)?
+    };
+
+    let max_for_encoding = if max == 0.0 && !max_inclusive {
+        -0.0
+    } else if max == 0.0 {
+        0.0
+    } else {
+        max
+    };
+    let mut max_prefix = zset_rank_prefix(db_index, key, version);
+    max_prefix.extend_from_slice(&encode_sorted_f64(max_for_encoding));
+    let upper = if max_inclusive {
+        prefix_exclusive_upper_bound(&max_prefix)
+    } else {
+        Some(max_prefix)
+    };
+    Some((lower, upper))
+}

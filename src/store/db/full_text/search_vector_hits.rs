@@ -19,35 +19,56 @@ impl Db {
             fulltext_vector_index_name(index, meta.generation, vector_field.attribute_name());
         let vector_budget =
             self.fulltext_config_usize("MEMORY_BUDGET_VECTOR_HEAP_BYTES", 16_777_216)?;
-        let allow = if let Some(filter) = plan.filter.as_ref() {
-            let hits = runtime
-                .read()
-                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
-                .search_ast(
-                    filter,
-                    options,
-                    limits.result_cap.saturating_add(1),
-                    limits.timeout,
-                )?;
+        let mut allow = if plan.filter.is_some()
+            || !options.filters.is_empty()
+            || !options.geo_filters.is_empty()
+        {
+            let scalar_filter = plan.filter.clone().unwrap_or(FullTextQueryAst::All);
+            let hits = if options.geo_filters.is_empty() {
+                runtime
+                    .read()
+                    .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+                    .search_ast(
+                        &scalar_filter,
+                        options,
+                        limits.result_cap.saturating_add(1),
+                        limits.timeout,
+                    )?
+                    .into_iter()
+                    .map(|hit| hit.key)
+                    .collect::<Vec<_>>()
+            } else {
+                self.fulltext_exact_filter_hits(meta, &scalar_filter, options, limits)?
+                    .into_iter()
+                    .map(|hit| hit.key)
+                    .collect::<Vec<_>>()
+            };
             if hits.len() > limits.result_cap {
                 return Err(Error::msg("ERR fulltext result limit exceeded"));
             }
-            let allow_bytes = hits.iter().fold(0usize, |used, hit| {
-                used.saturating_add(
-                    std::mem::size_of::<String>()
-                        .saturating_add(hit.key.len())
-                        .saturating_add(2 * std::mem::size_of::<usize>()),
-                )
-            });
-            if allow_bytes > limits.reader_budget {
-                return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
-            }
-            Some(hits.into_iter().map(|hit| hit.key).collect::<HashSet<_>>())
+            Some(hits.into_iter().collect::<HashSet<_>>())
         } else {
             None
         };
-        let vector_results = if allow.is_some()
-            || matches!(plan.kind, FullTextVectorPlanKind::Range { .. })
+        if let Some(in_keys) = options.in_keys.as_ref() {
+            allow = Some(match allow {
+                Some(filtered) => filtered.intersection(in_keys).cloned().collect(),
+                None => in_keys.clone(),
+            });
+        }
+        let allow_bytes = allow.as_ref().map_or(0, |allow| {
+            allow.iter().fold(0usize, |used, key| {
+                used.saturating_add(
+                    std::mem::size_of::<String>()
+                        .saturating_add(key.len())
+                        .saturating_add(2 * std::mem::size_of::<usize>()),
+                )
+            })
+        });
+        if allow_bytes > limits.reader_budget {
+            return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
+        }
+        let vector_results = if matches!(plan.kind, FullTextVectorPlanKind::Range { .. })
             || matches!(
                 vector_field
                     .options
@@ -60,6 +81,7 @@ impl Db {
                 &vector_index,
                 vector_field,
                 &query_vector,
+                allow.as_ref(),
                 limits.timeout.at,
                 limits.timeout.fail_on_timeout,
             )?
@@ -76,19 +98,28 @@ impl Db {
             {
                 return Err(Error::msg("ERR fulltext vector memory limit exceeded"));
             }
-            self.vector_search(
-                &vector_index,
-                &query_vector,
-                VectorSearchOptions {
-                    k: vector_limit,
-                    filter: None,
-                    with_scores: true,
-                    with_attrs: Vec::new(),
-                    ef: None,
-                    offset: 0,
-                    limit: None,
-                },
-            )?
+            let search_options = VectorSearchOptions {
+                k: vector_limit,
+                filter: None,
+                with_scores: true,
+                with_attrs: Vec::new(),
+                with_attrs_json: false,
+                ef: None,
+                filter_ef: None,
+                exact: false,
+                offset: 0,
+                limit: None,
+            };
+            if let Some(allow) = allow.clone() {
+                self.vector_search_with_allow_ids(
+                    &vector_index,
+                    &query_vector,
+                    search_options,
+                    allow,
+                )?
+            } else {
+                self.vector_search(&vector_index, &query_vector, search_options)?
+            }
         };
         let vector_bytes = vector_results.iter().fold(0usize, |used, result| {
             used.saturating_add(
@@ -147,6 +178,7 @@ impl Db {
         vector_index: &str,
         vector_field: &FullTextFieldSchema,
         query: &[f32],
+        allow_doc_ids: Option<&HashSet<String>>,
         deadline: Instant,
         fail_on_timeout: bool,
     ) -> Result<Vec<VectorSearchResult>, Error> {
@@ -166,6 +198,9 @@ impl Db {
             if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
                 return Ok(false);
             }
+            if allow_doc_ids.is_some_and(|allow| !allow.contains(&id)) {
+                return Ok(true);
+            }
             let working_bytes = vector.len().saturating_mul(std::mem::size_of::<f32>());
             used = used
                 .saturating_add(std::mem::size_of::<VectorSearchResult>().saturating_add(id.len()));
@@ -176,6 +211,7 @@ impl Db {
                 id,
                 score: fulltext_vector_distance(&distance, query, &vector)?,
                 attrs: Vec::new(),
+                attrs_json: None,
             });
             Ok(true)
         })?;

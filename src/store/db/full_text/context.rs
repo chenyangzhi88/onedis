@@ -25,6 +25,7 @@ pub(super) use tantivy::{
     DocAddress, DocId, DocSet, Index, IndexReader, IndexWriter, Score, SegmentOrdinal,
     SegmentReader, TERMINATED, Term,
     collector::{Collector, Count, SegmentCollector},
+    indexer::LogMergePolicy,
     query::{
         AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, FuzzyTermQuery, Occur,
         PhrasePrefixQuery, PhraseQuery, Query, QueryParser, RangeQuery, RegexQuery, Scorer,
@@ -56,6 +57,11 @@ pub(super) const DEFAULT_REFRESH_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const DEFAULT_REFRESH_TIMEOUT_MS: u64 = 500;
 pub(super) const DEFAULT_OUTBOX_COMPACT_THRESHOLD: usize = 1024;
 pub(super) const DEFAULT_REPAIR_THROTTLE_MS: u64 = 1_000;
+pub(super) const DEFAULT_DIRECTORY_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const DEFAULT_MERGE_MIN_SEGMENTS: usize = 8;
+pub(super) const DEFAULT_MERGE_MAX_DOCS: usize = 10_000_000;
+pub(super) const DEFAULT_MERGE_MIN_LAYER_DOCS: usize = 10_000;
+pub(super) const DEFAULT_MERGE_DELETE_RATIO: f32 = 0.25;
 
 #[cfg(test)]
 pub(super) static FULLTEXT_ALTER_FAIL_AFTER_SWAP: AtomicBool = AtomicBool::new(false);

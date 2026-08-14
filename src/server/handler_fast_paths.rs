@@ -189,6 +189,14 @@ impl Handler {
             self.observe_fast_command_names(&names);
             return Some(response);
         }
+        if let Some(commands) = parse_borrowed_plain_zset_add_commands(&commands) {
+            let count = commands.len();
+            let response = self.handle_borrowed_zset_add_commands(&commands).await;
+            self.db_manager.notify_zset_waiters();
+            self.record_fast_command_batch("ZADD", count, started, &response);
+            self.observe_fast_command_batch("ZADD", count);
+            return Some(response);
+        }
         if let Some(commands) = parse_borrowed_zset_increment_commands(&commands) {
             let count = commands.len();
             let response = self
@@ -196,6 +204,13 @@ impl Handler {
                 .await;
             self.record_fast_command_batch("ZINCRBY", count, started, &response);
             self.observe_fast_command_batch("ZINCRBY", count);
+            return Some(response);
+        }
+        if let Some(commands) = parse_borrowed_bitop_commands(&commands) {
+            let count = commands.len();
+            let response = self.handle_borrowed_bitop_commands(&commands).await;
+            self.record_fast_command_batch("BITOP", count, started, &response);
+            self.observe_fast_command_batch("BITOP", count);
             return Some(response);
         }
         if let Some(commands) = parse_borrowed_key_delete_commands(&commands) {
@@ -241,6 +256,18 @@ impl Handler {
             let response = self.handle_borrowed_lrange_commands(commands).await;
             self.record_fast_command_batch("LRANGE", count, started, &response);
             self.observe_fast_command_batch("LRANGE", count);
+            return Some(response);
+        }
+        if commands
+            .iter()
+            .all(|args| borrowed_collection_read_supported(args))
+        {
+            let names = borrowed_fast_names(&commands);
+            let response = self
+                .handle_borrowed_collection_read_commands(commands)
+                .await;
+            self.record_fast_command_names(&names, started, &response);
+            self.observe_fast_command_names(&names);
             return Some(response);
         }
         None

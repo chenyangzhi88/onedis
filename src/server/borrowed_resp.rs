@@ -3,6 +3,83 @@ enum BorrowedLrangeOp {
     Error(String),
 }
 
+enum BorrowedCollectionReadOp {
+    SetMembers(String),
+    HashGetAll(String),
+    HashKeys(String),
+    HashValues(String),
+    Error(String),
+}
+
+async fn encode_borrowed_collection_read_ops(
+    db: Arc<crate::store::db::Db>,
+    ops: Vec<BorrowedCollectionReadOp>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ops.len() * 128);
+    for op in ops {
+        let (key, with_fields, with_values) = match op {
+            BorrowedCollectionReadOp::SetMembers(key) => {
+                match db
+                    .set_members_bounded_async(
+                        &key,
+                        crate::frame::MAX_ARRAY_ELEMENTS,
+                        crate::frame::MAX_FRAME_BYTES,
+                    )
+                    .await
+                {
+                    Ok(members) => {
+                        append_array_len(&mut out, members.len());
+                        for member in members {
+                            append_bulk_string(&mut out, member.as_bytes());
+                        }
+                    }
+                    Err(error) => append_error(&mut out, &error.to_string()),
+                }
+                continue;
+            }
+            BorrowedCollectionReadOp::HashGetAll(key) => (key, true, true),
+            BorrowedCollectionReadOp::HashKeys(key) => (key, true, false),
+            BorrowedCollectionReadOp::HashValues(key) => (key, false, true),
+            BorrowedCollectionReadOp::Error(error) => {
+                append_error(&mut out, &error);
+                continue;
+            }
+        };
+        match db.hash_get_all_bytes_async(&key).await {
+            Ok(entries) => {
+                let item_count = entries
+                    .len()
+                    .checked_mul(usize::from(with_fields) + usize::from(with_values));
+                let Some(item_count) =
+                    item_count.filter(|count| *count <= crate::frame::MAX_ARRAY_ELEMENTS)
+                else {
+                    append_error(&mut out, "ERR response exceeds configured limit");
+                    continue;
+                };
+                let response_start = out.len();
+                append_array_len(&mut out, item_count);
+                for (field, value) in entries {
+                    if with_fields {
+                        append_bulk_string(&mut out, field.as_bytes());
+                    }
+                    if with_values {
+                        append_bulk_string(&mut out, &value);
+                    }
+                    if out.len().saturating_sub(response_start) > crate::frame::MAX_FRAME_BYTES {
+                        break;
+                    }
+                }
+                if out.len().saturating_sub(response_start) > crate::frame::MAX_FRAME_BYTES {
+                    out.truncate(response_start);
+                    append_error(&mut out, "ERR response exceeds configured limit");
+                }
+            }
+            Err(error) => append_error(&mut out, &error.to_string()),
+        }
+    }
+    out
+}
+
 async fn encode_borrowed_lrange_ops(
     db: Arc<crate::store::db::Db>,
     ops: Vec<BorrowedLrangeOp>,

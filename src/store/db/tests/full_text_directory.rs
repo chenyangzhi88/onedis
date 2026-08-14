@@ -134,3 +134,39 @@ fn directory_write_reservations_watch_and_sync_are_consistent() {
     );
     directory.sync_directory().unwrap();
 }
+
+#[test]
+fn tiered_directory_publishes_hot_files_before_durable_checkpoint() {
+    let store = test_store();
+    let directory = KvTantivyDirectory::new_tiered(store.clone(), 9, "idx", 2 * 1024 * 1024);
+    directory
+        .atomic_write(Path::new("segment.bin"), b"hot-segment")
+        .unwrap();
+    directory
+        .atomic_write(Path::new("meta.json"), br#"{"generation":2}"#)
+        .unwrap();
+
+    assert_eq!(
+        directory.atomic_read(Path::new("segment.bin")).unwrap(),
+        b"hot-segment"
+    );
+    assert!(directory.has_hot_changes());
+    assert_eq!(KvTantivyDirectory::storage_bytes(&store, 9, "idx"), 0);
+    assert!(
+        !KvTantivyDirectory::new(store.clone(), 9, "idx")
+            .exists(Path::new("meta.json"))
+            .unwrap()
+    );
+
+    assert!(directory.checkpoint().unwrap());
+    assert!(!directory.has_hot_changes());
+    let durable = KvTantivyDirectory::new(store, 9, "idx");
+    assert_eq!(
+        durable.atomic_read(Path::new("segment.bin")).unwrap(),
+        b"hot-segment"
+    );
+    assert_eq!(
+        durable.atomic_read(Path::new("meta.json")).unwrap(),
+        br#"{"generation":2}"#
+    );
+}

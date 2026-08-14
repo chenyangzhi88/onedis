@@ -234,6 +234,50 @@ async fn async_stream_add_batch_preserves_ordered_ids_replies_and_final_metadata
     );
 }
 
+#[tokio::test]
+async fn same_stream_pipeline_joins_merger_and_preserves_ordered_ids() {
+    let db = test_db();
+    let commands = (0..64)
+        .map(|_| ("merged-events", None, vec![("field", "value")]))
+        .collect::<Vec<_>>();
+    let replies = db.stream_add_many_merged_async(&commands).await;
+    let ids = replies
+        .into_iter()
+        .map(|reply| reply.unwrap())
+        .collect::<Vec<_>>();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(db.stream_len_async("merged-events").await.unwrap(), 64);
+}
+
+#[tokio::test]
+async fn concurrent_stream_add_merger_assigns_unique_ids_and_keeps_all_entries() {
+    let db = Arc::new(test_db());
+    let mut tasks = Vec::new();
+    for index in 0..64 {
+        let db = Arc::clone(&db);
+        tasks.push(tokio::spawn(async move {
+            db.stream_add_async(
+                "hot-stream",
+                None,
+                &[("field".to_string(), format!("value-{index}"))],
+            )
+            .await
+            .unwrap()
+        }));
+    }
+    let mut ids = HashSet::new();
+    for task in tasks {
+        assert!(ids.insert(task.await.unwrap().to_redis_id()));
+    }
+    assert_eq!(ids.len(), 64);
+    assert_eq!(db.stream_len_async("hot-stream").await.unwrap(), 64);
+    let entries = db
+        .stream_range_async("hot-stream", None, None, Some(128), false)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 64);
+}
+
 #[test]
 fn stream_reverse_range_and_xread_semantics() {
     let db = test_db();

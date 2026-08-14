@@ -1,6 +1,7 @@
 # JSON Commands
 
-Rudis supports Redis-compatible JSON commands for storing, retrieving, and manipulating JSON data.
+Onedis supports a focused RedisJSON-compatible command subset for storing, retrieving, and
+manipulating JSON documents.
 
 ## Commands
 
@@ -49,6 +50,7 @@ JSON.GET key [path]
 ```redis
 JSON.GET user:1
 JSON.GET user:1 $
+JSON.GET user:1 $.name
 ```
 
 ### JSON.DEL
@@ -69,18 +71,60 @@ JSON.DEL key [path]
 **Example:**
 ```redis
 JSON.DEL user:1
-JSON.DEL user:2 $
+JSON.DEL user:2 $.profile.city
 ```
+
+### JSON.TYPE
+
+Return the JSON type at a path.
+
+```redis
+JSON.TYPE user:1 $
+JSON.TYPE user:1 $.age
+```
+
+The result is one of `object`, `array`, `string`, `integer`, `number`, `boolean`, or `null`.
 
 ## Data Storage
 
-JSON data is stored as strings in the database. The JSON structure is preserved as a serialized string and can be retrieved and manipulated using the JSON commands.
+The main key stores type, TTL, and a document version. JSON nodes live under versioned internal
+keys:
+
+- scalars are individual nodes;
+- objects use a structural generation node, while field names come from child keys;
+- arrays keep logical order in a compact directory of stable element ids.
+
+Composite reads use one bounded subtree scan and reconstruct the result in memory. Root replacement
+writes a fresh version and atomically switches the main key; obsolete nodes are retired and removed
+by version compaction. It never persists cleanup from WAL recovery. Array deletion removes one
+element subtree and one directory entry, without rewriting later element values.
+
+Existing fields on the same JSON key may update concurrently. The implementation uses a shared key
+structure barrier plus CAS observations for the main metadata, traversed ancestor nodes, the parent,
+and target node. Independent fields do not conflict; same-path writes and ancestor/descendant changes
+are retried. Repeated conflicts fall back to a parent-path structural lock, so a hot object with many
+concurrent field additions makes progress instead of exhausting the retry budget.
+
+This is the v2 indexed layout. Legacy string-backed JSON documents and the v1 indexed node encoding
+are intentionally unsupported; existing data must be recreated when upgrading to this layout.
 
 ## Limitations
 
-Current implementation has the following limitations:
-1. Path operations are not fully implemented (only root path "$" is supported)
-2. Advanced JSONPath queries are not supported
-3. Complex JSON manipulations are not implemented
+Current limitations:
 
-These limitations will be addressed in future versions.
+1. Paths support the root (`$` or `.`), dotted object fields, and non-negative array indexes.
+2. Wildcards, recursive descent, filters, quoted field selectors, and negative indexes are not
+   supported.
+3. The command surface currently contains `JSON.SET`, `JSON.GET`, `JSON.DEL`, and `JSON.TYPE` only.
+
+## Benchmark
+
+Run the dedicated JSON matrix against a disposable benchmark instance (default port `6391`):
+
+```bash
+bash scripts/bench_json_commands.sh benchmarks/json/json-benchmark.csv
+```
+
+The matrix covers leaf/root reads, same-key and random-key writes, wide-object growth, root
+replacement, object deletion, and array-head deletion at pipelines 1, 16, and 64. It flushes the
+selected benchmark database and must not be pointed at production.

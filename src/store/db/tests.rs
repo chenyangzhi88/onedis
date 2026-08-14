@@ -14,6 +14,7 @@ use super::{
     hash_field_prefix, internal_prefix, is_known_subkey_namespace, json_node_key, json_node_prefix,
     main_key, main_key_bytes, now_ms, parse_json_path, prefix_exclusive_upper_bound,
     set_member_prefix, sub_key_range_end_bytes, sub_key_range_start_bytes, version_owner_prefix,
+    write_json_subtree_to_batch,
 };
 use crate::cmds::json::JsonSet;
 use crate::cmds::string::set::Set;

@@ -205,17 +205,14 @@ impl Db {
             .await
     }
 
-    pub fn vector_links(
-        &self,
-        index: &str,
-        id: &str,
-    ) -> Result<Option<VectorLinkLayers>, Error> {
+    pub fn vector_links(&self, index: &str, id: &str) -> Result<Option<VectorLinkLayers>, Error> {
         let (_, version, meta) = match self.read_vector_meta(index) {
             Ok(value) => value,
             Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(None),
             Err(err) => return Err(err),
         };
         self.ensure_vector_runtime(index, version, &meta)?;
+        self.ensure_vector_search_segments_loaded(index, version, &meta)?;
         let runtime = self
             .vector_runtimes
             .get(self.db_index, index, version)
@@ -239,13 +236,44 @@ impl Db {
 
     pub fn vector_info(&self, index: &str) -> Result<Vec<(String, String)>, Error> {
         let (_, version, meta) = self.read_vector_meta(index)?;
+        self.ensure_vector_runtime(index, version, &meta)?;
+        let (
+            segment_count,
+            total_nodes,
+            deleted_nodes,
+            pending_segments,
+            memtable_docs,
+            indexed_segments,
+        ) = self.vector_runtime_stats(index, version);
         Ok(vec![
             ("dim".to_string(), meta.dim.to_string()),
+            (
+                "input_dim".to_string(),
+                meta.projection
+                    .map_or(meta.dim, |projection| projection.input_dim)
+                    .to_string(),
+            ),
             (
                 "distance".to_string(),
                 distance_name(meta.distance).to_string(),
             ),
+            (
+                "quantization".to_string(),
+                quantization_name(meta.quantization).to_string(),
+            ),
             ("doc_count".to_string(), meta.doc_count.to_string()),
+            (
+                "memtable_docs".to_string(),
+                memtable_docs.to_string(),
+            ),
+            (
+                "segment_max_docs".to_string(),
+                meta.segment_max_docs.to_string(),
+            ),
+            (
+                "max_segment_docs".to_string(),
+                meta.max_segment_docs.to_string(),
+            ),
             ("schema_fields".to_string(), meta.schema.len().to_string()),
             ("m".to_string(), meta.m.to_string()),
             (
@@ -262,18 +290,57 @@ impl Db {
                 "snapshot_doc_version".to_string(),
                 meta.snapshot_doc_version.to_string(),
             ),
+            ("segment_count".to_string(), segment_count.to_string()),
+            (
+                "indexed_segments".to_string(),
+                indexed_segments.to_string(),
+            ),
+            ("hnsw_total_nodes".to_string(), total_nodes.to_string()),
+            ("hnsw_deleted_nodes".to_string(), deleted_nodes.to_string()),
+            ("pending_segments".to_string(), pending_segments.to_string()),
         ])
     }
 
     pub async fn vector_info_async(&self, index: &str) -> Result<Vec<(String, String)>, Error> {
         let (_, version, meta) = self.read_vector_meta_async(index).await?;
+        self.ensure_vector_runtime(index, version, &meta)?;
+        let (
+            segment_count,
+            total_nodes,
+            deleted_nodes,
+            pending_segments,
+            memtable_docs,
+            indexed_segments,
+        ) = self.vector_runtime_stats(index, version);
         Ok(vec![
             ("dim".to_string(), meta.dim.to_string()),
+            (
+                "input_dim".to_string(),
+                meta.projection
+                    .map_or(meta.dim, |projection| projection.input_dim)
+                    .to_string(),
+            ),
             (
                 "distance".to_string(),
                 distance_name(meta.distance).to_string(),
             ),
+            (
+                "quantization".to_string(),
+                quantization_name(meta.quantization).to_string(),
+            ),
             ("doc_count".to_string(), meta.doc_count.to_string()),
+            (
+                "memtable_docs".to_string(),
+                memtable_docs.to_string(),
+            ),
+            (
+                "segment_max_docs".to_string(),
+                meta.segment_max_docs.to_string(),
+            ),
+            (
+                "max_segment_docs".to_string(),
+                meta.max_segment_docs.to_string(),
+            ),
             ("schema_fields".to_string(), meta.schema.len().to_string()),
             ("m".to_string(), meta.m.to_string()),
             (
@@ -290,6 +357,14 @@ impl Db {
                 "snapshot_doc_version".to_string(),
                 meta.snapshot_doc_version.to_string(),
             ),
+            ("segment_count".to_string(), segment_count.to_string()),
+            (
+                "indexed_segments".to_string(),
+                indexed_segments.to_string(),
+            ),
+            ("hnsw_total_nodes".to_string(), total_nodes.to_string()),
+            ("hnsw_deleted_nodes".to_string(), deleted_nodes.to_string()),
+            ("pending_segments".to_string(), pending_segments.to_string()),
         ])
     }
 
@@ -306,6 +381,26 @@ impl Db {
             if header.type_tag == TYPE_VECTOR && (header.expire_ms == 0 || now < header.expire_ms) {
                 snapshot.indexes += 1;
             }
+        }
+        for (index, version) in self.vector_runtimes.indexes_for_db(self.db_index) {
+            let Some(runtime) = self.vector_runtimes.get(self.db_index, &index, version) else {
+                continue;
+            };
+            let Ok(runtime) = runtime.read() else {
+                continue;
+            };
+            let (segments, total, deleted) = runtime.segment_stats();
+            snapshot.segments = snapshot.segments.saturating_add(segments as u64);
+            snapshot.hnsw_nodes = snapshot.hnsw_nodes.saturating_add(total as u64);
+            snapshot.hnsw_deleted_nodes =
+                snapshot.hnsw_deleted_nodes.saturating_add(deleted as u64);
+            snapshot.pending_segments = snapshot.pending_segments.saturating_add(
+                runtime
+                    .segments
+                    .iter()
+                    .filter(|segment| segment.meta.index_key.is_empty())
+                    .count() as u64,
+            );
         }
         snapshot
     }

@@ -16,6 +16,11 @@ pub(super) struct FullTextRuntime {
     pub(super) index: Index,
     pub(super) reader: IndexReader,
     pub(super) writer: IndexWriter,
+    pub(super) directory: KvTantivyDirectory,
+    pub(super) published_outbox_seq: u64,
+    pub(super) durable_outbox_seq: u64,
+    pub(super) published_backfill_cursor: Option<String>,
+    pub(super) backfill_complete: bool,
     pub(super) key_field: Field,
     pub(super) text_fields: Vec<Field>,
     pub(super) text_variant_fields: HashMap<Field, Field>,
@@ -36,6 +41,11 @@ pub(super) struct FullTextRuntime {
 
 pub(super) struct FullTextRuntimeConfig {
     pub(super) writer_heap_bytes: usize,
+    pub(super) directory_cache_bytes: usize,
+    pub(super) merge_min_segments: usize,
+    pub(super) merge_max_docs: usize,
+    pub(super) merge_min_layer_docs: usize,
+    pub(super) merge_delete_ratio: f32,
     pub(super) min_prefix: usize,
     pub(super) max_expansions: usize,
     pub(super) max_prefix_expansions: u32,

@@ -4,6 +4,8 @@ use super::*;
 // barrier. Persistent hot-member contention still falls back to the exclusive path, so retries
 // cannot turn into an unbounded storm.
 const ZSET_ADD_SHARED_CAS_ATTEMPTS: usize = 3;
+const ZSET_ADD_MERGE_BATCH_MAX: usize = 1_024;
+const ZSET_INCREMENT_MERGE_BATCH_MAX: usize = 256;
 
 enum ZsetAddAttempt {
     Applied(ZsetAddOutcome),
@@ -19,7 +21,383 @@ enum ZsetIncrementBatchKeyState {
     Error(String),
 }
 
+enum ZsetAddBatchKeyState {
+    Valid {
+        version: u64,
+        initially_exists: bool,
+        expired_at: Option<u64>,
+    },
+    Error(String),
+}
+
 impl Db {
+    /// Apply plain ZADD commands in pipeline order with one read per distinct member and one
+    /// conditional commit. Duplicate members inside one command retain the last supplied score,
+    /// matching the ordinary ZADD path.
+    pub(crate) async fn zset_add_batch_async(
+        &self,
+        commands: &[(&str, Vec<(f64, &str)>)],
+    ) -> Vec<Result<usize, Error>> {
+        if commands.is_empty() {
+            return Vec::new();
+        }
+
+        let mut key_positions = HashMap::<&str, usize>::with_capacity(commands.len());
+        let mut keys = Vec::<&str>::new();
+        for (key, _) in commands {
+            if !key_positions.contains_key(key) {
+                key_positions.insert(key, keys.len());
+                keys.push(key);
+            }
+        }
+        let key_shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _structural_guards = self.lock_read_shards(&key_shards).await;
+
+        let mut member_shards = commands
+            .iter()
+            .flat_map(|(key, members)| {
+                members
+                    .iter()
+                    .map(move |(_, member)| hash_field_write_lock_shard(self.db_index, key, member))
+            })
+            .collect::<Vec<_>>();
+        member_shards.sort_unstable();
+        member_shards.dedup();
+        let _member_guards = self.lock_hash_field_write_shards(&member_shards).await;
+
+        for _ in 0..64 {
+            let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let meta_observations = self.store.multi_get_raw_observed_async(&meta_keys).await;
+            let now = now_ms();
+            let mut states = Vec::with_capacity(keys.len());
+            for observed in &meta_observations {
+                let state = match observed.value() {
+                    None => ZsetAddBatchKeyState::Valid {
+                        version: self.next_version_async().await,
+                        initially_exists: false,
+                        expired_at: None,
+                    },
+                    Some(raw) => match decode_meta_header(raw) {
+                        None => ZsetAddBatchKeyState::Error(
+                            "Failed to decode sorted set metadata".to_string(),
+                        ),
+                        Some(header) if header.expire_ms > 0 && now >= header.expire_ms => {
+                            ZsetAddBatchKeyState::Valid {
+                                version: self.next_version_async().await,
+                                initially_exists: false,
+                                expired_at: Some(header.expire_ms),
+                            }
+                        }
+                        Some(header) if header.type_tag != TYPE_SORTED_SET => {
+                            ZsetAddBatchKeyState::Error(WRONG_TYPE_ERROR.to_string())
+                        }
+                        Some(header) => ZsetAddBatchKeyState::Valid {
+                            version: header.version,
+                            initially_exists: true,
+                            expired_at: None,
+                        },
+                    },
+                };
+                states.push(state);
+            }
+
+            let mut pair_positions = HashMap::<(usize, &str), usize>::new();
+            let mut pairs = Vec::new();
+            for (key, members) in commands {
+                let key_position = key_positions[key];
+                let ZsetAddBatchKeyState::Valid { version, .. } = states[key_position] else {
+                    continue;
+                };
+                for (_, member) in members {
+                    if !pair_positions.contains_key(&(key_position, *member)) {
+                        pair_positions.insert((key_position, *member), pairs.len());
+                        pairs.push((
+                            key_position,
+                            *member,
+                            zset_member_key(self.db_index, key, version, member),
+                        ));
+                    }
+                }
+            }
+            let member_keys = pairs
+                .iter()
+                .map(|(_, _, key)| key.clone())
+                .collect::<Vec<_>>();
+            let member_observations = self.store.multi_get_raw_observed_async(&member_keys).await;
+            let initial_scores = member_observations
+                .iter()
+                .map(|observed| {
+                    observed
+                        .value()
+                        .map(Bytes::as_ref)
+                        .and_then(decode_zset_score)
+                })
+                .collect::<Vec<_>>();
+            let mut scores = initial_scores.clone();
+            let mut touched_pairs = vec![false; pairs.len()];
+            let mut replies = Vec::with_capacity(commands.len());
+            let mut changed_commands = 0u64;
+
+            for (key, members) in commands {
+                let key_position = key_positions[key];
+                if let ZsetAddBatchKeyState::Error(message) = &states[key_position] {
+                    replies.push(Err(Error::msg(message.clone())));
+                    continue;
+                }
+                let mut seen_members = HashSet::with_capacity(members.len());
+                let mut added = 0usize;
+                let mut changed = false;
+                for (score, member) in members.iter().rev() {
+                    if !seen_members.insert(*member) {
+                        continue;
+                    }
+                    let pair_position = pair_positions[&(key_position, *member)];
+                    if scores[pair_position].is_none() {
+                        added += 1;
+                    }
+                    if scores[pair_position] != Some(*score) {
+                        scores[pair_position] = Some(*score);
+                        touched_pairs[pair_position] = true;
+                        changed = true;
+                    }
+                }
+                changed_commands += u64::from(changed);
+                replies.push(Ok(added));
+            }
+
+            let dirty_pairs = touched_pairs
+                .iter()
+                .enumerate()
+                .filter_map(|(position, touched)| touched.then_some(position))
+                .collect::<Vec<_>>();
+            if dirty_pairs.is_empty() {
+                return replies;
+            }
+
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::with_capacity(dirty_pairs.len() + keys.len());
+            let mut dirty_keys = HashSet::new();
+            for pair_position in dirty_pairs {
+                let (key_position, member, member_key) = &pairs[pair_position];
+                let key = keys[*key_position];
+                let ZsetAddBatchKeyState::Valid { version, .. } = states[*key_position] else {
+                    unreachable!("dirty member belongs to a valid sorted set")
+                };
+                if let Some(old_score) = initial_scores[pair_position] {
+                    batch.delete(&zset_rank_key(
+                        self.db_index,
+                        key,
+                        version,
+                        old_score,
+                        member,
+                    ));
+                }
+                let score = scores[pair_position].expect("dirty ZADD member has a score");
+                batch.put(member_key, &score.to_be_bytes());
+                batch.put(
+                    &zset_rank_key(self.db_index, key, version, score, member),
+                    INDEX_MARKER_VALUE,
+                );
+                conditions.push(member_observations[pair_position].condition());
+                dirty_keys.insert(*key_position);
+            }
+            for key_position in dirty_keys {
+                let ZsetAddBatchKeyState::Valid {
+                    version,
+                    initially_exists,
+                    expired_at,
+                } = states[key_position]
+                else {
+                    unreachable!("dirty key is valid")
+                };
+                if !initially_exists {
+                    let key = keys[key_position];
+                    if let Some(expire_ms) = expired_at {
+                        self.ttl_manager.remove_known_to_batch(
+                            &mut batch,
+                            expire_ms,
+                            self.db_index,
+                            key,
+                        );
+                    }
+                    batch.put(&meta_keys[key_position], &encode_zset_meta(0, version));
+                    conditions.push(meta_observations[key_position].condition());
+                }
+            }
+
+            match self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await
+            {
+                Ok(true) => {
+                    self.changes.fetch_add(changed_commands, Ordering::Relaxed);
+                    return replies;
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    let message = error.to_string();
+                    return commands
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+        }
+
+        commands
+            .iter()
+            .map(|_| Err(Error::msg("ERR sorted set add batch write conflict")))
+            .collect()
+    }
+
+    /// Merge plain one-member ZADDs for one hot member across connections. A single no-op stays
+    /// on the read-only path; score changes share one ordered batch and one storage commit.
+    pub(crate) async fn zset_add_many_merged_async(
+        &self,
+        commands: &[(&str, Vec<(f64, &str)>)],
+    ) -> Vec<Result<usize, Error>> {
+        let Some((first_key, first_members)) = commands.first() else {
+            return Vec::new();
+        };
+        let Some((_, first_member)) = first_members.first() else {
+            return self.zset_add_batch_async(commands).await;
+        };
+        if self.store.is_transactional()
+            || commands.iter().any(|(key, members)| {
+                *key != *first_key || members.len() != 1 || members[0].1 != *first_member
+            })
+        {
+            if let [(key, members)] = commands {
+                let members = members
+                    .iter()
+                    .map(|(score, member)| (*score, (*member).to_string()))
+                    .collect::<Vec<_>>();
+                return vec![self.zset_add_async(key, &members).await];
+            }
+            return self.zset_add_batch_async(commands).await;
+        }
+
+        if commands
+            .iter()
+            .all(|(_, members)| members[0].0 == first_members[0].0)
+        {
+            match self.zset_score_async(first_key, first_member).await {
+                Ok(Some(current)) if current == first_members[0].0 => {
+                    return commands.iter().map(|_| Ok(0)).collect();
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    return commands
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+        }
+
+        let mut receivers = Vec::with_capacity(commands.len());
+        for (_, members) in commands {
+            receivers.push(self.enqueue_zset_add(first_key, first_member, members[0].0));
+        }
+        let mut replies = Vec::with_capacity(receivers.len());
+        for receiver in receivers {
+            replies.push(
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err(Error::msg("ERR sorted set add merger stopped"))),
+            );
+        }
+        replies
+    }
+
+    fn enqueue_zset_add(
+        &self,
+        key: &str,
+        member: &str,
+        score: f64,
+    ) -> tokio::sync::oneshot::Receiver<Result<usize, Error>> {
+        let queue_key = (
+            self.db_index,
+            key.as_bytes().to_vec(),
+            member.as_bytes().to_vec(),
+        );
+        let queue = self
+            .counter_cache
+            .zset_add_queues
+            .entry(queue_key)
+            .or_insert_with(|| Arc::new(ZsetAddMergeQueue::default()))
+            .clone();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        queue
+            .pending
+            .lock()
+            .expect("zset add merge queue mutex poisoned")
+            .push_back(ZsetAddMergeRequest { score, reply });
+        if queue
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.spawn_zset_add_merge_worker(key.to_string(), member.to_string(), queue.clone());
+        }
+        drop(queue);
+        result
+    }
+
+    fn spawn_zset_add_merge_worker(
+        &self,
+        key: String,
+        member: String,
+        queue: Arc<ZsetAddMergeQueue>,
+    ) {
+        let db = self.shared_task_view();
+        let queue_key = (
+            self.db_index,
+            key.as_bytes().to_vec(),
+            member.as_bytes().to_vec(),
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::task::yield_now().await;
+                let requests = {
+                    let mut pending = queue
+                        .pending
+                        .lock()
+                        .expect("zset add merge queue mutex poisoned");
+                    let count = pending.len().min(ZSET_ADD_MERGE_BATCH_MAX);
+                    pending.drain(..count).collect::<Vec<_>>()
+                };
+                if !requests.is_empty() {
+                    let commands = requests
+                        .iter()
+                        .map(|request| (key.as_str(), vec![(request.score, member.as_str())]))
+                        .collect::<Vec<_>>();
+                    let replies = db.zset_add_batch_async(&commands).await;
+                    for (request, reply) in requests.into_iter().zip(replies) {
+                        let _ = request.reply.send(reply);
+                    }
+                }
+
+                let pending = queue
+                    .pending
+                    .lock()
+                    .expect("zset add merge queue mutex poisoned");
+                if pending.is_empty() {
+                    queue.running.store(false, Ordering::Release);
+                    db.counter_cache
+                        .zset_add_queues
+                        .remove_if(&queue_key, |_, existing| {
+                            Arc::ptr_eq(existing, &queue) && Arc::strong_count(existing) == 2
+                        });
+                    break;
+                }
+                drop(pending);
+            }
+        });
+    }
+
     /// Apply an ordered ZINCRBY pipeline with one observed read per distinct member and one CAS
     /// write. Commands for the same member see prior commands in pipeline order.
     pub(crate) async fn zset_increment_batch_async(
@@ -726,6 +1104,93 @@ impl Db {
         if increment.is_nan() {
             return Err(Error::msg("ERR value is not a valid float"));
         }
+        if self.store.is_transactional() {
+            return self
+                .zset_increment_by_strict_async(key, member, increment)
+                .await;
+        }
+
+        self.enqueue_zset_increment(key, member, increment)
+            .await
+            .map_err(|_| Error::msg("ERR sorted set increment merger stopped"))?
+    }
+
+    /// Let same-member commands from one pipeline join the same cross-connection commit. Mixed
+    /// pipelines retain the existing distinct-member batch path.
+    pub(crate) async fn zset_increment_many_merged_async(
+        &self,
+        commands: &[(&str, f64, &str)],
+    ) -> Vec<Result<f64, Error>> {
+        let Some((first_key, _, first_member)) = commands.first().copied() else {
+            return Vec::new();
+        };
+        if self.store.is_transactional()
+            || commands.iter().any(|(key, increment, member)| {
+                *key != first_key || *member != first_member || increment.is_nan()
+            })
+        {
+            return self.zset_increment_batch_async(commands).await;
+        }
+
+        let mut receivers = Vec::with_capacity(commands.len());
+        for (_, increment, _) in commands {
+            receivers.push(self.enqueue_zset_increment(first_key, first_member, *increment));
+        }
+        let mut replies = Vec::with_capacity(receivers.len());
+        for receiver in receivers {
+            replies.push(
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err(Error::msg("ERR sorted set increment merger stopped"))),
+            );
+        }
+        replies
+    }
+
+    fn enqueue_zset_increment(
+        &self,
+        key: &str,
+        member: &str,
+        increment: f64,
+    ) -> tokio::sync::oneshot::Receiver<Result<f64, Error>> {
+        let queue_key = (
+            self.db_index,
+            key.as_bytes().to_vec(),
+            member.as_bytes().to_vec(),
+        );
+        let queue = self
+            .counter_cache
+            .zset_increment_queues
+            .entry(queue_key)
+            .or_insert_with(|| Arc::new(ZsetIncrementMergeQueue::default()))
+            .clone();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        queue
+            .pending
+            .lock()
+            .expect("zset increment merge queue mutex poisoned")
+            .push_back(ZsetIncrementMergeRequest { increment, reply });
+        if queue
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.spawn_zset_increment_merge_worker(
+                key.to_string(),
+                member.to_string(),
+                queue.clone(),
+            );
+        }
+        drop(queue);
+        result
+    }
+
+    async fn zset_increment_by_strict_async(
+        &self,
+        key: &str,
+        member: &str,
+        increment: f64,
+    ) -> Result<f64, Error> {
         let outcome = self
             .zset_add_with_options_async(
                 key,
@@ -739,6 +1204,61 @@ impl Db {
         outcome
             .score
             .ok_or_else(|| Error::msg("ERR sorted set increment was not applied"))
+    }
+
+    fn spawn_zset_increment_merge_worker(
+        &self,
+        key: String,
+        member: String,
+        queue: Arc<ZsetIncrementMergeQueue>,
+    ) {
+        let db = self.shared_task_view();
+        let queue_key = (
+            self.db_index,
+            key.as_bytes().to_vec(),
+            member.as_bytes().to_vec(),
+        );
+        tokio::spawn(async move {
+            loop {
+                // Give other already-runnable clients one scheduler turn to join this commit.
+                tokio::task::yield_now().await;
+                let requests = {
+                    let mut pending = queue
+                        .pending
+                        .lock()
+                        .expect("zset increment merge queue mutex poisoned");
+                    let count = pending.len().min(ZSET_INCREMENT_MERGE_BATCH_MAX);
+                    pending.drain(..count).collect::<Vec<_>>()
+                };
+                if !requests.is_empty() {
+                    let commands = requests
+                        .iter()
+                        .map(|request| (key.as_str(), request.increment, member.as_str()))
+                        .collect::<Vec<_>>();
+                    let replies = db.zset_increment_batch_async(&commands).await;
+                    for (request, reply) in requests.into_iter().zip(replies) {
+                        let _ = request.reply.send(reply);
+                    }
+                }
+
+                let pending = queue
+                    .pending
+                    .lock()
+                    .expect("zset increment merge queue mutex poisoned");
+                if pending.is_empty() {
+                    // Producers push while holding this mutex and only then inspect `running`, so
+                    // publishing the idle state under the same mutex cannot strand a request.
+                    queue.running.store(false, Ordering::Release);
+                    db.counter_cache
+                        .zset_increment_queues
+                        .remove_if(&queue_key, |_, existing| {
+                            Arc::ptr_eq(existing, &queue) && Arc::strong_count(existing) == 2
+                        });
+                    break;
+                }
+                drop(pending);
+            }
+        });
     }
 }
 

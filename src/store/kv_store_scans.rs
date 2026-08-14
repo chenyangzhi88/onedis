@@ -369,14 +369,36 @@ impl KvStore {
         F: FnMut(&[u8], &[u8]) -> bool + Send,
     {
         const VISIT_BATCH_SIZE: usize = 1024;
+        self.scan_range_raw_visit_chunked_async(
+            lower_bound,
+            upper_bound,
+            limit,
+            VISIT_BATCH_SIZE,
+            visitor,
+        )
+        .await
+    }
+
+    pub async fn scan_range_raw_visit_chunked_async<F>(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        limit: usize,
+        batch_size: usize,
+        visitor: F,
+    ) -> usize
+    where
+        F: FnMut(&[u8], &[u8]) -> bool + Send,
+    {
         if limit == 0 {
             return 0;
         }
+        debug_assert!(batch_size > 0);
         let mut visitor = visitor;
         let mut seen = 0usize;
         let mut next_lower_bound = lower_bound.to_vec();
         while seen < limit {
-            let batch_limit = limit.saturating_sub(seen).min(VISIT_BATCH_SIZE);
+            let batch_limit = limit.saturating_sub(seen).min(batch_size.max(1));
             let entries = self
                 .scan_range_raw_limited_async(&next_lower_bound, upper_bound.clone(), batch_limit)
                 .await;
@@ -406,6 +428,58 @@ impl KvStore {
                 break;
             }
             next_lower_bound = last_key;
+        }
+        seen
+    }
+
+    pub async fn scan_range_raw_visit_reverse_async<F>(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: Option<Vec<u8>>,
+        limit: usize,
+        visitor: F,
+    ) -> usize
+    where
+        F: FnMut(&[u8], &[u8]) -> bool + Send,
+    {
+        const VISIT_BATCH_SIZE: usize = 1024;
+        if limit == 0 {
+            return 0;
+        }
+        let mut visitor = visitor;
+        let mut seen = 0usize;
+        let mut next_upper_bound = upper_bound;
+        while seen < limit {
+            let batch_limit = limit.saturating_sub(seen).min(VISIT_BATCH_SIZE);
+            let entries = self
+                .scan_range_raw_limited_reverse_async(
+                    lower_bound,
+                    next_upper_bound.clone(),
+                    batch_limit,
+                )
+                .await;
+            if entries.is_empty() {
+                break;
+            }
+            let entry_count = entries.len();
+            let mut last_key = None;
+            for (key, value) in entries {
+                last_key = Some(key.clone());
+                seen += 1;
+                if !visitor(&key, &value) {
+                    return seen;
+                }
+            }
+            if entry_count < batch_limit {
+                break;
+            }
+            let Some(last_key) = last_key else {
+                break;
+            };
+            if last_key.as_slice() <= lower_bound {
+                break;
+            }
+            next_upper_bound = Some(last_key);
         }
         seen
     }

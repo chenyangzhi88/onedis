@@ -226,14 +226,19 @@ pub(super) fn delete_prefix_to_batch(
     batch: &mut WriteBatch,
     store: &crate::store::kv_store::KvStore,
     prefix: &[u8],
-) {
+) -> Result<(), Error> {
     if let Some(end) = prefix_exclusive_upper_bound(prefix) {
-        batch.delete_range(prefix, &end);
+        batch
+            .delete_range(prefix, &end)
+            .map_err(|error| Error::msg(error.to_string()))?;
     } else {
         for (key, _) in store.scan_prefix_raw(prefix) {
-            batch.delete(&key);
+            batch
+                .delete(&key)
+                .map_err(|error| Error::msg(error.to_string()))?;
         }
     }
+    Ok(())
 }
 
 pub(super) fn fulltext_supported_config_names() -> Vec<&'static str> {
@@ -258,6 +263,7 @@ pub(super) fn fulltext_default_config() -> BTreeMap<&'static str, &'static str> 
         ("CLUSTER_SHARD_ID", "0"),
         ("CLUSTER_SHARDS", "1"),
         ("CLUSTER_VECTOR_MERGE", "local"),
+        ("CONSISTENCY", "CONSISTENT"),
         ("DEFAULT_DIALECT", "2"),
         ("FRISOINI", ""),
         ("MAXAGGREGATERESULTS", "10000"),
@@ -269,6 +275,11 @@ pub(super) fn fulltext_default_config() -> BTreeMap<&'static str, &'static str> 
         ("MEMORY_BUDGET_SORT_BYTES", "16777216"),
         ("MEMORY_BUDGET_VECTOR_HEAP_BYTES", "16777216"),
         ("MEMORY_BUDGET_WRITER_BYTES", "50000000"),
+        ("DIRECTORY_CACHE_BYTES", "67108864"),
+        ("MERGE_DELETE_RATIO", "0.25"),
+        ("MERGE_MAX_DOCS", "10000000"),
+        ("MERGE_MIN_LAYER_DOCS", "10000"),
+        ("MERGE_MIN_SEGMENTS", "8"),
         ("MINPREFIX", "2"),
         ("NOGC", "false"),
         ("ON_TIMEOUT", "RETURN"),
@@ -329,7 +340,8 @@ pub(super) fn validate_fulltext_config_value(name: &str, value: &str) -> Result<
                 Ok(())
             }
         }
-        "MEMORY_BUDGET_READER_BYTES"
+        "DIRECTORY_CACHE_BYTES"
+        | "MEMORY_BUDGET_READER_BYTES"
         | "MEMORY_BUDGET_SORT_BYTES"
         | "MEMORY_BUDGET_AGGREGATE_CURSOR_BYTES"
         | "MEMORY_BUDGET_VECTOR_HEAP_BYTES" => {
@@ -356,6 +368,26 @@ pub(super) fn validate_fulltext_config_value(name: &str, value: &str) -> Result<
                 .parse::<u64>()
                 .map_err(|_| Error::msg("ERR invalid fulltext config value"))?;
             Ok(())
+        }
+        "MERGE_MAX_DOCS" | "MERGE_MIN_LAYER_DOCS" | "MERGE_MIN_SEGMENTS" => {
+            let parsed = value
+                .parse::<u64>()
+                .map_err(|_| Error::msg("ERR invalid fulltext config value"))?;
+            if parsed > 0 {
+                Ok(())
+            } else {
+                Err(Error::msg("ERR invalid fulltext config value"))
+            }
+        }
+        "MERGE_DELETE_RATIO" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| Error::msg("ERR invalid fulltext config value"))?;
+            if parsed.is_finite() && parsed > 0.0 && parsed <= 1.0 {
+                Ok(())
+            } else {
+                Err(Error::msg("ERR invalid fulltext config value"))
+            }
         }
         "CLUSTER_SHARDS" => {
             let shards = value
@@ -407,6 +439,14 @@ pub(super) fn validate_fulltext_config_value(name: &str, value: &str) -> Result<
                 Ok(())
             } else {
                 Err(Error::msg("ERR unsupported fulltext cluster mode"))
+            }
+        }
+        "CONSISTENCY" => {
+            let normalized = value.to_ascii_uppercase();
+            if normalized == "CONSISTENT" || normalized == "EVENTUAL" {
+                Ok(())
+            } else {
+                Err(Error::msg("ERR invalid fulltext consistency mode"))
             }
         }
         _ => Err(Error::msg("ERR unsupported fulltext config option")),

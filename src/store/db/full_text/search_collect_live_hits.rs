@@ -27,18 +27,27 @@ impl Db {
         let fail_on_timeout = self
             .fulltext_config_string("ON_TIMEOUT", "RETURN")?
             .eq_ignore_ascii_case("FAIL");
-        let caught_up = {
-            let _refresh_guard = lifecycle_lock
-                .write()
+        let consistent = self
+            .fulltext_config_string("CONSISTENCY", "CONSISTENT")?
+            .eq_ignore_ascii_case("CONSISTENT");
+        let caught_up = if consistent {
+            let _lifecycle_guard = lifecycle_lock
+                .read()
                 .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
             self.fulltext_refresh_index_until_caught_up(&index, refresh_deadline)?
+        } else {
+            let _lifecycle_guard = lifecycle_lock
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+            self.ensure_fulltext_runtime(&index)?;
+            true
         };
         if !caught_up && fail_on_timeout {
             return Err(Error::msg("Timeout limit was reached"));
         }
-        // Catch-up mutates the active generation and therefore needs the
-        // lifecycle write lock. Queries only retain a read lock, so searches
-        // can run concurrently while ALTER/DROP cannot reclaim their storage.
+        // Refresh publication is serialized separately. Queries only retain a
+        // lifecycle read lease, so no durable checkpoint or lifecycle write
+        // lock is part of the search critical path.
         let _lifecycle_guard = lifecycle_lock
             .read()
             .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
@@ -51,9 +60,9 @@ impl Db {
             ));
         }
         fulltext_validate_search_geo_filters(&meta, &options.geo_filters)?;
-        // RedisSearch's TIMEOUT applies to query execution. Durable index
-        // catch-up has its own REFRESH_TIMEOUT_MS budget and must not consume
-        // the client's query budget.
+        // RedisSearch's TIMEOUT applies to query execution. Near-real-time
+        // publication has its own REFRESH_TIMEOUT_MS budget and must not
+        // consume the client's query budget.
         let query_started = Instant::now();
         let deadline = query_started
             .checked_add(Duration::from_millis(query_timeout_ms))
@@ -164,6 +173,7 @@ impl Db {
         }
         let mut live = Vec::new();
         let mut live_bytes = 0usize;
+        let mut source_candidates = Vec::with_capacity(candidate_hits.hits.len());
         for hit in candidate_hits.hits {
             if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
                 break;
@@ -175,23 +185,25 @@ impl Db {
             {
                 continue;
             }
-            if let Some(hit) =
-                self.fulltext_live_hit_from_source(&meta, options, hit.key, hit.score)?
-            {
-                if options.inorder
-                    && !fulltext_eval_ast_against_fields(&ast, &hit.fields, &meta, options)?
-                {
-                    continue;
-                }
-                live_bytes = live_bytes.saturating_add(estimate_fulltext_live_hit_bytes(&hit));
-                if live_bytes > reader_budget {
-                    return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
-                }
-                if options.sort_by.is_some() && live_bytes > sort_budget {
-                    return Err(Error::msg("ERR fulltext sort memory limit exceeded"));
-                }
-                live.push(hit);
+            source_candidates.push(hit);
+        }
+        for hit in self.fulltext_live_hits_from_source(&meta, options, source_candidates)? {
+            if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
+                break;
             }
+            if options.inorder
+                && !fulltext_eval_ast_against_fields(&ast, &hit.fields, &meta, options)?
+            {
+                continue;
+            }
+            live_bytes = live_bytes.saturating_add(estimate_fulltext_live_hit_bytes(&hit));
+            if live_bytes > reader_budget {
+                return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
+            }
+            if options.sort_by.is_some() && live_bytes > sort_budget {
+                return Err(Error::msg("ERR fulltext sort memory limit exceeded"));
+            }
+            live.push(hit);
         }
         self.fulltext_apply_selected_scorer(
             &meta,

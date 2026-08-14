@@ -30,6 +30,7 @@ impl FullTextRuntimeRegistry {
             .retain(|key, _| key.db_index != db_index);
         self.lifecycle_locks
             .retain(|key, _| key.db_index != db_index);
+        self.refresh_locks.retain(|key, _| key.db_index != db_index);
         self.source_routes.remove(&db_index);
         self.outbox_pending
             .retain(|key, _| key.db_index != db_index);
@@ -39,6 +40,13 @@ impl FullTextRuntimeRegistry {
         self.lifecycle_locks
             .entry(Self::key(db_index, index))
             .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone()
+    }
+
+    pub(super) fn refresh_lock(&self, db_index: u16, index: &str) -> Arc<Mutex<()>> {
+        self.refresh_locks
+            .entry(Self::key(db_index, index))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
 

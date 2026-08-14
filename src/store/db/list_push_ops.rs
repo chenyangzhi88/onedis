@@ -1,5 +1,16 @@
 use super::*;
 
+const LIST_PUSH_MERGE_BATCH_MAX: usize = 256;
+
+enum ListPushBatchState {
+    Valid {
+        meta: Option<ListMeta>,
+        initially_exists: bool,
+        dirty: bool,
+    },
+    Error(String),
+}
+
 impl Db {
     pub fn list_push_left(
         &self,
@@ -65,58 +76,8 @@ impl Db {
         values: &[&[u8]],
         only_if_exists: bool,
     ) -> Result<usize, Error> {
-        let _guard = self.set_write_lock(key).lock().await;
-        for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
-            let key_bytes = self.mk(key);
-            let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value().map(|value| value.to_vec());
-            let mut meta = match raw_meta.as_deref() {
-                Some(raw) => {
-                    if let Some(meta) = decode_list_meta(raw) {
-                        meta
-                    } else {
-                        let Some(header) = decode_meta_header(raw) else {
-                            return Err(Error::msg("Failed to decode list metadata"));
-                        };
-                        if header.type_tag != TYPE_LIST {
-                            return Err(Error::msg(WRONG_TYPE_ERROR));
-                        }
-                        return Err(Error::msg("Failed to decode list metadata"));
-                    }
-                }
-                None if only_if_exists => return Ok(0),
-                None => ListMeta {
-                    expire_ms: 0,
-                    version: self.next_version_async().await,
-                    head: 0,
-                    tail: 0,
-                },
-            };
-            let mut batch = WriteBatch::new();
-            for value in values {
-                meta.head -= 1;
-                batch.put(
-                    &list_item_key(self.db_index, key, meta.version, meta.head),
-                    value,
-                );
-            }
-            batch.put(
-                &key_bytes,
-                &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-            );
-            let len = (meta.tail - meta.head) as usize;
-            let condition = CompareCondition::from_observed(&observed_meta);
-            if self
-                .compare_and_write_batch_if_not_empty_async(&[condition], &batch)
-                .await?
-            {
-                self.cache_list_meta_if_non_transactional(key, meta);
-                self.changes.fetch_add(1, Ordering::Relaxed);
-                return Ok(len);
-            }
-        }
-        Err(Error::msg("ERR list write conflict"))
+        self.list_push_bytes_merged_async(key, true, values, only_if_exists)
+            .await
     }
 
     /// 右侧批量入队。
@@ -184,57 +145,217 @@ impl Db {
         values: &[&[u8]],
         only_if_exists: bool,
     ) -> Result<usize, Error> {
-        let _guard = self.set_write_lock(key).lock().await;
-        for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
-            let key_bytes = self.mk(key);
-            let observed_meta = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw_meta = observed_meta.value().map(|value| value.to_vec());
-            let mut meta = match raw_meta.as_deref() {
-                Some(raw) => {
-                    if let Some(meta) = decode_list_meta(raw) {
-                        meta
-                    } else {
-                        let Some(header) = decode_meta_header(raw) else {
-                            return Err(Error::msg("Failed to decode list metadata"));
-                        };
-                        if header.type_tag != TYPE_LIST {
-                            return Err(Error::msg(WRONG_TYPE_ERROR));
-                        }
-                        return Err(Error::msg("Failed to decode list metadata"));
+        self.list_push_bytes_merged_async(key, false, values, only_if_exists)
+            .await
+    }
+
+    async fn list_push_bytes_merged_async(
+        &self,
+        key: &str,
+        left: bool,
+        values: &[&[u8]],
+        only_if_exists: bool,
+    ) -> Result<usize, Error> {
+        if self.store.is_transactional() {
+            let command = (key, left, values.to_vec(), only_if_exists);
+            return self
+                .list_push_batch_async(&[command])
+                .await
+                .into_iter()
+                .next()
+                .expect("one list push command has one reply");
+        }
+        let queue_key = (self.db_index, key.as_bytes().to_vec());
+        let queue = self
+            .counter_cache
+            .list_push_queues
+            .entry(queue_key)
+            .or_insert_with(|| Arc::new(ListPushMergeQueue::default()))
+            .clone();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        queue
+            .pending
+            .lock()
+            .expect("list push merge queue mutex poisoned")
+            .push_back(ListPushMergeRequest {
+                left,
+                values: values.iter().map(|value| value.to_vec()).collect(),
+                only_if_exists,
+                reply,
+            });
+        if queue
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.spawn_list_push_merge_worker(key.to_string(), queue.clone());
+        }
+        drop(queue);
+        result
+            .await
+            .map_err(|_| Error::msg("ERR list push merger stopped"))?
+    }
+
+    fn spawn_list_push_merge_worker(&self, key: String, queue: Arc<ListPushMergeQueue>) {
+        let db = self.shared_task_view();
+        let queue_key = (self.db_index, key.as_bytes().to_vec());
+        tokio::spawn(async move {
+            loop {
+                tokio::task::yield_now().await;
+                let requests = {
+                    let mut pending = queue
+                        .pending
+                        .lock()
+                        .expect("list push merge queue mutex poisoned");
+                    let count = pending.len().min(LIST_PUSH_MERGE_BATCH_MAX);
+                    pending.drain(..count).collect::<Vec<_>>()
+                };
+                if !requests.is_empty() {
+                    let commands = requests
+                        .iter()
+                        .map(|request| {
+                            (
+                                key.as_str(),
+                                request.left,
+                                request.values.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                                request.only_if_exists,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let replies = db.list_push_batch_async(&commands).await;
+                    for (request, reply) in requests.into_iter().zip(replies) {
+                        let _ = request.reply.send(reply);
                     }
                 }
-                None if only_if_exists => return Ok(0),
-                None => ListMeta {
+                let pending = queue
+                    .pending
+                    .lock()
+                    .expect("list push merge queue mutex poisoned");
+                if pending.is_empty() {
+                    queue.running.store(false, Ordering::Release);
+                    db.counter_cache
+                        .list_push_queues
+                        .remove_if(&queue_key, |_, existing| {
+                            Arc::ptr_eq(existing, &queue) && Arc::strong_count(existing) == 2
+                        });
+                    break;
+                }
+                drop(pending);
+            }
+        });
+    }
+
+    pub(in crate::store::db) async fn list_push_batch_async<'a>(
+        &self,
+        commands: &[(&'a str, bool, Vec<&'a [u8]>, bool)],
+    ) -> Vec<Result<usize, Error>> {
+        if commands.is_empty() {
+            return Vec::new();
+        }
+        let mut key_positions = HashMap::<&str, usize>::with_capacity(commands.len());
+        let mut keys = Vec::<&str>::new();
+        for (key, _, _, _) in commands {
+            if !key_positions.contains_key(key) {
+                key_positions.insert(key, keys.len());
+                keys.push(key);
+            }
+        }
+        let shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _guards = self.lock_write_shards(&shards).await;
+        let mut states = Vec::with_capacity(keys.len());
+        for key in &keys {
+            states.push(match self.list_meta_async(key).await {
+                Ok(meta) => ListPushBatchState::Valid {
+                    initially_exists: meta.is_some(),
+                    meta,
+                    dirty: false,
+                },
+                Err(error) => ListPushBatchState::Error(error.to_string()),
+            });
+        }
+        let mut batch = WriteBatch::new();
+        let mut replies = Vec::with_capacity(commands.len());
+        let mut changed = 0u64;
+        for (key, left, values, only_if_exists) in commands {
+            let position = key_positions[key];
+            let ListPushBatchState::Valid { meta, dirty, .. } = &mut states[position] else {
+                let ListPushBatchState::Error(message) = &states[position] else {
+                    unreachable!()
+                };
+                replies.push(Err(Error::msg(message.clone())));
+                continue;
+            };
+            if meta.is_none() && *only_if_exists {
+                replies.push(Ok(0));
+                continue;
+            }
+            if meta.is_none() {
+                *meta = Some(ListMeta {
                     expire_ms: 0,
                     version: self.next_version_async().await,
                     head: 0,
                     tail: 0,
-                },
-            };
-            let mut batch = WriteBatch::new();
-            for value in values {
-                batch.put(
-                    &list_item_key(self.db_index, key, meta.version, meta.tail),
-                    value,
-                );
-                meta.tail += 1;
+                });
             }
-            batch.put(
-                &key_bytes,
-                &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-            );
-            let len = (meta.tail - meta.head) as usize;
-            let condition = CompareCondition::from_observed(&observed_meta);
-            if self
-                .compare_and_write_batch_if_not_empty_async(&[condition], &batch)
-                .await?
+            let meta = meta
+                .as_mut()
+                .expect("missing list metadata was initialized");
+            for value in values {
+                if *left {
+                    meta.head -= 1;
+                    batch.put(
+                        &list_item_key(self.db_index, key, meta.version, meta.head),
+                        value,
+                    );
+                } else {
+                    batch.put(
+                        &list_item_key(self.db_index, key, meta.version, meta.tail),
+                        value,
+                    );
+                    meta.tail += 1;
+                }
+            }
+            if !values.is_empty() {
+                *dirty = true;
+                changed += 1;
+            }
+            replies.push(Ok((meta.tail - meta.head) as usize));
+        }
+        let mut has_new_version = false;
+        for (position, state) in states.iter().enumerate() {
+            if let ListPushBatchState::Valid {
+                meta: Some(meta),
+                initially_exists,
+                dirty: true,
+            } = state
             {
-                self.cache_list_meta_if_non_transactional(key, meta);
-                self.changes.fetch_add(1, Ordering::Relaxed);
-                return Ok(len);
+                batch.put(
+                    &self.mk(keys[position]),
+                    &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
+                );
+                has_new_version |= !initially_exists;
             }
         }
-        Err(Error::msg("ERR list write conflict"))
+        if changed > 0 {
+            if has_new_version {
+                self.write_batch_if_not_empty_async(&batch).await;
+            } else {
+                self.write_existing_version_batch_if_not_empty_async(&batch)
+                    .await;
+            }
+            self.changes.fetch_add(changed, Ordering::Relaxed);
+            for (position, state) in states.iter().enumerate() {
+                if let ListPushBatchState::Valid {
+                    meta: Some(meta),
+                    dirty: true,
+                    ..
+                } = state
+                {
+                    self.cache_list_meta_if_non_transactional(keys[position], *meta);
+                }
+            }
+        }
+        replies
     }
 }

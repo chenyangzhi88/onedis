@@ -102,6 +102,11 @@ pub(super) fn meta(schema: Vec<FullTextFieldSchema>) -> FullTextIndexMeta {
 pub(super) fn runtime_config() -> FullTextRuntimeConfig {
     FullTextRuntimeConfig {
         writer_heap_bytes: FULLTEXT_WRITER_HEAP_BYTES,
+        directory_cache_bytes: DEFAULT_DIRECTORY_CACHE_BYTES,
+        merge_min_segments: DEFAULT_MERGE_MIN_SEGMENTS,
+        merge_max_docs: DEFAULT_MERGE_MAX_DOCS,
+        merge_min_layer_docs: DEFAULT_MERGE_MIN_LAYER_DOCS,
+        merge_delete_ratio: DEFAULT_MERGE_DELETE_RATIO,
         min_prefix: 2,
         max_expansions: 200,
         max_prefix_expansions: 200,

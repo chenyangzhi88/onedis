@@ -2,6 +2,7 @@
 pub struct VectorRuntimeRegistry {
     indexes: DashMap<VectorRuntimeKey, Arc<RwLock<VectorRuntime>>>,
     write_locks: DashMap<VectorWriteLockKey, Arc<Mutex<()>>>,
+    active_runtimes: AtomicUsize,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -18,6 +19,24 @@ struct VectorWriteLockKey {
 }
 
 impl VectorRuntimeRegistry {
+    pub(crate) fn has_active_runtimes(&self) -> bool {
+        self.active_runtimes.load(AtomicOrdering::Acquire) != 0
+    }
+
+    fn insert_runtime(&self, key: VectorRuntimeKey, runtime: Arc<RwLock<VectorRuntime>>) {
+        match self.indexes.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                entry.insert(runtime);
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                // Publish the conservative non-empty state before making the runtime visible.
+                // Readers may do one harmless extra reconcile, but can never miss a live runtime.
+                self.active_runtimes.fetch_add(1, AtomicOrdering::Release);
+                entry.insert(runtime);
+            }
+        }
+    }
+
     fn key(db_index: u16, index: &str, version: u64) -> VectorRuntimeKey {
         VectorRuntimeKey {
             db_index,
@@ -33,7 +52,7 @@ impl VectorRuntimeRegistry {
         version: u64,
         config: VectorRuntimeConfig,
     ) {
-        self.indexes.insert(
+        self.insert_runtime(
             Self::key(db_index, index, version),
             Arc::new(RwLock::new(VectorRuntime::new(
                 config.dim,
@@ -42,6 +61,7 @@ impl VectorRuntimeRegistry {
                 config.ef_construction,
                 config.initial_cap,
                 1,
+                config.quantization,
             ))),
         );
     }
@@ -63,6 +83,14 @@ impl VectorRuntimeRegistry {
             .map(|entry| entry.value().clone())
     }
 
+    fn indexes_for_db(&self, db_index: u16) -> Vec<(String, u64)> {
+        self.indexes
+            .iter()
+            .filter(|entry| entry.key().db_index == db_index)
+            .map(|entry| (entry.key().index.clone(), entry.key().version))
+            .collect()
+    }
+
     fn upsert(
         &self,
         db_index: u16,
@@ -71,32 +99,55 @@ impl VectorRuntimeRegistry {
         config: VectorRuntimeConfig,
         entry: VectorRuntimeEntry,
     ) -> Result<(), Error> {
-        let runtime = self
-            .indexes
-            .entry(Self::key(db_index, index, version))
-            .or_insert_with(|| {
-                Arc::new(RwLock::new(VectorRuntime::new(
+        let runtime = match self.indexes.entry(Self::key(db_index, index, version)) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let runtime = Arc::new(RwLock::new(VectorRuntime::new(
                     config.dim,
                     config.distance,
                     config.m,
                     config.ef_construction,
                     config.initial_cap,
                     1,
-                )))
-            })
-            .value()
-            .clone();
+                    config.quantization,
+                )));
+                self.active_runtimes.fetch_add(1, AtomicOrdering::Release);
+                entry.insert(runtime.clone());
+                runtime
+            }
+        };
         runtime
             .write()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
-            .upsert(entry.id, entry.doc_version, entry.vector)
+            .upsert_with_attrs(entry.id, entry.doc_version, entry.vector, entry.attrs_json)
     }
 
-    fn mark_deleted(&self, db_index: u16, index: &str, version: u64, id: &str) {
+    fn mark_deleted(
+        &self,
+        db_index: u16,
+        index: &str,
+        version: u64,
+        doc: VectorDocRecord,
+    ) {
         if let Some(runtime) = self.get(db_index, index, version)
             && let Ok(mut runtime) = runtime.write()
         {
-            runtime.mark_deleted(id);
+            runtime.mark_deleted(doc);
+        }
+    }
+
+    fn set_attrs(
+        &self,
+        db_index: u16,
+        index: &str,
+        version: u64,
+        id: &str,
+        attrs_json: String,
+    ) {
+        if let Some(runtime) = self.get(db_index, index, version)
+            && let Ok(mut runtime) = runtime.write()
+        {
+            runtime.set_attrs(id, attrs_json);
         }
     }
 
@@ -106,6 +157,7 @@ impl VectorRuntimeRegistry {
         index: &str,
         version: u64,
         docs: Vec<VectorDocRecord>,
+        flushed_through: u64,
     ) -> Result<(), Error> {
         let runtime = self
             .get(db_index, index, version)
@@ -113,20 +165,37 @@ impl VectorRuntimeRegistry {
         runtime
             .write()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
-            .reconcile_docs(docs)
+            .reconcile_docs(docs, flushed_through);
+        Ok(())
     }
 
     fn remove(&self, db_index: u16, index: &str, version: u64) {
-        self.indexes.remove(&Self::key(db_index, index, version));
+        if self
+            .indexes
+            .remove(&Self::key(db_index, index, version))
+            .is_some()
+        {
+            self.active_runtimes.fetch_sub(1, AtomicOrdering::AcqRel);
+        }
         self.cleanup_write_lock_if_idle(db_index, index);
     }
 
     fn retain_index_version(&self, db_index: u16, index: &str, version: Option<u64>) {
+        let mut removed = 0usize;
         self.indexes.retain(|key, _| {
-            key.db_index != db_index
+            let keep = key.db_index != db_index
                 || key.index != index
-                || version.is_some_and(|version| key.version == version)
+                || version.is_some_and(|version| key.version == version);
+            if !keep {
+                removed += 1;
+            }
+            keep
         });
+        if removed != 0 {
+            // Keep the count conservative until every removed runtime is no longer visible.
+            self.active_runtimes
+                .fetch_sub(removed, AtomicOrdering::AcqRel);
+        }
         if version.is_none() {
             self.cleanup_write_lock_if_idle(db_index, index);
         }
@@ -154,7 +223,18 @@ impl VectorRuntimeRegistry {
     }
 
     pub(crate) fn remove_db(&self, db_index: u16) {
-        self.indexes.retain(|key, _| key.db_index != db_index);
+        let mut removed = 0usize;
+        self.indexes.retain(|key, _| {
+            let keep = key.db_index != db_index;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+        if removed != 0 {
+            self.active_runtimes
+                .fetch_sub(removed, AtomicOrdering::AcqRel);
+        }
         self.write_locks
             .retain(|key, _| key.db_index != db_index);
     }

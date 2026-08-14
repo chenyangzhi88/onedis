@@ -3,6 +3,40 @@ use super::support::*;
 use tantivy::directory::{Directory, INDEX_WRITER_LOCK};
 
 #[test]
+fn fulltext_vector_indexes_are_internal_and_not_redis_keys() {
+    let store = test_store("internal-vector-namespace");
+    let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
+    let ttl_manager =
+        crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
+    let db = Db::new(0, store, version_counter, ttl_manager);
+    let mut vector = field("vec", FullTextFieldKind::Vector);
+    vector.options.vector = Some(vector_options());
+    db.fulltext_create(
+        "idx",
+        FullTextCreateOptions {
+            source_type: FullTextSourceType::Hash,
+            prefixes: vec!["doc:".to_string()],
+            schema: vec![vector],
+            index_options: FullTextIndexOptions::default(),
+        },
+    )
+    .unwrap();
+    let meta = db.read_fulltext_meta_direct("idx").unwrap();
+    let internal = fulltext_vector_index_name("idx", meta.generation, "vec");
+    assert_eq!(db.vector_dim(&internal).unwrap(), Some(3));
+    assert!(!db.keys("*").contains(&internal));
+    assert!(!db.delete_key(&internal));
+    assert_eq!(db.vector_dim(&internal).unwrap(), Some(3));
+
+    db.hash_set("doc:1", "vec", "[1,0,0]").unwrap();
+    db.fulltext_refresh_index("idx", true).unwrap();
+    assert_eq!(db.vector_card(&internal).unwrap(), 1);
+
+    db.fulltext_drop_index("idx", false).unwrap();
+    assert_eq!(db.vector_dim(&internal).unwrap(), None);
+}
+
+#[test]
 fn alter_runtime_failure_rolls_back_schema_generation_and_runtime() {
     let store = test_store("alter-rollback");
     let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
@@ -192,4 +226,72 @@ fn recreated_index_ignores_late_outbox_records_from_the_dropped_incarnation() {
             .hits
             .is_empty()
     );
+}
+
+#[test]
+fn search_publishes_hot_generation_and_maintenance_checkpoints_it() {
+    let store = test_store("hot-checkpoint");
+    let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
+    let ttl_manager =
+        crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
+    let db = Db::new(0, store.clone(), version_counter, ttl_manager);
+    let mut index_options = FullTextIndexOptions::default();
+    index_options.skip_initial_scan = true;
+    db.fulltext_create(
+        "idx",
+        FullTextCreateOptions {
+            source_type: FullTextSourceType::Hash,
+            prefixes: vec!["doc:".to_string()],
+            schema: vec![text_field("title")],
+            index_options,
+        },
+    )
+    .unwrap();
+    db.hash_set("doc:1", "title", "near realtime").unwrap();
+    assert!(
+        !db.store
+            .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
+            .is_empty(),
+        "the source mutation must be durable before query-side publication"
+    );
+
+    let hits = db
+        .fulltext_collect_live_hits(
+            "idx",
+            "realtime",
+            &search_options(),
+            FullTextCollectMode::Page,
+        )
+        .unwrap();
+    assert_eq!(hits.total, 1);
+    let before = db.read_fulltext_meta_direct("idx").unwrap();
+    let runtime = db.fulltext_runtimes.get(0, "idx").unwrap();
+    let published = runtime.read().unwrap().published_outbox_seq();
+    assert!(published > before.last_indexed_outbox_seq);
+    assert!(runtime.read().unwrap().directory.has_hot_changes());
+    assert!(
+        !db.store
+            .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
+            .is_empty()
+    );
+
+    db.fulltext_maintenance_tick().unwrap();
+    let checkpointed = db.read_fulltext_meta_direct("idx").unwrap();
+    assert_eq!(checkpointed.last_indexed_outbox_seq, published);
+    assert!(
+        db.store
+            .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
+            .is_empty()
+    );
+
+    drop(runtime);
+    db.fulltext_runtimes.remove(0, "idx");
+    db.ensure_fulltext_runtime("idx").unwrap();
+    let recovered = db.fulltext_runtimes.get(0, "idx").unwrap();
+    let recovered_hits = recovered
+        .read()
+        .unwrap()
+        .search("realtime", &search_options(), Some(10), search_deadline())
+        .unwrap();
+    assert_eq!(recovered_hits.hits.len(), 1);
 }

@@ -68,6 +68,242 @@ async fn concurrent_list_push_async_on_same_key_keeps_all_items() {
 }
 
 #[tokio::test]
+async fn concurrent_count_pops_return_every_item_once_and_remove_idle_queue() {
+    let db = Arc::new(test_db());
+    let values = (0..128)
+        .map(|index| format!("v{index:03}"))
+        .collect::<Vec<_>>();
+    db.list_push_right_async("concurrent-pop", &values, false)
+        .await
+        .unwrap();
+
+    let mut tasks = Vec::new();
+    for _ in 0..16 {
+        let db = Arc::clone(&db);
+        tasks.push(tokio::spawn(async move {
+            db.list_pop_merged_async("concurrent-pop", true, 8)
+                .await
+                .unwrap()
+        }));
+    }
+    let mut popped = Vec::new();
+    for task in tasks {
+        popped.extend(
+            task.await
+                .unwrap()
+                .into_iter()
+                .map(|value| String::from_utf8(value).unwrap()),
+        );
+    }
+    popped.sort();
+    assert_eq!(popped, values);
+    assert!(!db.exists_readonly("concurrent-pop"));
+    for _ in 0..8 {
+        if db.counter_cache.list_pop_queues.is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(db.counter_cache.list_pop_queues.is_empty());
+}
+
+#[tokio::test]
+async fn insert_and_remove_preserve_nonzero_list_storage_boundaries() {
+    let db = test_db();
+    db.list_push_right_async(
+        "shifted",
+        &["a".to_string(), "b".to_string(), "c".to_string()],
+        false,
+    )
+    .await
+    .unwrap();
+    db.list_push_left_async("shifted", &["front".to_string()], false)
+        .await
+        .unwrap();
+    let before = db.list_meta_async("shifted").await.unwrap().unwrap();
+    assert!(before.head < 0);
+
+    assert_eq!(
+        db.list_insert_async("shifted", true, "front", "new-front")
+            .await
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        db.list_insert_async("shifted", false, "c", "new-back")
+            .await
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        db.list_remove_async("shifted", 1, "new-front")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.list_remove_async("shifted", -1, "new-back")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.list_remove_async("shifted", 1, "front").await.unwrap(),
+        1
+    );
+    assert_eq!(
+        db.list_range_async("shifted", 0, -1).await.unwrap(),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
+    let after = db.list_meta_async("shifted").await.unwrap().unwrap();
+    assert_eq!((after.tail - after.head) as usize, 3);
+}
+
+#[tokio::test]
+async fn streaming_list_remove_preserves_direction_counts_and_cross_zero_layout() {
+    let db = test_db();
+    db.list_push_right_async(
+        "stream-remove",
+        &[
+            "a".to_string(),
+            "x".to_string(),
+            "b".to_string(),
+            "x".to_string(),
+            "c".to_string(),
+            "x".to_string(),
+            "d".to_string(),
+        ],
+        false,
+    )
+    .await
+    .unwrap();
+    db.list_push_left_async(
+        "stream-remove",
+        &["left".to_string(), "x".to_string()],
+        false,
+    )
+    .await
+    .unwrap();
+    let before = db.list_meta_async("stream-remove").await.unwrap().unwrap();
+    assert!(before.head < 0 && before.tail > 0);
+
+    assert_eq!(
+        db.list_remove_async("stream-remove", 2, "x").await.unwrap(),
+        2
+    );
+    assert_eq!(
+        db.list_range_async("stream-remove", 0, -1).await.unwrap(),
+        vec!["left", "a", "b", "x", "c", "x", "d"]
+    );
+    assert_eq!(
+        db.list_remove_async("stream-remove", -1, "x")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.list_range_async("stream-remove", 0, -1).await.unwrap(),
+        vec!["left", "a", "b", "x", "c", "d"]
+    );
+    assert_eq!(
+        db.list_remove_async("stream-remove", 0, "x").await.unwrap(),
+        1
+    );
+    assert_eq!(
+        db.list_range_async("stream-remove", 0, -1).await.unwrap(),
+        vec!["left", "a", "b", "c", "d"]
+    );
+}
+
+#[tokio::test]
+async fn mixed_direction_pop_batch_moves_values_without_duplicate_copies() {
+    let db = test_db();
+    db.list_push_right_async(
+        "mixed-pop",
+        &(0..12).map(|index| format!("v{index}")).collect::<Vec<_>>(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let replies = db
+        .list_pop_many_batch_async(&[
+            ("mixed-pop", true, 2),
+            ("mixed-pop", false, 3),
+            ("mixed-pop", true, 1),
+            ("mixed-pop", false, 2),
+        ])
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|value| String::from_utf8(value).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replies,
+        vec![
+            vec!["v0", "v1"],
+            vec!["v11", "v10", "v9"],
+            vec!["v2"],
+            vec!["v8", "v7"],
+        ]
+    );
+    assert_eq!(
+        db.list_range_async("mixed-pop", 0, -1).await.unwrap(),
+        vec!["v3", "v4", "v5", "v6"]
+    );
+}
+
+#[tokio::test]
+async fn list_remove_rewrites_the_shorter_side_for_matches_near_each_end() {
+    let db = test_db();
+    let values = (0..20).map(|index| format!("v{index}")).collect::<Vec<_>>();
+    db.list_push_right_async("remove-near-head", &values, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.list_remove_async("remove-near-head", 1, "v1")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.list_range_async("remove-near-head", 0, -1)
+            .await
+            .unwrap(),
+        values
+            .iter()
+            .filter(|value| value.as_str() != "v1")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+
+    db.list_push_right_async("remove-near-tail", &values, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.list_remove_async("remove-near-tail", -1, "v18")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.list_range_async("remove-near-tail", 0, -1)
+            .await
+            .unwrap(),
+        values
+            .iter()
+            .filter(|value| value.as_str() != "v18")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn stale_expired_list_cache_cannot_delete_recreated_list() {
     let db = test_db();
     db.list_push_right_async("queue", &["new".to_string()], false)

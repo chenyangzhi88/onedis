@@ -1,6 +1,12 @@
 use super::*;
 impl Db {
     pub(crate) fn shutdown_fulltext_runtime(&self) {
+        if let Err(err) = self.fulltext_maintenance_tick() {
+            log::error!(
+                "failed to checkpoint fulltext runtimes while shutting down DB {}: {err}",
+                self.db_index
+            );
+        }
         self.fulltext_runtimes.remove_db(self.db_index);
         if let Err(err) = delete_fulltext_aggregate_cursors_for_db(self.db_index) {
             log::error!(
@@ -13,10 +19,28 @@ impl Db {
     pub(super) fn fulltext_refresh_index(&self, index: &str, force: bool) -> Result<(), Error> {
         let started = Instant::now();
         let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, index);
-        let _lifecycle_guard = lifecycle_lock
-            .write()
-            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-        let result = self.fulltext_refresh_index_inner(index, force, None);
+        let dirty = self
+            .read_fulltext_meta_direct(index)
+            .is_ok_and(|meta| matches!(meta.state, FullTextIndexState::Dirty));
+        let result = if dirty {
+            let _lifecycle_guard = lifecycle_lock
+                .write()
+                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+            let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
+            let _refresh_guard = refresh_lock
+                .lock()
+                .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
+            self.fulltext_refresh_index_inner(index, force, None)
+        } else {
+            let _lifecycle_guard = lifecycle_lock
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+            let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
+            let _refresh_guard = refresh_lock
+                .lock()
+                .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
+            self.fulltext_refresh_index_mode(index, force, None, true, false)
+        };
         global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
         result
     }
@@ -27,12 +51,32 @@ impl Db {
         force: bool,
         external_deadline: Option<Instant>,
     ) -> Result<(), Error> {
+        self.fulltext_refresh_index_mode(index, force, external_deadline, true, true)
+    }
+
+    fn fulltext_publish_index_inner(
+        &self,
+        index: &str,
+        force: bool,
+        external_deadline: Option<Instant>,
+    ) -> Result<(), Error> {
+        self.fulltext_refresh_index_mode(index, force, external_deadline, false, false)
+    }
+
+    fn fulltext_refresh_index_mode(
+        &self,
+        index: &str,
+        force: bool,
+        external_deadline: Option<Instant>,
+        durable_checkpoint: bool,
+        repair_dirty: bool,
+    ) -> Result<(), Error> {
         let (mut meta, expected_meta_raw) = self.read_fulltext_meta_versioned(index)?;
         if matches!(meta.state, FullTextIndexState::Dropping) {
             return Ok(());
         }
         if matches!(meta.state, FullTextIndexState::Dirty) {
-            if force && self.fulltext_dirty_repair_allowed(index)? {
+            if repair_dirty && force && self.fulltext_dirty_repair_allowed(index)? {
                 return self.fulltext_rebuild_index(index);
             }
             return Ok(());
@@ -70,6 +114,7 @@ impl Db {
             &runtime,
             &policy,
             deadline,
+            durable_checkpoint,
         );
         if let Err(err) = result {
             self.fulltext_mark_dirty(index)?;
@@ -85,6 +130,10 @@ impl Db {
         deadline: Instant,
     ) -> Result<bool, Error> {
         self.ensure_fulltext_runtime(index)?;
+        let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
+        let _refresh_guard = refresh_lock
+            .lock()
+            .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
         loop {
             let before = self.fulltext_refresh_progress(index)?;
             if before.0 {
@@ -94,7 +143,7 @@ impl Db {
                 return Ok(false);
             }
             let started = Instant::now();
-            let result = self.fulltext_refresh_index_inner(index, true, Some(deadline));
+            let result = self.fulltext_publish_index_inner(index, true, Some(deadline));
             global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
             result?;
             let after = self.fulltext_refresh_progress(index)?;
@@ -112,15 +161,26 @@ impl Db {
         index: &str,
     ) -> Result<(bool, usize, Option<String>), Error> {
         let meta = self.read_fulltext_meta_direct(index)?;
-        let pending = self.fulltext_pending_outbox_count(index) as usize;
+        let runtime = self
+            .fulltext_runtimes
+            .get(self.db_index, index)
+            .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
+        let runtime = runtime
+            .read()
+            .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+        let published_seq = runtime.published_outbox_seq();
+        let pending = self.fulltext_unpublished_outbox_count(index, published_seq);
+        let latest_is_published = self
+            .fulltext_latest_outbox_seq(index)
+            .is_none_or(|latest| latest <= published_seq);
         let complete = pending == 0
+            && latest_is_published
+            && runtime.backfill_complete
             && !matches!(
                 meta.state,
-                FullTextIndexState::Backfilling
-                    | FullTextIndexState::Rebuilding
-                    | FullTextIndexState::Dirty
+                FullTextIndexState::Dirty | FullTextIndexState::Dropping
             );
-        Ok((complete, pending, meta.backfill_cursor))
+        Ok((complete, pending, runtime.published_backfill_cursor.clone()))
     }
 
     pub(super) fn fulltext_rebuild_index(&self, index: &str) -> Result<(), Error> {
@@ -147,6 +207,7 @@ impl Db {
                 &runtime_config,
             )?;
             self.fulltext_build_generation(index, &meta, &mut runtime)?;
+            runtime.directory.checkpoint()?;
             Ok::<FullTextRuntime, Error>(runtime)
         })();
         let runtime = match stage_result {
@@ -171,7 +232,7 @@ impl Db {
 
         if previous_storage != meta.active_storage {
             let mut cleanup = WriteBatch::new();
-            self.delete_fulltext_storage_to_batch(&mut cleanup, &previous_storage);
+            self.delete_fulltext_storage_to_batch(&mut cleanup, &previous_storage)?;
             self.write_batch_if_not_empty(&cleanup);
         }
         self.fulltext_delete_vector_indexes(index, &old_meta);
@@ -197,6 +258,15 @@ impl Db {
         };
         let mut batch = WriteBatch::new();
         self.fulltext_write_meta_cas(index, &expected_raw, &mut meta, &mut batch)?;
+        if matches!(meta.state, FullTextIndexState::Backfilling)
+            && let Some(runtime) = self.fulltext_runtimes.get(self.db_index, index)
+        {
+            let mut runtime = runtime
+                .write()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+            runtime.backfill_complete = false;
+            runtime.published_backfill_cursor = None;
+        }
         self.fulltext_invalidate_source_routes();
         Ok(())
     }
@@ -250,7 +320,9 @@ impl Db {
             return Ok(false);
         }
         let mut batch = WriteBatch::new();
-        batch.put(&marker, now.to_string().as_bytes());
+        batch
+            .put(&marker, now.to_string().as_bytes())
+            .map_err(|error| Error::msg(error.to_string()))?;
         self.write_batch_if_not_empty(&batch);
         Ok(true)
     }

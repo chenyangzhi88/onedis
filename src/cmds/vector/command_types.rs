@@ -2,9 +2,12 @@ pub struct VAdd {
     pub key: String,
     pub element: String,
     pub vector: Vec<f32>,
+    pub reduce_dim: Option<usize>,
     pub attrs_json: Option<String>,
     pub m: Option<usize>,
     pub ef: Option<usize>,
+    pub cas: bool,
+    pub quantization: Option<VectorQuantization>,
 }
 
 pub struct VSim {
@@ -14,8 +17,11 @@ pub struct VSim {
     pub with_attrs: bool,
     pub count: usize,
     pub ef: Option<usize>,
+    pub filter_ef: Option<usize>,
     pub filter: Option<String>,
     pub epsilon: Option<f32>,
+    pub truth: bool,
+    pub no_thread: bool,
 }
 
 pub enum VSimQuery {

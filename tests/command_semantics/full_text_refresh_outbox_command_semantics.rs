@@ -235,3 +235,30 @@ fn ft_config_exposes_storage_and_memory_budgets() {
         assert_eq!(bulk_text(&first[1]), value);
     }
 }
+
+#[test]
+fn ft_consistency_mode_controls_query_side_publication() {
+    let (_dir, db) = make_db();
+    create_index(&db);
+    assert!(matches!(
+        apply(&db, &["FT.CONFIG", "SET", "CONSISTENCY", "EVENTUAL"]),
+        Frame::Ok
+    ));
+    assert_eq!(
+        apply(&db, &["HSET", "doc:1", "title", "pending"]).to_string(),
+        "1"
+    );
+    assert_eq!(
+        total(&apply(&db, &["FT.SEARCH", "idx", "pending"])),
+        Some(0)
+    );
+
+    assert!(matches!(
+        apply(&db, &["FT.CONFIG", "SET", "CONSISTENCY", "CONSISTENT"]),
+        Frame::Ok
+    ));
+    assert_eq!(
+        total(&apply(&db, &["FT.SEARCH", "idx", "pending"])),
+        Some(1)
+    );
+}

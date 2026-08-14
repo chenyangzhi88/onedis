@@ -6,6 +6,8 @@ fn indexed_filter_field<'a>(
         FilterPredicate::TagEq(field, _) | FilterPredicate::TagIn(field, _) => {
             (field.as_str(), VectorFieldKind::Tag)
         }
+        FilterPredicate::TagNe(_, _) => return None,
+        FilterPredicate::NumericCmp(_, NumericOp::Ne, _) => return None,
         FilterPredicate::NumericCmp(field, _, _) => (field.as_str(), VectorFieldKind::Numeric),
     };
     meta.schema
@@ -47,7 +49,7 @@ fn put_attr_index_entries_to_batch(
                             context.doc_id,
                         ),
                         &doc_version.to_be_bytes(),
-                    );
+                    )?;
                 }
             }
             VectorFieldKind::Numeric => {
@@ -63,7 +65,7 @@ fn put_attr_index_entries_to_batch(
                             context.doc_id,
                         ),
                         &doc_version.to_be_bytes(),
-                    );
+                    )?;
                 }
             }
             VectorFieldKind::Text => {}
@@ -76,25 +78,23 @@ fn delete_attr_index_entries_to_batch(
     batch: &mut WriteBatch,
     context: &VectorAttrIndexContext<'_>,
     attrs: &JsonValue,
-) {
+) -> Result<(), Error> {
     for field in context.schema.iter().filter(|field| field.indexed) {
         let Some(value) = attrs.get(&field.name) else {
             continue;
         };
         match field.kind {
             VectorFieldKind::Tag => {
-                if let Ok(tags) = tag_values(value) {
-                    for tag in tags {
-                        batch.delete(&vector_tag_key(
-                            context.layout,
-                            context.db_index,
-                            context.index,
-                            context.version,
-                            &field.name,
-                            &tag,
-                            context.doc_id,
-                        ));
-                    }
+                for tag in tag_values(value)? {
+                    batch.delete(&vector_tag_key(
+                        context.layout,
+                        context.db_index,
+                        context.index,
+                        context.version,
+                        &field.name,
+                        &tag,
+                        context.doc_id,
+                    ))?;
                 }
             }
             VectorFieldKind::Numeric => {
@@ -107,12 +107,13 @@ fn delete_attr_index_entries_to_batch(
                         &field.name,
                         number,
                         context.doc_id,
-                    ));
+                    ))?;
                 }
             }
             VectorFieldKind::Text => {}
         }
     }
+    Ok(())
 }
 
 fn tag_values(value: &JsonValue) -> Result<Vec<String>, Error> {

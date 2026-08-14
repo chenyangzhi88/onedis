@@ -6,11 +6,10 @@ impl Db {
         source_type: FullTextSourceType,
     ) -> Result<(), Error> {
         // The mutation itself already appended a durable outbox record in the
-        // same write batch. Searches synchronously catch up that outbox before
-        // evaluating a query, and the maintenance worker drains it in the
-        // background for INFO/idle indexes. Keep Tantivy indexing off this
-        // path, but retain bounded outbox compaction without scanning the
-        // queue on every source write.
+        // same write batch. Consistent searches only publish pending records
+        // into the process-local Tantivy overlay; the maintenance worker owns
+        // durable KV checkpoints and outbox retirement. Keep tokenization,
+        // segment IO and merge work off the source-write path.
         let matching_metas = self.fulltext_matching_metas_for_source(key, source_type)?;
         if matching_metas.is_empty() {
             return Ok(());
@@ -98,7 +97,7 @@ impl Db {
             batch.put(
                 &fulltext_meta_key(self.db_index, &previous.index),
                 &encode_record(&old_meta)?,
-            );
+            )?;
             conditions.push(CompareCondition::exists_with(
                 fulltext_meta_key(self.db_index, &previous.index),
                 old_raw,
@@ -116,11 +115,11 @@ impl Db {
             &encode_record(&FullTextAliasMeta {
                 index: index.clone(),
             })?,
-        );
+        )?;
         batch.put(
             &fulltext_meta_key(self.db_index, &index),
             &encode_record(&meta)?,
-        );
+        )?;
         conditions.push(CompareCondition::exists_with(
             fulltext_meta_key(self.db_index, &index),
             meta_raw,
@@ -288,7 +287,7 @@ impl Db {
             .iter()
             .filter(|field| matches!(field.kind, FullTextFieldKind::Vector))
         {
-            self.delete_key(&fulltext_vector_index_name(
+            let _ = self.vector_drop(&fulltext_vector_index_name(
                 index,
                 meta.generation,
                 field.attribute_name(),

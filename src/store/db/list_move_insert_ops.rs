@@ -258,8 +258,11 @@ impl Db {
             Some(meta) => meta,
             None => return Ok(0),
         };
-        let mut items = self.list_range(key, 0, -1)?;
-        let Some(pivot_index) = items.iter().position(|value| value == pivot) else {
+        let items = self.list_range_raw_values(key, meta.version, meta.head, meta.tail - 1);
+        let Some(pivot_index) = items
+            .iter()
+            .position(|value| value.as_slice() == pivot.as_bytes())
+        else {
             return Ok(-1);
         };
         let insert_index = if before {
@@ -267,30 +270,12 @@ impl Db {
         } else {
             pivot_index.saturating_add(1)
         };
-        items.insert(insert_index, element.to_string());
-
-        let mut batch = WriteBatch::new();
-        for storage_index in meta.head..meta.tail {
-            batch.delete(&list_item_key(
-                self.db_index,
-                key,
-                meta.version,
-                storage_index,
-            ));
-        }
-        for (index, value) in items.iter().enumerate() {
-            batch.put(
-                &list_item_key(self.db_index, key, meta.version, index as i64),
-                value.as_bytes(),
-            );
-        }
-        batch.put(
-            &self.mk(key),
-            &encode_list_meta(meta.expire_ms, meta.version, 0, items.len() as i64),
-        );
+        let (batch, updated) =
+            self.build_list_insert_batch(key, meta, &items, insert_index, element)?;
         self.write_batch_if_not_empty(&batch);
+        self.cache_list_meta_if_non_transactional(key, updated);
         self.changes.fetch_add(1, Ordering::Relaxed);
-        Ok(items.len() as i64)
+        Ok((updated.tail - updated.head) as i64)
     }
 
     pub async fn list_insert_async(
@@ -305,8 +290,13 @@ impl Db {
             Some(meta) => meta,
             None => return Ok(0),
         };
-        let mut items = self.list_range_async(key, 0, -1).await?;
-        let Some(pivot_index) = items.iter().position(|value| value == pivot) else {
+        let items = self
+            .list_range_raw_values_async(key, meta.version, meta.head, meta.tail - 1)
+            .await;
+        let Some(pivot_index) = items
+            .iter()
+            .position(|value| value.as_slice() == pivot.as_bytes())
+        else {
             return Ok(-1);
         };
         let insert_index = if before {
@@ -314,30 +304,90 @@ impl Db {
         } else {
             pivot_index.saturating_add(1)
         };
-        items.insert(insert_index, element.to_string());
+        let (batch, updated) =
+            self.build_list_insert_batch(key, meta, &items, insert_index, element)?;
+        self.write_existing_version_batch_if_not_empty_async(&batch)
+            .await;
+        self.cache_list_meta_if_non_transactional(key, updated);
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        Ok((updated.tail - updated.head) as i64)
+    }
 
-        let mut batch = WriteBatch::new();
-        for storage_index in meta.head..meta.tail {
-            batch.delete(&list_item_key(
-                self.db_index,
-                key,
-                meta.version,
-                storage_index,
-            ));
+    /// Shift only the shorter side of the insertion point. The previous implementation rewrote
+    /// and re-indexed the complete list even when the pivot was next to one end.
+    fn build_list_insert_batch(
+        &self,
+        key: &str,
+        meta: ListMeta,
+        items: &[Vec<u8>],
+        insert_index: usize,
+        element: &str,
+    ) -> Result<(WriteBatch, ListMeta), Error> {
+        let can_grow_left = meta.head > i64::MIN;
+        let can_grow_right = meta.tail < i64::MAX;
+        if !can_grow_left && !can_grow_right {
+            return Err(Error::msg("ERR list index space exhausted"));
         }
-        for (index, value) in items.iter().enumerate() {
+        let prefix_len = insert_index;
+        let suffix_len = items.len().saturating_sub(insert_index);
+        let grow_left = can_grow_left && (!can_grow_right || prefix_len <= suffix_len);
+        let mut updated = meta;
+        let mut batch = WriteBatch::new();
+        if grow_left {
+            updated.head -= 1;
+            for (offset, value) in items[..insert_index].iter().enumerate() {
+                batch.put(
+                    &list_item_key(
+                        self.db_index,
+                        key,
+                        meta.version,
+                        meta.head + offset as i64 - 1,
+                    ),
+                    value,
+                );
+            }
             batch.put(
-                &list_item_key(self.db_index, key, meta.version, index as i64),
-                value.as_bytes(),
+                &list_item_key(
+                    self.db_index,
+                    key,
+                    meta.version,
+                    meta.head + insert_index as i64 - 1,
+                ),
+                element.as_bytes(),
             );
+        } else {
+            for (offset, value) in items[insert_index..].iter().enumerate() {
+                batch.put(
+                    &list_item_key(
+                        self.db_index,
+                        key,
+                        meta.version,
+                        meta.head + insert_index as i64 + offset as i64 + 1,
+                    ),
+                    value,
+                );
+            }
+            batch.put(
+                &list_item_key(
+                    self.db_index,
+                    key,
+                    meta.version,
+                    meta.head + insert_index as i64,
+                ),
+                element.as_bytes(),
+            );
+            updated.tail += 1;
         }
         batch.put(
             &self.mk(key),
-            &encode_list_meta(meta.expire_ms, meta.version, 0, items.len() as i64),
+            &encode_list_meta(
+                updated.expire_ms,
+                updated.version,
+                updated.head,
+                updated.tail,
+            ),
         );
-        self.write_batch_if_not_empty_async(&batch).await;
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        Ok(items.len() as i64)
+        Ok((batch, updated))
     }
 
     pub fn list_multi_pop(
@@ -361,6 +411,15 @@ impl Db {
         left: bool,
         count: usize,
     ) -> Result<Option<(String, Vec<String>)>, Error> {
+        if keys.len() == 1 && !self.store.is_transactional() {
+            let values = self
+                .list_pop_merged_async(&keys[0], left, count)
+                .await?
+                .into_iter()
+                .filter_map(|value| String::from_utf8(value).ok())
+                .collect::<Vec<_>>();
+            return Ok((!values.is_empty()).then(|| (keys[0].clone(), values)));
+        }
         let mut shards = keys
             .iter()
             .map(|key| key_write_lock_shard(self.db_index, key))

@@ -2,13 +2,21 @@ fn arg(frame: &Frame, idx: usize, error: &'static str) -> Result<String, Error> 
     frame.get_arg(idx).ok_or_else(|| Error::msg(error))
 }
 
+fn vector_key_arg(frame: &Frame, idx: usize) -> Result<String, Error> {
+    let key = arg(frame, idx, "ERR invalid vector key")?;
+    if key.starts_with("__onedis_fulltext_vector__:") {
+        return Err(Error::msg("ERR reserved internal vector key"));
+    }
+    Ok(key)
+}
+
 fn parse_index_only(frame: Frame, command: &'static str) -> Result<String, Error> {
     if frame.arg_len() != 2 {
         return Err(Error::msg(format!(
             "ERR wrong number of arguments for '{command}' command"
         )));
     }
-    arg(&frame, 1, "ERR invalid vector index")
+    vector_key_arg(&frame, 1)
 }
 
 fn upper_arg(frame: &Frame, idx: usize) -> Result<String, Error> {
@@ -29,6 +37,18 @@ fn parse_f32_arg(frame: &Frame, idx: usize, error: &'static str) -> Result<f32, 
         return Err(Error::msg(error));
     }
     Ok(value)
+}
+
+fn validate_reduce_dimensions(input_dim: usize, output_dim: usize) -> Result<(), Error> {
+    if output_dim == 0
+        || output_dim >= input_dim
+        || input_dim
+            .checked_mul(output_dim)
+            .is_none_or(|cells| cells > 16 * 1024 * 1024)
+    {
+        return Err(Error::msg("ERR invalid vector REDUCE dimension"));
+    }
+    Ok(())
 }
 
 fn parse_redis_vector_arg(frame: &Frame, idx: &mut usize) -> Result<Vec<f32>, Error> {

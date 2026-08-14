@@ -11,12 +11,22 @@ impl TtlManager {
     }
 
     pub fn add_to_batch(&self, batch: &mut WriteBatch, expire_ms: u64, db_index: u16, key: &str) {
+        let _ = self.try_add_to_batch(batch, expire_ms, db_index, key);
+    }
+
+    pub(crate) fn try_add_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        expire_ms: u64,
+        db_index: u16,
+        key: &str,
+    ) -> common::types::status::Result<()> {
         if expire_ms == 0 {
-            return;
+            return Ok(());
         }
         self.db_count
             .fetch_max(db_index as u32 + 1, Ordering::AcqRel);
-        batch.put(&ttl_index_key(expire_ms, db_index, key), TTL_INDEX_VALUE);
+        batch.put(&ttl_index_key(expire_ms, db_index, key), TTL_INDEX_VALUE)
     }
 
     pub fn remove(&self, db_index: u16, key: &str) {
@@ -45,7 +55,10 @@ impl TtlManager {
     }
 
     pub fn remove_db_to_batch(&self, batch: &mut WriteBatch, db_index: u16) {
-        for (key, _) in self.store_for_db(db_index).scan_prefix_raw(&ttl_db_prefix(db_index)) {
+        for (key, _) in self
+            .store_for_db(db_index)
+            .scan_prefix_raw(&ttl_db_prefix(db_index))
+        {
             batch.delete(&key);
         }
     }
@@ -70,7 +83,10 @@ impl TtlManager {
             .store(num_dbs.max(1) as u32, Ordering::Release);
         let mut with_ttl = 0usize;
         for db_idx in 0..num_dbs {
-            for (ttl_key, _) in self.store_for_db(db_idx).scan_prefix_raw(&ttl_db_prefix(db_idx)) {
+            for (ttl_key, _) in self
+                .store_for_db(db_idx)
+                .scan_prefix_raw(&ttl_db_prefix(db_idx))
+            {
                 if parse_ttl_index_key(&ttl_key).is_some() {
                     with_ttl += 1;
                 }
@@ -79,10 +95,7 @@ impl TtlManager {
 
         for db_idx in 0..num_dbs.max(1) {
             let owner_prefix = crate::store::db::version_owner_prefix(db_idx);
-            for (owner_key, _) in self
-                .store_for_db(db_idx)
-                .scan_prefix_raw(&owner_prefix)
-            {
+            for (owner_key, _) in self.store_for_db(db_idx).scan_prefix_raw(&owner_prefix) {
                 if let Some(suffix) = owner_key.strip_prefix(owner_prefix.as_slice())
                     && suffix.len() == 8
                 {

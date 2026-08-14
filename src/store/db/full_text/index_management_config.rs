@@ -39,15 +39,19 @@ impl Db {
             refresh_policy: FullTextRefreshPolicy::default(),
         };
         let mut batch = WriteBatch::new();
-        batch.put(
-            &fulltext_meta_key(self.db_index, index),
-            &encode_record(&meta)?,
-        );
+        batch
+            .put(
+                &fulltext_meta_key(self.db_index, index),
+                &encode_record(&meta)?,
+            )
+            .map_err(|error| Error::msg(error.to_string()))?;
         if meta.index_options.temporary_seconds.is_some() {
-            batch.put(
-                &fulltext_temporary_activity_key(self.db_index, index),
-                &current_fulltext_millis().to_be_bytes(),
-            );
+            batch
+                .put(
+                    &fulltext_temporary_activity_key(self.db_index, index),
+                    &current_fulltext_millis().to_be_bytes(),
+                )
+                .map_err(|error| Error::msg(error.to_string()))?;
         }
         let encoded_creating = encode_record(&meta)?;
         self.fulltext_compare_and_write(index, None, &batch)?;
@@ -81,6 +85,15 @@ impl Db {
                 self.fulltext_runtimes.remove(self.db_index, index);
             }
             return Err(error);
+        }
+        if matches!(meta.state, FullTextIndexState::Backfilling)
+            && let Some(runtime) = self.fulltext_runtimes.get(self.db_index, index)
+        {
+            let mut runtime = runtime
+                .write()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+            runtime.backfill_complete = false;
+            runtime.published_backfill_cursor = None;
         }
         self.fulltext_invalidate_source_routes();
         Ok(())
@@ -176,14 +189,20 @@ impl Db {
     ) -> Result<(), Error> {
         let active_storage = self.fulltext_active_storage_name(index, meta);
         let mut batch = WriteBatch::new();
-        batch.delete(&fulltext_meta_key(self.db_index, index));
-        batch.delete(&fulltext_temporary_activity_key(self.db_index, index));
+        batch
+            .delete(&fulltext_meta_key(self.db_index, index))
+            .map_err(|error| Error::msg(error.to_string()))?;
+        batch
+            .delete(&fulltext_temporary_activity_key(self.db_index, index))
+            .map_err(|error| Error::msg(error.to_string()))?;
         for alias in self.fulltext_aliases_for_index(index)? {
-            batch.delete(&fulltext_alias_key(self.db_index, &alias));
+            batch
+                .delete(&fulltext_alias_key(self.db_index, &alias))
+                .map_err(|error| Error::msg(error.to_string()))?;
         }
-        self.delete_fulltext_index_storage_to_batch(&mut batch, index);
+        self.delete_fulltext_index_storage_to_batch(&mut batch, index)?;
         if active_storage != index {
-            self.delete_fulltext_storage_to_batch(&mut batch, &active_storage);
+            self.delete_fulltext_storage_to_batch(&mut batch, &active_storage)?;
         }
         self.fulltext_compare_and_write(index, Some(expected_raw), &batch)?;
         self.fulltext_delete_vector_indexes(index, meta);
@@ -263,7 +282,7 @@ impl Db {
 
         let staged_storage = meta.active_storage.clone();
         let mut cleanup_batch = WriteBatch::new();
-        self.delete_fulltext_storage_to_batch(&mut cleanup_batch, &staged_storage);
+        self.delete_fulltext_storage_to_batch(&mut cleanup_batch, &staged_storage)?;
         self.write_batch_if_not_empty(&cleanup_batch);
         let stage_result = (|| {
             self.fulltext_create_vector_indexes(&index, &meta)?;
@@ -286,6 +305,7 @@ impl Db {
             } else {
                 self.fulltext_build_generation(&index, &meta, &mut staged_runtime)?;
             }
+            staged_runtime.directory.checkpoint()?;
             Ok::<FullTextRuntime, Error>(staged_runtime)
         })();
         let staged_runtime = match stage_result {
@@ -318,7 +338,7 @@ impl Db {
 
         if old_storage != staged_storage {
             let mut cleanup = WriteBatch::new();
-            self.delete_fulltext_storage_to_batch(&mut cleanup, &old_storage);
+            self.delete_fulltext_storage_to_batch(&mut cleanup, &old_storage)?;
             self.write_batch_if_not_empty(&cleanup);
         }
         self.fulltext_delete_vector_indexes(&index, &old_meta);
@@ -328,7 +348,14 @@ impl Db {
 
     pub(super) fn fulltext_cleanup_generation(&self, index: &str, meta: &FullTextIndexMeta) {
         let mut batch = WriteBatch::new();
-        self.delete_fulltext_storage_to_batch(&mut batch, &meta.active_storage);
+        if let Err(error) = self.delete_fulltext_storage_to_batch(&mut batch, &meta.active_storage)
+        {
+            log::warn!(
+                "failed to plan fulltext generation cleanup db={} index={index}: {error}",
+                self.db_index
+            );
+            return;
+        }
         self.write_batch_if_not_empty(&batch);
         self.fulltext_delete_vector_indexes(index, meta);
     }
@@ -409,7 +436,9 @@ impl Db {
             .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
         let mut batch = WriteBatch::new();
         let alias_key = fulltext_alias_key(self.db_index, alias);
-        batch.delete(&alias_key);
+        batch
+            .delete(&alias_key)
+            .map_err(|error| Error::msg(error.to_string()))?;
         let mut conditions = vec![CompareCondition::exists_with(
             &alias_key,
             encode_record(&existing)?,
@@ -417,10 +446,12 @@ impl Db {
         if let Ok((mut meta, meta_raw)) = self.read_fulltext_meta_versioned(&existing.index) {
             meta.aliases.retain(|candidate| candidate != alias);
             meta.revision = meta.revision.saturating_add(1);
-            batch.put(
-                &fulltext_meta_key(self.db_index, &existing.index),
-                &encode_record(&meta)?,
-            );
+            batch
+                .put(
+                    &fulltext_meta_key(self.db_index, &existing.index),
+                    &encode_record(&meta)?,
+                )
+                .map_err(|error| Error::msg(error.to_string()))?;
             conditions.push(CompareCondition::exists_with(
                 fulltext_meta_key(self.db_index, &existing.index),
                 meta_raw,
@@ -483,10 +514,12 @@ impl Db {
         let normalized = name.to_ascii_uppercase();
         validate_fulltext_config_value(&normalized, value)?;
         let mut batch = WriteBatch::new();
-        batch.put(
-            &fulltext_config_key(self.db_index, &normalized),
-            value.as_bytes(),
-        );
+        batch
+            .put(
+                &fulltext_config_key(self.db_index, &normalized),
+                value.as_bytes(),
+            )
+            .map_err(|error| Error::msg(error.to_string()))?;
         self.write_batch_if_not_empty(&batch);
         Ok(Frame::Ok)
     }

@@ -222,6 +222,26 @@ fn ft_search_vector_hybrid_filter_and_range_are_ranked_by_vector() {
         &[
             "FT.SEARCH",
             "idx",
+            "*=>[KNN 1 @embedding $vec]",
+            "INKEYS",
+            "1",
+            "doc:2",
+            "PARAMS",
+            "2",
+            "vec",
+            "[1,0]",
+            "NOCONTENT",
+            "DIALECT",
+            "2",
+        ],
+    ));
+    assert_eq!(ids, vec!["doc:2"]);
+
+    let ids = search_ids(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "idx",
             "@embedding:[VECTOR_RANGE 0.03 $vec]",
             "PARAMS",
             "2",

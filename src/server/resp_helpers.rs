@@ -134,6 +134,10 @@ fn borrowed_read_supported(args: &[&[u8]]) -> bool {
     let Some(command) = args.first() else {
         return false;
     };
+    if command.eq_ignore_ascii_case(b"GEOPOS") {
+        return args.len() >= 3
+            && args.len() - 2 <= (crate::frame::MAX_FRAME_NODES - 1) / 3;
+    }
     command.eq_ignore_ascii_case(b"GET")
         || command.eq_ignore_ascii_case(b"MGET")
         || command.eq_ignore_ascii_case(b"EXISTS")
@@ -158,6 +162,8 @@ fn borrowed_read_supported(args: &[&[u8]]) -> bool {
         || command.eq_ignore_ascii_case(b"ZSCORE")
         || command.eq_ignore_ascii_case(b"ZMSCORE")
         || command.eq_ignore_ascii_case(b"ZCARD")
+        || command.eq_ignore_ascii_case(b"GEOHASH")
+        || command.eq_ignore_ascii_case(b"GEODIST")
         || command.eq_ignore_ascii_case(b"LLEN")
         || command.eq_ignore_ascii_case(b"XLEN")
         || command.eq_ignore_ascii_case(b"PFCOUNT")
@@ -273,7 +279,62 @@ type BorrowedHllAddCommand<'a> = (&'a str, Vec<&'a [u8]>);
 type BorrowedListPopCommand<'a> = (&'a str, bool, Option<usize>);
 type BorrowedZsetPopCommand<'a> = (&'a str, bool, usize);
 type BorrowedZsetIncrementCommand<'a> = (&'a str, f64, &'a str);
+type BorrowedZsetAddCommand<'a> = (&'a str, Vec<(f64, &'a str)>);
+type BorrowedBitopCommand<'a> = (&'a str, &'a str, Vec<&'a str>);
 type BorrowedKeyDeleteCommand<'a> = (bool, Vec<&'a str>);
+
+fn parse_borrowed_plain_zset_add_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedZsetAddCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() < 4
+                || !args.len().is_multiple_of(2)
+                || !args[0].eq_ignore_ascii_case(b"ZADD")
+            {
+                return None;
+            }
+            let key = std::str::from_utf8(args[1]).ok()?;
+            let members = args[2..]
+                .chunks_exact(2)
+                .map(|pair| {
+                    let score = std::str::from_utf8(pair[0]).ok()?.parse::<f64>().ok()?;
+                    if score.is_nan() {
+                        return None;
+                    }
+                    Some((score, std::str::from_utf8(pair[1]).ok()?))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((key, members))
+        })
+        .collect()
+}
+
+fn parse_borrowed_bitop_commands<'a>(
+    commands: &[Vec<&'a [u8]>],
+) -> Option<Vec<BorrowedBitopCommand<'a>>> {
+    commands
+        .iter()
+        .map(|args| {
+            if args.len() < 4 || !args[0].eq_ignore_ascii_case(b"BITOP") {
+                return None;
+            }
+            let op = std::str::from_utf8(args[1]).ok()?;
+            if !matches!(op.to_ascii_uppercase().as_str(), "AND" | "OR" | "XOR" | "NOT")
+                || op.eq_ignore_ascii_case("NOT") && args.len() != 4
+            {
+                return None;
+            }
+            let dest = std::str::from_utf8(args[2]).ok()?;
+            let sources = args[3..]
+                .iter()
+                .map(|source| std::str::from_utf8(source).ok())
+                .collect::<Option<Vec<_>>>()?;
+            Some((op, dest, sources))
+        })
+        .collect()
+}
 
 fn parse_borrowed_key_delete_commands<'a>(
     commands: &[Vec<&'a [u8]>],
@@ -509,6 +570,16 @@ fn borrowed_lrange_supported(args: &[&[u8]]) -> bool {
         && args
             .first()
             .is_some_and(|command| command.eq_ignore_ascii_case(b"LRANGE"))
+}
+
+fn borrowed_collection_read_supported(args: &[&[u8]]) -> bool {
+    args.len() == 2
+        && args.first().is_some_and(|command| {
+            command.eq_ignore_ascii_case(b"SMEMBERS")
+                || command.eq_ignore_ascii_case(b"HGETALL")
+                || command.eq_ignore_ascii_case(b"HKEYS")
+                || command.eq_ignore_ascii_case(b"HVALS")
+        })
 }
 
 fn find_crlf(bytes: &[u8], start: usize) -> Option<usize> {

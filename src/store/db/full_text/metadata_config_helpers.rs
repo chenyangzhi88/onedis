@@ -17,7 +17,7 @@ impl Db {
                 self.fulltext_purge_index(index_or_alias, &meta)?;
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
-            self.fulltext_touch_temporary_index(index_or_alias, &meta);
+            self.fulltext_touch_temporary_index(index_or_alias, &meta)?;
             return Ok(index_or_alias.to_string());
         }
         if let Some(alias) = self.read_fulltext_alias(index_or_alias)? {
@@ -29,7 +29,7 @@ impl Db {
                 self.fulltext_purge_index(&alias.index, &meta)?;
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
-            self.fulltext_touch_temporary_index(&alias.index, &meta);
+            self.fulltext_touch_temporary_index(&alias.index, &meta)?;
             return Ok(alias.index);
         }
         Err(Error::msg("ERR fulltext index does not exist"))
@@ -62,7 +62,9 @@ impl Db {
     ) -> Result<Vec<u8>, Error> {
         meta.revision = meta.revision.saturating_add(1);
         let encoded = encode_record(meta)?;
-        batch.put(&fulltext_meta_key(self.db_index, index), &encoded);
+        batch
+            .put(&fulltext_meta_key(self.db_index, index), &encoded)
+            .map_err(|error| Error::msg(error.to_string()))?;
         self.fulltext_compare_and_write(index, Some(expected_raw), batch)?;
         Ok(encoded)
     }
@@ -130,7 +132,7 @@ impl Db {
             {
                 continue;
             }
-            self.fulltext_touch_temporary_index(&route.index, &meta);
+            self.fulltext_touch_temporary_index(&route.index, &meta)?;
             matches.push((route.index.clone(), meta));
         }
         Ok(matches)
@@ -175,6 +177,31 @@ impl Db {
         self.fulltext_runtimes
             .set_outbox_pending(self.db_index, index, pending);
         pending
+    }
+
+    pub(super) fn fulltext_latest_outbox_seq(&self, index: &str) -> Option<u64> {
+        let prefix = fulltext_outbox_prefix(self.db_index, index);
+        self.store
+            .scan_range_raw_limited_reverse(&prefix, prefix_exclusive_upper_bound(&prefix), 1)
+            .into_iter()
+            .find_map(|(key, _)| fulltext_outbox_seq_from_key(self.db_index, index, &key))
+    }
+
+    pub(super) fn fulltext_unpublished_outbox_count(
+        &self,
+        index: &str,
+        published_seq: u64,
+    ) -> usize {
+        let Some(start_seq) = published_seq.checked_add(1) else {
+            return 0;
+        };
+        let prefix = fulltext_outbox_prefix(self.db_index, index);
+        self.store.scan_range_raw_visit(
+            &fulltext_outbox_key(self.db_index, index, start_seq),
+            prefix_exclusive_upper_bound(&prefix),
+            usize::MAX,
+            |_, _| true,
+        )
     }
 
     pub(super) fn fulltext_source_keys_page(
@@ -326,25 +353,25 @@ impl Db {
         &self,
         batch: &mut WriteBatch,
         index: &str,
-    ) {
-        self.delete_fulltext_storage_to_batch(batch, index);
+    ) -> Result<(), Error> {
+        self.delete_fulltext_storage_to_batch(batch, index)?;
         delete_prefix_to_batch(
             batch,
             &self.store,
             &fulltext_outbox_prefix(self.db_index, index),
-        );
+        )
     }
 
     pub(super) fn delete_fulltext_storage_to_batch(
         &self,
         batch: &mut WriteBatch,
         storage_name: &str,
-    ) {
+    ) -> Result<(), Error> {
         delete_prefix_to_batch(
             batch,
             &self.store,
             &fulltext_file_prefix(self.db_index, storage_name),
-        );
+        )
     }
 
     pub(super) fn fulltext_active_storage_name(
@@ -415,6 +442,15 @@ impl Db {
         Ok(FullTextRuntimeConfig {
             writer_heap_bytes: self
                 .fulltext_config_usize("MEMORY_BUDGET_WRITER_BYTES", FULLTEXT_WRITER_HEAP_BYTES)?,
+            directory_cache_bytes: self
+                .fulltext_config_usize("DIRECTORY_CACHE_BYTES", DEFAULT_DIRECTORY_CACHE_BYTES)?,
+            merge_min_segments: self
+                .fulltext_config_usize("MERGE_MIN_SEGMENTS", DEFAULT_MERGE_MIN_SEGMENTS)?,
+            merge_max_docs: self.fulltext_config_usize("MERGE_MAX_DOCS", DEFAULT_MERGE_MAX_DOCS)?,
+            merge_min_layer_docs: self
+                .fulltext_config_usize("MERGE_MIN_LAYER_DOCS", DEFAULT_MERGE_MIN_LAYER_DOCS)?,
+            merge_delete_ratio: self
+                .fulltext_config_f32("MERGE_DELETE_RATIO", DEFAULT_MERGE_DELETE_RATIO)?,
             min_prefix: self.fulltext_config_usize("MINPREFIX", 2)?,
             max_expansions: self.fulltext_config_usize("MAXEXPANSIONS", 200)?,
             max_prefix_expansions: self
@@ -506,6 +542,17 @@ impl Db {
             .map_err(|_| Error::msg("ERR invalid fulltext config value"))
     }
 
+    pub(super) fn fulltext_config_f32(&self, name: &str, default: f32) -> Result<f32, Error> {
+        self.fulltext_config_value(name)?
+            .map(|value| {
+                value
+                    .parse::<f32>()
+                    .map_err(|_| Error::msg("ERR invalid fulltext config value"))
+            })
+            .transpose()
+            .map(|value| value.unwrap_or(default))
+    }
+
     pub(super) fn fulltext_config_bool(&self, name: &str, default: bool) -> Result<bool, Error> {
         let value = self
             .fulltext_config_value(name)?
@@ -540,16 +587,23 @@ impl Db {
         current_fulltext_millis() >= last_activity_ms.saturating_add(seconds.saturating_mul(1_000))
     }
 
-    pub(super) fn fulltext_touch_temporary_index(&self, index: &str, meta: &FullTextIndexMeta) {
+    pub(super) fn fulltext_touch_temporary_index(
+        &self,
+        index: &str,
+        meta: &FullTextIndexMeta,
+    ) -> Result<(), Error> {
         if meta.index_options.temporary_seconds.is_none() {
-            return;
+            return Ok(());
         }
         let mut batch = WriteBatch::new();
-        batch.put(
-            &fulltext_temporary_activity_key(self.db_index, index),
-            &current_fulltext_millis().to_be_bytes(),
-        );
+        batch
+            .put(
+                &fulltext_temporary_activity_key(self.db_index, index),
+                &current_fulltext_millis().to_be_bytes(),
+            )
+            .map_err(|error| Error::msg(error.to_string()))?;
         self.write_batch_if_not_empty(&batch);
+        Ok(())
     }
 
     pub(super) fn fulltext_file_bytes(&self, index: &str) -> usize {

@@ -27,7 +27,7 @@ fn interleave(lon_bits: u32, lat_bits: u32) -> u64 {
     out
 }
 
-fn decode_score(score: u64) -> (f64, f64) {
+pub(crate) fn decode_score(score: u64) -> (f64, f64) {
     let mut lon = (GEO_LON_MIN, GEO_LON_MAX);
     let mut lat = (GEO_LAT_MIN, GEO_LAT_MAX);
     for bit_pair in (0..GEO_STEP).rev() {
@@ -48,7 +48,7 @@ fn split_range(range: &mut (f64, f64), upper: bool) {
     }
 }
 
-fn redis_geohash(lon: f64, lat: f64) -> String {
+pub(crate) fn redis_geohash(lon: f64, lat: f64) -> String {
     let mut out = standard_geohash(lon, lat, 10);
     out.push('0');
     out
@@ -91,7 +91,7 @@ fn standard_geohash(lon: f64, lat: f64, precision: usize) -> String {
     out
 }
 
-fn unit_factor(unit: &str) -> Result<f64, Error> {
+pub(crate) fn unit_factor(unit: &str) -> Result<f64, Error> {
     match unit.to_ascii_lowercase().as_str() {
         "m" => Ok(1.0),
         "km" => Ok(1000.0),
@@ -107,7 +107,7 @@ fn bulk_f(value: f64) -> Frame {
     Frame::bulk_string(format!("{:.17}", value))
 }
 
-fn distance_m(a: (f64, f64), b: (f64, f64)) -> f64 {
+pub(crate) fn distance_m(a: (f64, f64), b: (f64, f64)) -> f64 {
     let dlat = (b.1 - a.1).to_radians();
     let dlon = (b.0 - a.0).to_radians();
     let lat1 = a.1.to_radians();

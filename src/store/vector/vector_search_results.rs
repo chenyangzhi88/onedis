@@ -16,31 +16,36 @@ fn json_attr_to_string(value: &JsonValue) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-fn doc_to_search_result(
-    raw: &[u8],
+fn runtime_doc_to_search_result(
+    id: &str,
+    doc: &VectorDocRecord,
     meta: &VectorIndexMeta,
     query: &[f32],
+    candidate_score: Option<f32>,
     return_attrs: &[String],
+    return_attrs_json: bool,
     filters: &[FilterPredicate],
-    expected_doc_version: Option<u64>,
 ) -> Result<Option<VectorSearchResult>, Error> {
-    let doc = decode_record::<VectorDocRecord>(raw)?;
-    if expected_doc_version.is_some_and(|version| version != doc.doc_version) {
-        return Ok(None);
-    }
-    if doc.deleted {
-        return Ok(None);
-    }
-    let attrs = parse_attrs(&doc.attrs_json)?;
-    if !matches_filters(&attrs, filters) {
-        return Ok(None);
-    }
-    let score = distance_score(meta.distance, query, &doc.vector)?;
-    let attrs = collect_return_attrs(&attrs, return_attrs);
+    let attrs = if filters.is_empty() && return_attrs.is_empty() {
+        None
+    } else {
+        let attrs = parse_attrs(&doc.attrs_json)?;
+        if !matches_filters(&attrs, filters) {
+            return Ok(None);
+        }
+        Some(attrs)
+    };
+    let attrs_json = return_attrs_json.then(|| doc.attrs_json.clone());
     Ok(Some(VectorSearchResult {
-        id: doc.id,
-        score,
-        attrs,
+        id: id.to_string(),
+        score: candidate_score
+            .map(Ok)
+            .unwrap_or_else(|| distance_score(meta.distance, query, &doc.vector))?,
+        attrs: attrs
+            .as_ref()
+            .map(|attrs| collect_return_attrs(attrs, return_attrs))
+            .unwrap_or_default(),
+        attrs_json,
     }))
 }
 
@@ -146,12 +151,7 @@ impl TopKVectorResults {
             return Ok(());
         }
         let ranked = RankedVectorSearchResult(result);
-        if self.heap.len() >= self.k
-            && self
-                .heap
-                .peek()
-                .is_some_and(|worst| ranked >= *worst)
-        {
+        if self.heap.len() >= self.k && self.heap.peek().is_some_and(|worst| ranked >= *worst) {
             return Ok(());
         }
         let result_bytes = estimated_vector_result_bytes(&ranked.0);
@@ -185,13 +185,12 @@ fn estimated_vector_result_bytes(result: &VectorSearchResult) -> usize {
     result
         .id
         .len()
-        .saturating_add(
-            result.attrs.iter().fold(0usize, |size, (field, value)| {
-                size.saturating_add(field.len())
-                    .saturating_add(value.len())
-                    .saturating_add(2 * std::mem::size_of::<String>())
-            }),
-        )
+        .saturating_add(result.attrs.iter().fold(0usize, |size, (field, value)| {
+            size.saturating_add(field.len())
+                .saturating_add(value.len())
+                .saturating_add(2 * std::mem::size_of::<String>())
+        }))
+        .saturating_add(result.attrs_json.as_ref().map_or(0, String::len))
         .saturating_add(std::mem::size_of::<VectorSearchResult>() + 32)
 }
 

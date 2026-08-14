@@ -17,13 +17,14 @@ use super::{
     Handler, Server, append_array_len, append_bulk_string, append_error, append_integer,
     append_null, append_simple_string, append_usize_decimal, borrowed_list_push_supported,
     borrowed_lrange_supported, borrowed_plain_set_supported, borrowed_read_supported, find_crlf,
-    format_command_for_monitor, parse_borrowed_key_delete_commands,
+    format_command_for_monitor, parse_borrowed_bitop_commands, parse_borrowed_key_delete_commands,
     parse_borrowed_plain_hdel_commands,
     parse_borrowed_key_expiration_mutations,
     parse_borrowed_plain_hgetdel_commands,
     parse_borrowed_plain_hset_commands, parse_borrowed_plain_pfadd_commands,
     parse_borrowed_plain_list_pop_commands, parse_borrowed_plain_set_commands,
     parse_borrowed_plain_xadd_commands, parse_borrowed_plain_xdel_commands,
+    parse_borrowed_plain_zset_add_commands,
     parse_borrowed_plain_zset_pop_commands, parse_borrowed_zset_increment_commands,
     parse_borrowed_resp_commands, parse_borrowed_root_json_set_commands,
     parse_borrowed_string_mutations, parse_i64_ascii,
@@ -546,6 +547,22 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
     assert_eq!(
         parse_borrowed_zset_increment_commands(&zset_increments),
         Some(vec![("z", 1.5, "m")])
+    );
+    let zset_adds = parse_borrowed_resp_commands(
+        b"*4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_plain_zset_add_commands(&zset_adds),
+        Some(vec![("z", vec![(1.0, "m")])])
+    );
+    let bitops = parse_borrowed_resp_commands(
+        b"*5\r\n$5\r\nBITOP\r\n$2\r\nOR\r\n$1\r\nd\r\n$1\r\na\r\n$1\r\nb\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        parse_borrowed_bitop_commands(&bitops),
+        Some(vec![("OR", "d", vec!["a", "b"])])
     );
     let deletes = parse_borrowed_resp_commands(
         b"*3\r\n$3\r\nDEL\r\n$1\r\na\r\n$1\r\nb\r\n*2\r\n$6\r\nUNLINK\r\n$1\r\na\r\n",
@@ -1171,7 +1188,7 @@ fn borrowed_fast_paths_cover_guards_and_error_branches() {
     assert!(response_text.contains(":0\r\n"));
     assert!(response_text.contains("*2\r\n$-1\r\n$-1\r\n"));
 
-    let db = handler.get_session().get_db();
+    let db = handler.get_session().get_db().clone();
     rt.block_on(db.set_add_async(
         "members",
         &["one".to_string(), "two".to_string()],
@@ -1290,6 +1307,86 @@ fn borrowed_fast_paths_cover_guards_and_error_branches() {
         ],
     ]));
     assert_eq!(response, b":1\r\n$1\r\n1\r\n");
+
+    let collection_commands = [
+        vec!["smembers", "members"],
+        vec!["hgetall", "hash"],
+        vec!["hkeys", "hash"],
+        vec!["hvals", "hash"],
+    ];
+    let expected_collections = collection_commands
+        .iter()
+        .flat_map(|args| {
+            rt.block_on(crate::command_dispatch::handle_command_async(
+                db.as_ref(),
+                command(args),
+            ))
+            .unwrap()
+            .as_bytes()
+        })
+        .collect::<Vec<_>>();
+    let response = rt
+        .block_on(handler.try_handle_borrowed_fast_batch(
+            b"*2\r\n$8\r\nSMEMBERS\r\n$7\r\nmembers\r\n\
+              *2\r\n$7\r\nHGETALL\r\n$4\r\nhash\r\n\
+              *2\r\n$5\r\nHKEYS\r\n$4\r\nhash\r\n\
+              *2\r\n$5\r\nHVALS\r\n$4\r\nhash\r\n",
+        ))
+        .unwrap();
+    assert_eq!(response, expected_collections);
+
+    rt.block_on(crate::command_dispatch::handle_command_async(
+        db.as_ref(),
+        command(&[
+            "geoadd",
+            "places",
+            "13.361389",
+            "38.115556",
+            "palermo",
+            "15.087269",
+            "37.502669",
+            "catania",
+        ]),
+    ))
+    .unwrap();
+    let geo_commands = [
+        vec!["geopos", "places", "palermo", "missing"],
+        vec!["geohash", "places", "palermo", "missing"],
+        vec!["geodist", "places", "palermo", "catania", "km"],
+    ];
+    let expected_geo = geo_commands
+        .iter()
+        .flat_map(|args| {
+            rt.block_on(crate::command_dispatch::handle_command_async(
+                db.as_ref(),
+                command(args),
+            ))
+            .unwrap()
+            .as_bytes()
+        })
+        .collect::<Vec<_>>();
+    let response = rt.block_on(handler.handle_borrowed_read_commands(vec![
+        vec![
+            b"GEOPOS".as_slice(),
+            b"places".as_slice(),
+            b"palermo".as_slice(),
+            b"missing".as_slice(),
+        ],
+        vec![
+            b"GEOHASH".as_slice(),
+            b"places".as_slice(),
+            b"palermo".as_slice(),
+            b"missing".as_slice(),
+        ],
+        vec![
+            b"GEODIST".as_slice(),
+            b"places".as_slice(),
+            b"palermo".as_slice(),
+            b"catania".as_slice(),
+            b"km".as_slice(),
+        ],
+    ]));
+    assert_eq!(response, expected_geo);
 
     let invalid_key = [0xff];
     let response = rt.block_on(handler.handle_borrowed_set_commands(vec![vec![

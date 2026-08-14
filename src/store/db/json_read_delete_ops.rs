@@ -31,17 +31,13 @@ impl Db {
                 let Some(raw) = metas[key_positions[key]].as_deref() else {
                     return Ok(None);
                 };
-                let (expire_ms, version, indexed) = Self::decode_json_meta(raw)?;
+                let (expire_ms, version) = Self::decode_json_meta(raw)?;
                 if expire_ms > 0 && now >= expire_ms {
                     return Ok(None);
                 }
-                let value = if indexed {
-                    self.read_json_value_at_path_async(key, version, &tokens)
-                        .await?
-                } else {
-                    let document = Self::decode_legacy_json_document(raw)?;
-                    json_get_path(&document, &tokens).cloned()
-                };
+                let value = self
+                    .read_json_value_at_path_async(key, version, &tokens)
+                    .await?;
                 value
                     .map(|value| {
                         serde_json::to_string(&value)
@@ -67,13 +63,8 @@ impl Db {
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
             return Ok(None);
         };
-        let (_, version, indexed) = Self::decode_json_meta(&raw)?;
-        let value = if indexed {
-            self.read_json_value_at_path(key, version, &tokens)?
-        } else {
-            let document = Self::decode_legacy_json_document(&raw)?;
-            json_get_path(&document, &tokens).cloned()
-        };
+        let (_, version) = Self::decode_json_meta(&raw)?;
+        let value = self.read_json_value_at_path(key, version, &tokens)?;
         let Some(value) = value else {
             return Ok(None);
         };
@@ -88,14 +79,10 @@ impl Db {
         let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
             return Ok(None);
         };
-        let (_, version, indexed) = Self::decode_json_meta(&raw)?;
-        let value = if indexed {
-            self.read_json_value_at_path_async(key, version, &tokens)
-                .await?
-        } else {
-            let document = Self::decode_legacy_json_document(&raw)?;
-            json_get_path(&document, &tokens).cloned()
-        };
+        let (_, version) = Self::decode_json_meta(&raw)?;
+        let value = self
+            .read_json_value_at_path_async(key, version, &tokens)
+            .await?;
         let Some(value) = value else {
             return Ok(None);
         };
@@ -110,25 +97,28 @@ impl Db {
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
             return Ok(0);
         };
-        let (expire_ms, version, indexed) = Self::decode_json_meta(&raw)?;
+        let (_, version) = Self::decode_json_meta(&raw)?;
         if tokens.is_empty() {
             return Ok(i64::from(self.delete_key_internal(key, true)));
         }
-        if indexed {
-            return self.json_del_indexed(key, expire_ms, version, &tokens);
-        }
-        let mut document = Self::decode_legacy_json_document(&raw)?;
-        if !json_del_path(&mut document, &tokens) {
-            return Ok(0);
-        }
-        self.write_json_value(key, &document, expire_ms, version)?;
-        Ok(1)
+        self.json_del_indexed(key, version, &tokens)
     }
 
     pub async fn json_del_async(&self, key: &str, path: &str) -> Result<i64, Error> {
-        let _write_guard = self.set_write_lock(key).lock().await;
         let tokens = parse_json_path(path)?;
-        for _ in 0..64 {
+        if tokens.is_empty() {
+            let _write_guard = self.set_write_lock(key).lock().await;
+            self.expire_if_needed_async(key).await;
+            let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
+                return Ok(0);
+            };
+            Self::decode_json_meta(&raw)?;
+            return Ok(i64::from(self.delete_key_internal_async(key, true).await));
+        }
+        let _structural_guard = self.set_write_lock(key).read().await;
+        let parent_lock_route = format!("json:{:?}", &tokens[..tokens.len() - 1]);
+        let mut conflict_guard = None;
+        for attempt in 0..64 {
             self.expire_if_needed_async(key).await;
             let key_bytes = self.mk(key);
             let observed = self.store.get_raw_observed_async(&key_bytes).await;
@@ -136,28 +126,23 @@ impl Db {
             let Some(raw) = observed.value().map(|value| value.to_vec()) else {
                 return Ok(0);
             };
-            let (expire_ms, version, indexed) = Self::decode_json_meta(&raw)?;
-            if tokens.is_empty() {
-                return Ok(i64::from(self.delete_key_internal_async(key, true).await));
-            }
-            if indexed {
-                match self
-                    .json_del_indexed_async(key, expire_ms, version, &tokens, cas_condition)
-                    .await?
-                {
-                    Some(deleted) => return Ok(deleted),
-                    None => continue,
-                }
-            }
-            let mut document = Self::decode_legacy_json_document(&raw)?;
-            if !json_del_path(&mut document, &tokens) {
-                return Ok(0);
-            }
-            if self
-                .write_json_value_cas_async(key, &document, expire_ms, version, cas_condition)
+            let (_, version) = Self::decode_json_meta(&raw)?;
+            match self
+                .json_del_indexed_async(key, version, &tokens, cas_condition)
                 .await?
             {
-                return Ok(1);
+                Some(deleted) => return Ok(deleted),
+                None => {
+                    if attempt == 2 {
+                        conflict_guard = Some(
+                            self.hash_field_write_lock(key, &parent_lock_route)
+                                .lock()
+                                .await,
+                        );
+                    }
+                    let _fallback_active = conflict_guard.is_some();
+                    tokio::task::yield_now().await;
+                }
             }
         }
         Err(Error::msg("ERR json write conflict"))
@@ -169,12 +154,8 @@ impl Db {
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
             return Ok(None);
         };
-        let (_, version, indexed) = Self::decode_json_meta(&raw)?;
-        if indexed {
-            return self.json_type_indexed(key, version, &tokens);
-        }
-        let document = Self::decode_legacy_json_document(&raw)?;
-        Ok(json_get_path(&document, &tokens).map(json_type_name))
+        let (_, version) = Self::decode_json_meta(&raw)?;
+        self.json_type_indexed(key, version, &tokens)
     }
 
     pub async fn json_type_async(
@@ -187,84 +168,50 @@ impl Db {
         let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
             return Ok(None);
         };
-        let (_, version, indexed) = Self::decode_json_meta(&raw)?;
-        if indexed {
-            return self.json_type_indexed_async(key, version, &tokens).await;
-        }
-        let document = Self::decode_legacy_json_document(&raw)?;
-        Ok(json_get_path(&document, &tokens).map(json_type_name))
+        let (_, version) = Self::decode_json_meta(&raw)?;
+        self.json_type_indexed_async(key, version, &tokens).await
     }
 
     pub(in crate::store::db) fn json_del_indexed(
         &self,
         key: &str,
-        expire_ms: u64,
         version: u64,
         tokens: &[JsonPathToken],
     ) -> Result<i64, Error> {
-        if !self.json_node_exists(key, version, tokens) {
+        let Some((parent_tokens, storage_tokens, mut parent_node)) =
+            self.resolve_json_storage_target(key, version, tokens)?
+        else {
+            return Ok(0);
+        };
+        if !self.json_node_exists(key, version, &storage_tokens) {
             return Ok(0);
         }
-        let Some((last, parent_tokens)) = tokens.split_last() else {
-            return Ok(0);
-        };
-        let Some(mut parent_node) = self.read_json_node(key, version, parent_tokens)? else {
-            return Ok(0);
-        };
 
         let mut batch = WriteBatch::new();
-        match (last, &mut parent_node) {
-            (JsonPathToken::Field(field), JsonNode::Object(fields)) => {
-                let Some(pos) = fields.iter().position(|existing| existing == field) else {
-                    return Ok(0);
-                };
-                fields.remove(pos);
-                delete_json_subtree_to_batch(
-                    &self.store,
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    version,
-                    tokens,
-                );
-                batch.put(
-                    &json_node_key(self.db_index, key, version, parent_tokens),
-                    &encode_json_node(&parent_node),
-                );
+        delete_json_subtree_to_batch(
+            &self.store,
+            &mut batch,
+            self.db_index,
+            key,
+            version,
+            &storage_tokens,
+        )?;
+        match (&tokens[tokens.len() - 1], &mut parent_node) {
+            (JsonPathToken::Field(_), JsonNode::Object(generation)) => {
+                *generation = generation.wrapping_add(1);
             }
-            (JsonPathToken::Index(_), JsonNode::Array(_)) => {
-                let Some(mut parent_value) =
-                    self.read_json_value_at_path(key, version, parent_tokens)?
-                else {
-                    return Ok(0);
-                };
-                if !json_del_path(&mut parent_value, std::slice::from_ref(last)) {
-                    return Ok(0);
-                }
-                delete_json_subtree_to_batch(
-                    &self.store,
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    version,
-                    parent_tokens,
-                );
-                let mut parent_path = parent_tokens.to_vec();
-                write_json_subtree_to_batch(
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    version,
-                    &mut parent_path,
-                    &parent_value,
-                )?;
+            (JsonPathToken::Index(index), JsonNode::Array(element_ids)) => {
+                element_ids.remove(*index);
             }
             _ => return Ok(0),
         }
-        self.touch_json_meta_to_batch(&mut batch, key, expire_ms, version);
-        if let Err(err) = self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key) {
-            log::error!("failed to enqueue fulltext JSON upsert for {key}: {err}");
-        }
+        batch
+            .put(
+                &json_node_key(self.db_index, key, version, &parent_tokens),
+                &encode_json_node(&parent_node),
+            )
+            .map_err(|error| Error::msg(error.to_string()))?;
+        self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
         self.fulltext_request_json_refresh(key)?;
@@ -274,80 +221,53 @@ impl Db {
     pub(in crate::store::db) async fn json_del_indexed_async(
         &self,
         key: &str,
-        expire_ms: u64,
         version: u64,
         tokens: &[JsonPathToken],
         cas_condition: CompareCondition,
     ) -> Result<Option<i64>, Error> {
-        if !self.json_node_exists_async(key, version, tokens).await {
-            return Ok(Some(0));
-        }
-        let Some((last, parent_tokens)) = tokens.split_last() else {
-            return Ok(Some(0));
-        };
-        let Some(mut parent_node) = self
-            .read_json_node_async(key, version, parent_tokens)
+        let Some(mut observed_target) = self
+            .observe_json_storage_target_async(key, version, tokens)
             .await?
         else {
             return Ok(Some(0));
         };
+        if observed_target.target_node.is_none() {
+            return Ok(Some(0));
+        }
 
         let mut batch = WriteBatch::new();
-        match (last, &mut parent_node) {
-            (JsonPathToken::Field(field), JsonNode::Object(fields)) => {
-                let Some(pos) = fields.iter().position(|existing| existing == field) else {
-                    return Ok(Some(0));
-                };
-                fields.remove(pos);
-                delete_json_subtree_to_batch(
-                    &self.store,
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    version,
-                    tokens,
-                );
-                batch.put(
-                    &json_node_key(self.db_index, key, version, parent_tokens),
-                    &encode_json_node(&parent_node),
-                );
+        let Some(subtree_conditions) = observe_and_delete_json_subtree_to_batch_async(
+            &self.store,
+            &mut batch,
+            self.db_index,
+            key,
+            version,
+            &observed_target.target_tokens,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        observed_target.conditions.extend(subtree_conditions);
+        match (&tokens[tokens.len() - 1], &mut observed_target.parent_node) {
+            (JsonPathToken::Field(_), JsonNode::Object(generation)) => {
+                *generation = generation.wrapping_add(1);
             }
-            (JsonPathToken::Index(_), JsonNode::Array(_)) => {
-                let Some(mut parent_value) = self
-                    .read_json_value_at_path_async(key, version, parent_tokens)
-                    .await?
-                else {
-                    return Ok(Some(0));
-                };
-                if !json_del_path(&mut parent_value, std::slice::from_ref(last)) {
-                    return Ok(Some(0));
-                }
-                delete_json_subtree_to_batch(
-                    &self.store,
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    version,
-                    parent_tokens,
-                );
-                let mut parent_path = parent_tokens.to_vec();
-                write_json_subtree_to_batch(
-                    &mut batch,
-                    self.db_index,
-                    key,
-                    version,
-                    &mut parent_path,
-                    &parent_value,
-                )?;
+            (JsonPathToken::Index(index), JsonNode::Array(element_ids)) => {
+                element_ids.remove(*index);
             }
             _ => return Ok(Some(0)),
         }
-        self.touch_json_meta_to_batch(&mut batch, key, expire_ms, version);
-        if let Err(err) = self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key) {
-            log::error!("failed to enqueue fulltext JSON upsert for {key}: {err}");
-        }
+        batch
+            .put(
+                &json_node_key(self.db_index, key, version, &observed_target.parent_tokens),
+                &encode_json_node(&observed_target.parent_node),
+            )
+            .map_err(|error| Error::msg(error.to_string()))?;
+        self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
+        observed_target.conditions.push(cas_condition);
         if self
-            .compare_and_write_batch_if_not_empty_async(&[cas_condition], &batch)
+            .compare_and_write_batch_if_not_empty_async(&observed_target.conditions, &batch)
             .await?
         {
             self.changes.fetch_add(1, Ordering::Relaxed);

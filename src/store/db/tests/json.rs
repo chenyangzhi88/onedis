@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::db::JsonPathToken;
+use crate::store::db::{JsonNodeSnapshot, JsonPathToken};
 
 #[test]
 fn update_preserves_ttl_for_get() {
@@ -96,6 +96,55 @@ async fn root_json_set_batch_keeps_last_valid_value_and_per_command_errors() {
     );
 }
 
+#[tokio::test]
+async fn root_json_set_batch_publishes_each_known_logical_key_once() {
+    let db = test_db();
+    let (key_version, db_version) = db.watch_version_snapshot("batch-json-watch");
+
+    let replies = db
+        .json_set_root_batch_async(&[
+            ("batch-json-watch", r#"{"v":1}"#),
+            ("batch-json-watch", r#"{"v":2}"#),
+        ])
+        .await;
+
+    assert!(replies.iter().all(Result::is_ok));
+    assert!(db.watch_version_changed("batch-json-watch", key_version, db_version));
+    assert_eq!(
+        db.mutation_tracker
+            .key_version(db.db_index, &db.mk("batch-json-watch")),
+        key_version + 1
+    );
+    db.release_watch("batch-json-watch");
+}
+
+#[tokio::test]
+async fn root_json_set_batch_reports_build_failure_for_every_command_on_the_key() {
+    let db = test_db();
+    let oversized_key = "k".repeat(u16::MAX as usize + 1);
+    let replies = db
+        .json_set_root_batch_async(&[
+            (&oversized_key, r#"{"v":1}"#),
+            (&oversized_key, r#"{"v":2}"#),
+        ])
+        .await;
+
+    assert_eq!(replies.len(), 2);
+    assert!(replies.iter().all(Result::is_err));
+    assert!(db.store.get_raw(&db.mk(&oversized_key)).is_none());
+
+    // The main metadata and root node fit, but the long child path does not. A failed per-key
+    // builder must not leak the already-built prefix of that document into the global batch.
+    let partial_key = "p".repeat(65_500);
+    let long_field = "f".repeat(100);
+    let json = format!(r#"{{"{long_field}":1}}"#);
+    let replies = db
+        .json_set_root_batch_async(&[(&partial_key, &json), (&partial_key, &json)])
+        .await;
+    assert!(replies.iter().all(Result::is_err));
+    assert!(db.store.get_raw(&db.mk(&partial_key)).is_none());
+}
+
 #[test]
 fn json_paths_reject_ambiguous_and_resource_amplifying_inputs() {
     assert!(parse_json_path("").is_err());
@@ -150,7 +199,7 @@ fn json_partial_update_uses_indexed_subtree_storage() {
 }
 
 #[test]
-fn json_array_delete_rewrites_parent_subtree_and_root_delete_cleans_nodes() {
+fn json_array_delete_keeps_later_element_storage_keys_and_root_delete_cleans_nodes() {
     let db = test_db();
 
     assert!(
@@ -162,6 +211,15 @@ fn json_array_delete_rewrites_parent_subtree_and_root_delete_cleans_nodes() {
         )
         .unwrap()
     );
+    let raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let header = super::decode_meta_header(&raw).unwrap();
+    let third_query = super::parse_json_path("$.tags[2]").unwrap();
+    let third_storage = db
+        .resolve_json_storage_path("doc", header.version, &third_query)
+        .unwrap()
+        .unwrap();
+    let third_key = super::json_node_key(db.db_index, "doc", header.version, &third_storage);
+    let third_before = db.store.get_raw(&third_key).unwrap();
     assert_eq!(db.json_del("doc", "$.tags[1]").unwrap(), 1);
     assert_eq!(
         db.json_get("doc", "$.tags").unwrap(),
@@ -171,6 +229,7 @@ fn json_array_delete_rewrites_parent_subtree_and_root_delete_cleans_nodes() {
         db.json_get("doc", "$.tags[1]").unwrap(),
         Some(r#""c""#.to_string())
     );
+    assert_eq!(db.store.get_raw(&third_key).unwrap(), third_before);
 
     let raw = db.store.get_raw(&db.mk("doc")).unwrap();
     let header = super::decode_meta_header(&raw).unwrap();
@@ -181,45 +240,19 @@ fn json_array_delete_rewrites_parent_subtree_and_root_delete_cleans_nodes() {
 }
 
 #[tokio::test]
-async fn json_sync_legacy_indexed_and_integer_string_edges_are_covered() {
+async fn json_sync_indexed_and_integer_string_edges_are_covered() {
     let db = test_db();
 
     db.insert(
         "legacy".to_string(),
         Structure::Json(r#"{"name":"alice","nested":{"x":1},"arr":[1,2]}"#.to_string()),
     );
+    assert!(db.json_get("legacy", "$").is_err());
     assert!(
-        !db.json_set("legacy", "$", r#"{"blocked":true}"#, SetCondition::Nx)
-            .unwrap()
+        db.json_set("legacy", "$", r#"{"blocked":true}"#, SetCondition::Always)
+            .is_err()
     );
-    assert!(
-        db.json_set("legacy", "$.nested.y", "2", SetCondition::Nx)
-            .unwrap()
-    );
-    assert!(
-        !db.json_set("legacy", "$.nested.y", "3", SetCondition::Nx)
-            .unwrap()
-    );
-    assert!(
-        db.json_set("legacy", "$.arr[1]", "20", SetCondition::Xx)
-            .unwrap()
-    );
-    assert!(
-        !db.json_set("legacy", "$.arr[9]", "90", SetCondition::Always)
-            .unwrap()
-    );
-    assert!(
-        !db.json_set("legacy", "$.missing.child", "1", SetCondition::Always)
-            .unwrap()
-    );
-    assert!(
-        !db.json_set("legacy", "$.name.child", "1", SetCondition::Always)
-            .unwrap()
-    );
-    assert!(
-        db.json_set("legacy", "$", r#"{"replaced":true}"#, SetCondition::Always)
-            .unwrap()
-    );
+    assert!(db.json_del("legacy", "$").is_err());
 
     assert!(
         !db.json_set("missing-json", "$.a", "1", SetCondition::Always)
@@ -338,6 +371,35 @@ async fn json_sync_legacy_indexed_and_integer_string_edges_are_covered() {
     assert_eq!(db.type_name_readonly("not-string"), "hash");
     assert_eq!(db.type_name_readonly_async("not-string").await, "hash");
     assert!(db.exists_readonly_async("not-string").await);
+}
+
+#[test]
+fn json_batch_construction_errors_are_propagated_without_partial_entries() {
+    let db = test_db();
+    let oversized_key = "k".repeat(u16::MAX as usize + 1);
+    let value: serde_json::Value = serde_json::from_str(r#"{"field":1}"#).unwrap();
+
+    let mut subtree_batch = WriteBatch::new();
+    let mut path = Vec::new();
+    assert!(
+        write_json_subtree_to_batch(
+            &mut subtree_batch,
+            db.db_index,
+            &oversized_key,
+            1,
+            &mut path,
+            &value,
+        )
+        .is_err()
+    );
+    assert_eq!(subtree_batch.count(), 0);
+
+    let mut meta_batch = WriteBatch::new();
+    assert!(
+        db.touch_json_meta_to_batch(&mut meta_batch, &oversized_key, 0, 1)
+            .is_err()
+    );
+    assert_eq!(meta_batch.count(), 0);
 }
 
 #[test]
@@ -471,4 +533,141 @@ async fn concurrent_json_set_async_keeps_all_object_fields() {
     for idx in 0..64 {
         assert_eq!(fields[format!("f{idx}")], idx);
     }
+}
+
+#[tokio::test]
+async fn concurrent_json_updates_preserve_independent_paths_and_watch_visibility() {
+    let db = Arc::new(test_db());
+    db.json_set_async(
+        "doc",
+        "$",
+        r#"{"left":{"value":0},"right":{"value":0}}"#,
+        SetCondition::Always,
+    )
+    .await
+    .unwrap();
+    let snapshot = db.watch_version_snapshot("doc");
+
+    let left_db = db.clone();
+    let left = tokio::spawn(async move {
+        for value in 1..=64 {
+            assert!(
+                left_db
+                    .json_set_async("doc", "$.left.value", &value.to_string(), SetCondition::Xx,)
+                    .await
+                    .unwrap()
+            );
+        }
+    });
+    let right_db = db.clone();
+    let right = tokio::spawn(async move {
+        for value in 1..=64 {
+            assert!(
+                right_db
+                    .json_set_async("doc", "$.right.value", &value.to_string(), SetCondition::Xx,)
+                    .await
+                    .unwrap()
+            );
+        }
+    });
+    left.await.unwrap();
+    right.await.unwrap();
+
+    assert_eq!(
+        db.json_get_async("doc", "$.left.value").await.unwrap(),
+        Some("64".into())
+    );
+    assert_eq!(
+        db.json_get_async("doc", "$.right.value").await.unwrap(),
+        Some("64".into())
+    );
+    assert!(db.watch_version_changed("doc", snapshot.0, snapshot.1));
+    db.release_watch("doc");
+}
+
+#[tokio::test]
+async fn concurrent_json_ancestor_replacement_and_descendant_updates_stay_consistent() {
+    let db = Arc::new(test_db());
+    db.json_set_async(
+        "doc",
+        "$",
+        r#"{"branch":{"leaf":{"value":0},"other":1}}"#,
+        SetCondition::Always,
+    )
+    .await
+    .unwrap();
+
+    let replace_db = db.clone();
+    let replace = tokio::spawn(async move {
+        for value in 1..=32 {
+            replace_db
+                .json_set_async(
+                    "doc",
+                    "$.branch",
+                    &format!(r#"{{"leaf":{{"value":{value}}},"other":{value}}}"#),
+                    SetCondition::Xx,
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let leaf_db = db.clone();
+    let leaf = tokio::spawn(async move {
+        for value in 100..132 {
+            leaf_db
+                .json_set_async(
+                    "doc",
+                    "$.branch.leaf.value",
+                    &value.to_string(),
+                    SetCondition::Xx,
+                )
+                .await
+                .unwrap();
+        }
+    });
+    replace.await.unwrap();
+    leaf.await.unwrap();
+
+    let document: serde_json::Value =
+        serde_json::from_str(&db.json_get_async("doc", "$").await.unwrap().unwrap()).unwrap();
+    assert!(document["branch"]["leaf"]["value"].is_number());
+    assert!(document["branch"]["other"].is_number());
+
+    let raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let version = super::decode_meta_header(&raw).unwrap().version;
+    let prefix = super::json_node_prefix(db.db_index, "doc", version);
+    let entries = db.store.scan_prefix_raw(&prefix);
+    let snapshot = JsonNodeSnapshot::from_entries(&prefix, entries).unwrap();
+    assert_eq!(
+        snapshot.value_at(&mut Vec::new()).unwrap().unwrap(),
+        document
+    );
+}
+
+#[test]
+fn json_root_replacement_switches_version_without_eager_old_subtree_delete() {
+    let db = test_db();
+    db.json_set(
+        "doc",
+        "$",
+        r#"{"wide":{"a":1,"b":2},"items":[1,2,3]}"#,
+        SetCondition::Always,
+    )
+    .unwrap();
+    let old_raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let old_version = super::decode_meta_header(&old_raw).unwrap().version;
+    let old_prefix = super::json_node_prefix(db.db_index, "doc", old_version);
+    let old_count = db.store.scan_prefix_raw(&old_prefix).len();
+
+    db.json_set("doc", "$", r#"{"next":true}"#, SetCondition::Always)
+        .unwrap();
+    let new_raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let new_version = super::decode_meta_header(&new_raw).unwrap().version;
+    assert_ne!(new_version, old_version);
+    assert_eq!(db.store.scan_prefix_raw(&old_prefix).len(), old_count);
+    assert_eq!(db.refresh_retired_versions_once(usize::MAX), 1);
+    assert_eq!(
+        db.json_get("doc", "$").unwrap(),
+        Some(r#"{"next":true}"#.into())
+    );
 }

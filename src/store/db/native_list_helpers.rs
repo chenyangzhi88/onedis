@@ -270,32 +270,128 @@ impl Db {
     where
         F: FnMut(&[u8]) -> bool + Send,
     {
+        self.list_range_raw_values_visit_chunked_async(
+            key,
+            version,
+            storage_start,
+            storage_end,
+            1024,
+            visitor,
+        )
+        .await
+    }
+
+    pub(in crate::store::db) async fn list_range_raw_values_visit_chunked_async<F>(
+        &self,
+        key: &str,
+        version: u64,
+        storage_start: i64,
+        storage_end: i64,
+        batch_size: usize,
+        visitor: F,
+    ) -> usize
+    where
+        F: FnMut(&[u8]) -> bool + Send,
+    {
         let len = (storage_end - storage_start + 1) as usize;
         let mut seen = 0usize;
         let mut visitor = visitor;
+        let mut keep_scanning = true;
         if storage_start < 0 {
             let negative_end = storage_end.min(-1);
+            let lower_bound = list_item_key(self.db_index, key, version, storage_start);
+            let upper_bound = if negative_end < -1 {
+                Some(list_item_key(self.db_index, key, version, negative_end + 1))
+            } else {
+                prefix_exclusive_upper_bound(&list_item_prefix(self.db_index, key, version))
+            };
             seen += self
-                .append_list_range_raw_values_visit_async(
-                    key,
-                    version,
-                    storage_start,
-                    negative_end,
+                .store
+                .scan_range_raw_visit_chunked_async(
+                    &lower_bound,
+                    upper_bound,
                     len.saturating_sub(seen),
-                    &mut visitor,
+                    batch_size,
+                    |_, value| {
+                        keep_scanning = visitor(value);
+                        keep_scanning
+                    },
                 )
                 .await;
         }
-        if storage_end >= 0 && seen < len {
+        if keep_scanning && storage_end >= 0 && seen < len {
             let positive_start = storage_start.max(0);
+            let lower_bound = list_item_key(self.db_index, key, version, positive_start);
+            let upper_bound = if storage_end == i64::MAX {
+                prefix_exclusive_upper_bound(&list_item_prefix(self.db_index, key, version))
+            } else {
+                Some(list_item_key(self.db_index, key, version, storage_end + 1))
+            };
             seen += self
-                .append_list_range_raw_values_visit_async(
-                    key,
-                    version,
-                    positive_start,
-                    storage_end,
+                .store
+                .scan_range_raw_visit_chunked_async(
+                    &lower_bound,
+                    upper_bound,
                     len.saturating_sub(seen),
-                    &mut visitor,
+                    batch_size,
+                    |_, value| visitor(value),
+                )
+                .await;
+        }
+        seen
+    }
+
+    pub(in crate::store::db) async fn list_range_raw_values_visit_reverse_async<F>(
+        &self,
+        key: &str,
+        version: u64,
+        storage_start: i64,
+        storage_end: i64,
+        visitor: F,
+    ) -> usize
+    where
+        F: FnMut(&[u8]) -> bool + Send,
+    {
+        let len = (storage_end - storage_start + 1) as usize;
+        let mut visitor = visitor;
+        let mut seen = 0usize;
+        let mut keep_scanning = true;
+        if storage_end >= 0 {
+            let positive_start = storage_start.max(0);
+            let lower_bound = list_item_key(self.db_index, key, version, positive_start);
+            let upper_bound = if storage_end == i64::MAX {
+                prefix_exclusive_upper_bound(&list_item_prefix(self.db_index, key, version))
+            } else {
+                Some(list_item_key(self.db_index, key, version, storage_end + 1))
+            };
+            seen += self
+                .store
+                .scan_range_raw_visit_reverse_async(
+                    &lower_bound,
+                    upper_bound,
+                    len.saturating_sub(seen),
+                    |_, value| {
+                        keep_scanning = visitor(value);
+                        keep_scanning
+                    },
+                )
+                .await;
+        }
+        if keep_scanning && storage_start < 0 && seen < len {
+            let negative_end = storage_end.min(-1);
+            let lower_bound = list_item_key(self.db_index, key, version, storage_start);
+            let upper_bound = if negative_end < -1 {
+                Some(list_item_key(self.db_index, key, version, negative_end + 1))
+            } else {
+                prefix_exclusive_upper_bound(&list_item_prefix(self.db_index, key, version))
+            };
+            seen += self
+                .store
+                .scan_range_raw_visit_reverse_async(
+                    &lower_bound,
+                    upper_bound,
+                    len.saturating_sub(seen),
+                    |_, value| visitor(value),
                 )
                 .await;
         }

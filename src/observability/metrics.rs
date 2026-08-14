@@ -330,12 +330,23 @@ pub struct OnedisMetrics {
     stream_reads: AtomicU64,
     stream_blocked_clients: AtomicU64,
     vector_indexes: AtomicU64,
+    vector_segments: AtomicU64,
+    vector_pending_segments: AtomicU64,
+    vector_hnsw_nodes: AtomicU64,
+    vector_hnsw_deleted_nodes: AtomicU64,
     vector_writes: AtomicU64,
     vector_search_total: AtomicU64,
     vector_search_errors: AtomicU64,
     vector_search_duration_sum_us: AtomicU64,
     vector_search_duration_count: AtomicU64,
     vector_search_duration_buckets: Vec<AtomicU64>,
+    vector_search_exact: AtomicU64,
+    vector_search_approximate: AtomicU64,
+    vector_search_filtered: AtomicU64,
+    vector_search_ann_rounds: AtomicU64,
+    vector_search_ann_candidates: AtomicU64,
+    vector_segments_persisted: AtomicU64,
+    vector_compactions: AtomicU64,
     lua_eval_total: AtomicU64,
     lua_eval_errors: AtomicU64,
     lua_eval_duration_sum_us: AtomicU64,
@@ -432,12 +443,23 @@ impl OnedisMetrics {
             stream_reads: AtomicU64::new(0),
             stream_blocked_clients: AtomicU64::new(0),
             vector_indexes: AtomicU64::new(0),
+            vector_segments: AtomicU64::new(0),
+            vector_pending_segments: AtomicU64::new(0),
+            vector_hnsw_nodes: AtomicU64::new(0),
+            vector_hnsw_deleted_nodes: AtomicU64::new(0),
             vector_writes: AtomicU64::new(0),
             vector_search_total: AtomicU64::new(0),
             vector_search_errors: AtomicU64::new(0),
             vector_search_duration_sum_us: AtomicU64::new(0),
             vector_search_duration_count: AtomicU64::new(0),
             vector_search_duration_buckets: zeroed_vec(DURATION_BUCKETS_US.len()),
+            vector_search_exact: AtomicU64::new(0),
+            vector_search_approximate: AtomicU64::new(0),
+            vector_search_filtered: AtomicU64::new(0),
+            vector_search_ann_rounds: AtomicU64::new(0),
+            vector_search_ann_candidates: AtomicU64::new(0),
+            vector_segments_persisted: AtomicU64::new(0),
+            vector_compactions: AtomicU64::new(0),
             lua_eval_total: AtomicU64::new(0),
             lua_eval_errors: AtomicU64::new(0),
             lua_eval_duration_sum_us: AtomicU64::new(0),
@@ -710,11 +732,24 @@ impl OnedisMetrics {
             .ok();
     }
 
-    pub fn set_vector_indexes(&self, indexes: u64) {
+    pub fn set_vector_snapshot(
+        &self,
+        indexes: u64,
+        segments: u64,
+        pending_segments: u64,
+        hnsw_nodes: u64,
+        hnsw_deleted_nodes: u64,
+    ) {
         if !self.is_enabled() {
             return;
         }
         self.vector_indexes.store(indexes, Ordering::Relaxed);
+        self.vector_segments.store(segments, Ordering::Relaxed);
+        self.vector_pending_segments
+            .store(pending_segments, Ordering::Relaxed);
+        self.vector_hnsw_nodes.store(hnsw_nodes, Ordering::Relaxed);
+        self.vector_hnsw_deleted_nodes
+            .store(hnsw_deleted_nodes, Ordering::Relaxed);
     }
 
     pub fn record_vector_write(&self) {
@@ -737,6 +772,44 @@ impl OnedisMetrics {
         self.vector_search_duration_count
             .fetch_add(1, Ordering::Relaxed);
         observe_duration(elapsed_us, 1, &self.vector_search_duration_buckets);
+    }
+
+    pub fn record_vector_search_plan(&self, exact: bool, filtered: bool) {
+        if !self.is_enabled() {
+            return;
+        }
+        if exact {
+            self.vector_search_exact.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.vector_search_approximate
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if filtered {
+            self.vector_search_filtered.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_ann_round(&self, candidates: usize) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.vector_search_ann_rounds
+            .fetch_add(1, Ordering::Relaxed);
+        self.vector_search_ann_candidates
+            .fetch_add(candidates as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_vector_segments_persisted(&self, count: usize) {
+        if self.is_enabled() {
+            self.vector_segments_persisted
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_compaction(&self) {
+        if self.is_enabled() {
+            self.vector_compactions.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn record_lua_eval(&self, elapsed_us: u64, failed: bool) {
@@ -971,6 +1044,32 @@ impl OnedisMetrics {
             "onedis_vector_indexes_total",
             &self.vector_indexes.load(Ordering::Relaxed).to_string(),
         );
+        push_gauge(
+            out,
+            "onedis_vector_segments",
+            &self.vector_segments.load(Ordering::Relaxed).to_string(),
+        );
+        push_gauge(
+            out,
+            "onedis_vector_pending_segments",
+            &self
+                .vector_pending_segments
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        push_gauge(
+            out,
+            "onedis_vector_hnsw_nodes",
+            &self.vector_hnsw_nodes.load(Ordering::Relaxed).to_string(),
+        );
+        push_gauge(
+            out,
+            "onedis_vector_hnsw_deleted_nodes",
+            &self
+                .vector_hnsw_deleted_nodes
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
         push_counter(
             out,
             "onedis_vector_writes_total",
@@ -988,6 +1087,56 @@ impl OnedisMetrics {
                 .vector_search_errors
                 .load(Ordering::Relaxed)
                 .to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_search_exact_total",
+            &self.vector_search_exact.load(Ordering::Relaxed).to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_search_approximate_total",
+            &self
+                .vector_search_approximate
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_search_filtered_total",
+            &self
+                .vector_search_filtered
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_search_ann_rounds_total",
+            &self
+                .vector_search_ann_rounds
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_search_ann_candidates_total",
+            &self
+                .vector_search_ann_candidates
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_segments_persisted_total",
+            &self
+                .vector_segments_persisted
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_compactions_total",
+            &self.vector_compactions.load(Ordering::Relaxed).to_string(),
         );
         render_duration_histogram(
             out,

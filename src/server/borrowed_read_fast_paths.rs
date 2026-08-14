@@ -104,8 +104,12 @@ impl Handler {
             } else if command.eq_ignore_ascii_case(b"SMISMEMBER")
                 || command.eq_ignore_ascii_case(b"ZMSCORE")
                 || command.eq_ignore_ascii_case(b"HMGET")
+                || command.eq_ignore_ascii_case(b"GEOPOS")
+                || command.eq_ignore_ascii_case(b"GEOHASH")
             {
                 args.len() >= 3
+            } else if command.eq_ignore_ascii_case(b"GEODIST") {
+                args.len() == 4 || args.len() == 5
             } else {
                 false
             };
@@ -115,7 +119,12 @@ impl Handler {
             let Some(key) = std::str::from_utf8(args[1]).ok() else {
                 continue;
             };
-            let Some(members) = args[2..]
+            let member_args = if command.eq_ignore_ascii_case(b"GEODIST") {
+                &args[2..4]
+            } else {
+                &args[2..]
+            };
+            let Some(members) = member_args
                 .iter()
                 .map(|member| std::str::from_utf8(member).ok().map(str::to_owned))
                 .collect::<Option<Vec<_>>>()
@@ -129,6 +138,9 @@ impl Handler {
                 set_batch_commands.push((key, members));
             } else if command.eq_ignore_ascii_case(b"ZMSCORE")
                 || command.eq_ignore_ascii_case(b"ZSCORE")
+                || command.eq_ignore_ascii_case(b"GEOPOS")
+                || command.eq_ignore_ascii_case(b"GEOHASH")
+                || command.eq_ignore_ascii_case(b"GEODIST")
             {
                 zset_batch_positions.push(position);
                 zset_batch_commands.push((key, members));
@@ -695,6 +707,84 @@ impl Handler {
                             }
                         }
                     }
+                    Err(error) => append_error(&mut out, &error.to_string()),
+                }
+            } else if command.eq_ignore_ascii_case(b"GEOPOS")
+                || command.eq_ignore_ascii_case(b"GEOHASH")
+            {
+                if args.len() < 3 || args[1..].iter().any(|arg| std::str::from_utf8(arg).is_err()) {
+                    append_error(&mut out, "ERR invalid UTF-8 geo key or member");
+                    continue;
+                }
+                match zset_batch_replies[position]
+                    .take()
+                    .expect("valid geo lookup has a batch reply")
+                {
+                    Ok(scores) => {
+                        append_array_len(&mut out, scores.len());
+                        for score in scores {
+                            let Some(score) = score else {
+                                append_null(&mut out);
+                                continue;
+                            };
+                            let (lon, lat) = crate::cmds::geo::decode_score(score as u64);
+                            if command.eq_ignore_ascii_case(b"GEOPOS") {
+                                append_array_len(&mut out, 2);
+                                append_bulk_string(
+                                    &mut out,
+                                    format!("{lon:.17}").as_bytes(),
+                                );
+                                append_bulk_string(
+                                    &mut out,
+                                    format!("{lat:.17}").as_bytes(),
+                                );
+                            } else {
+                                append_bulk_string(
+                                    &mut out,
+                                    crate::cmds::geo::redis_geohash(lon, lat).as_bytes(),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => append_error(&mut out, &error.to_string()),
+                }
+            } else if command.eq_ignore_ascii_case(b"GEODIST") {
+                if args.len() != 4 && args.len() != 5 {
+                    append_error(
+                        &mut out,
+                        "ERR wrong number of arguments for 'geodist' command",
+                    );
+                    continue;
+                }
+                let unit = args.get(4).copied().unwrap_or(b"m");
+                let Some(unit) = std::str::from_utf8(unit).ok() else {
+                    append_error(&mut out, "ERR command arguments must be valid UTF-8");
+                    continue;
+                };
+                let factor = match crate::cmds::geo::unit_factor(unit) {
+                    Ok(factor) => factor,
+                    Err(error) => {
+                        append_error(&mut out, &error.to_string());
+                        continue;
+                    }
+                };
+                match zset_batch_replies[position]
+                    .take()
+                    .expect("valid GEODIST has a batch reply")
+                {
+                    Ok(scores) => match (scores[0], scores[1]) {
+                        (Some(a), Some(b)) => {
+                            let meters = crate::cmds::geo::distance_m(
+                                crate::cmds::geo::decode_score(a as u64),
+                                crate::cmds::geo::decode_score(b as u64),
+                            );
+                            append_bulk_string(
+                                &mut out,
+                                format!("{:.4}", meters / factor).as_bytes(),
+                            );
+                        }
+                        _ => append_null(&mut out),
+                    },
                     Err(error) => append_error(&mut out, &error.to_string()),
                 }
             } else if command.eq_ignore_ascii_case(b"PFCOUNT") {

@@ -5,16 +5,24 @@ impl Db {
             Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some(raw) = self
-            .store
-            .get_raw(&vector_doc_key(
-                self.key_layout,
-                self.db_index,
-                index,
-                version,
-                id,
-            ))
-        else {
+        if let Some(runtime) = self.vector_runtimes.get(self.db_index, index, version) {
+            let runtime = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?;
+            if let Some(doc) = runtime.memtable.get(id) {
+                return Ok((!doc.deleted).then(|| VectorElement {
+                    vector: doc.vector.clone(),
+                    attrs_json: doc.attrs_json.clone(),
+                }));
+            }
+        }
+        let Some(raw) = self.store.get_raw(&vector_doc_key(
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+            id,
+        )) else {
             return Ok(None);
         };
         let doc = decode_record::<VectorDocRecord>(&raw)?;
@@ -37,6 +45,17 @@ impl Db {
             Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(None),
             Err(err) => return Err(err),
         };
+        if let Some(runtime) = self.vector_runtimes.get(self.db_index, index, version) {
+            let runtime = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?;
+            if let Some(doc) = runtime.memtable.get(id) {
+                return Ok((!doc.deleted).then(|| VectorElement {
+                    vector: doc.vector.clone(),
+                    attrs_json: doc.attrs_json.clone(),
+                }));
+            }
+        }
         let Some(raw) = self
             .store
             .get_raw_async(&vector_doc_key(
@@ -108,11 +127,14 @@ impl Db {
         let _guard = write_lock
             .lock()
             .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (expire_ms, version, meta) = match self.read_vector_meta(index) {
+        let (expire_ms, version, meta, expected_marker, expected_meta) = match self
+            .read_vector_meta_observed(index)
+        {
             Ok(value) => value,
             Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(false),
             Err(err) => return Err(err),
         };
+        self.ensure_vector_runtime_unlocked(index, version, &meta)?;
         let key = vector_doc_key(self.key_layout, self.db_index, index, version, id);
         let Some(raw) = self.store.get_raw(&key) else {
             return Ok(false);
@@ -134,9 +156,9 @@ impl Db {
             schema: &meta.schema,
             doc_id: &doc.id,
         };
-        delete_attr_index_entries_to_batch(&mut batch, &attr_context, &old_attrs);
+        delete_attr_index_entries_to_batch(&mut batch, &attr_context, &old_attrs)?;
         put_attr_index_entries_to_batch(&mut batch, &attr_context, doc.doc_version, &new_attrs)?;
-        doc.attrs_json = new_attrs_json;
+        doc.attrs_json = new_attrs_json.clone();
         put_vector_marker_to_batch(
             &mut batch,
             self.key_layout,
@@ -145,9 +167,19 @@ impl Db {
             expire_ms,
             version,
             meta.dim,
-        );
-        batch.put(&key, &encode_record(&doc)?);
-        self.write_batch_if_not_empty(&batch);
+            meta.internal,
+        )?;
+        batch.put(&key, &encode_record(&doc)?)?;
+        self.commit_vector_batch_if_marker_unchanged(
+            index,
+            meta.internal,
+            version,
+            &expected_marker,
+            &expected_meta,
+            &batch,
+        )?;
+        self.vector_runtimes
+            .set_attrs(self.db_index, index, version, id, new_attrs_json);
         Ok(true)
     }
 

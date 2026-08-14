@@ -162,21 +162,22 @@ fn version_owner_key(db_index: u16, version: u64) -> Vec<u8> {
     key
 }
 
-fn put_version_owner_to_batch(
+pub(in crate::store::db) fn put_version_owner_to_batch(
     batch: &mut WriteBatch,
     db_index: u16,
     key: &[u8],
     version: u64,
     type_tag: u8,
-) {
+) -> Result<(), Error> {
     if version == 0 || type_tag == TYPE_STRING {
-        return;
+        return Ok(());
     }
     let mut raw = Vec::with_capacity(2 + key.len());
     raw.push(VERSION_OWNER_VALUE_VERSION);
     raw.push(type_tag);
     raw.extend_from_slice(key);
-    batch.put(&version_owner_key(db_index, version), &raw);
+    batch.put(&version_owner_key(db_index, version), &raw)?;
+    Ok(())
 }
 
 fn decode_version_owner(prefix: &[u8], raw_key: &[u8], raw_value: &[u8]) -> Option<VersionOwner> {
@@ -195,7 +196,7 @@ impl Db {
     pub(in crate::store::db) fn batch_with_version_owner_markers(
         &self,
         batch: &WriteBatch,
-    ) -> Option<WriteBatch> {
+    ) -> Result<Option<WriteBatch>, Error> {
         let mut augmented: Option<WriteBatch> = None;
         for (write_type, raw_key, raw_value) in batch.iter() {
             if !matches!(
@@ -223,9 +224,9 @@ impl Db {
                 &logical_key,
                 header.version,
                 header.type_tag,
-            );
+            )?;
         }
-        augmented
+        Ok(augmented)
     }
 
     pub(crate) fn refresh_retired_versions_for_compaction(&self) -> usize {
@@ -279,10 +280,15 @@ impl Db {
     }
 
     fn version_owner_is_current(&self, owner: &VersionOwner) -> bool {
-        let Some(raw) = self
-            .store
-            .get_raw(&main_key_bytes(self.db_index, &owner.key))
-        else {
+        let marker_key = if owner.type_tag == TYPE_VECTOR
+            && std::str::from_utf8(&owner.key).is_ok_and(vector::is_internal_fulltext_vector_index)
+        {
+            let index = std::str::from_utf8(&owner.key).expect("checked internal vector name");
+            vector::vector_internal_marker_key(self.key_layout, self.db_index, index)
+        } else {
+            main_key_bytes(self.db_index, &owner.key)
+        };
+        let Some(raw) = self.store.get_raw(&marker_key) else {
             return false;
         };
         let Some(header) = decode_meta_header(&raw) else {

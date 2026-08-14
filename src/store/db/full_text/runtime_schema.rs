@@ -97,14 +97,38 @@ impl FullTextRuntime {
         }
         let schema = builder.build();
         let synonyms = load_fulltext_synonyms_from_store(&store, db_index, index_name)?;
-        let directory = KvTantivyDirectory::new(store, db_index, storage_name);
-        let index = Index::open_or_create(directory, schema)?;
+        let directory = KvTantivyDirectory::new_tiered(
+            store,
+            db_index,
+            storage_name,
+            config.directory_cache_bytes,
+        );
+        let index = Index::open_or_create(directory.clone(), schema)?;
         let reader = index.reader()?;
         let writer = index.writer(config.writer_heap_bytes)?;
+        let mut merge_policy = LogMergePolicy::default();
+        merge_policy.set_min_num_segments(config.merge_min_segments);
+        merge_policy.set_max_docs_before_merge(config.merge_max_docs);
+        merge_policy.set_min_layer_size(
+            config
+                .merge_min_layer_docs
+                .try_into()
+                .map_err(|_| Error::msg("ERR invalid fulltext merge layer size"))?,
+        );
+        merge_policy.set_del_docs_ratio_before_merge(config.merge_delete_ratio);
+        writer.set_merge_policy(Box::new(merge_policy));
         Ok(Self {
             index,
             reader,
             writer,
+            directory,
+            published_outbox_seq: meta.last_indexed_outbox_seq,
+            durable_outbox_seq: meta.last_indexed_outbox_seq,
+            published_backfill_cursor: meta.backfill_cursor.clone(),
+            backfill_complete: !matches!(
+                meta.state,
+                FullTextIndexState::Backfilling | FullTextIndexState::Rebuilding
+            ),
             key_field,
             text_fields,
             text_variant_fields,

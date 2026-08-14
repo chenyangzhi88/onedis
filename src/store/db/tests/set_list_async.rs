@@ -101,23 +101,25 @@ async fn ordered_list_pop_pipeline_batch_preserves_both_ends_and_empty_replies()
     )
     .unwrap();
     let replies = db
-        .list_pop_batch_async(&[
-            ("batch-list", true),
-            ("batch-list", false),
-            ("batch-list", true),
-            ("batch-list", false),
-            ("missing-list", true),
+        .list_pop_many_batch_async(&[
+            ("batch-list", true, 1),
+            ("batch-list", false, 1),
+            ("batch-list", true, 1),
+            ("batch-list", false, 1),
+            ("missing-list", true, 1),
         ])
         .await;
-    assert!(matches!(&replies[0], Ok(Some(value)) if value == b"a"));
-    assert!(matches!(&replies[1], Ok(Some(value)) if value == b"c"));
-    assert!(matches!(&replies[2], Ok(Some(value)) if value == b"b"));
-    assert!(matches!(replies[3], Ok(None)));
-    assert!(matches!(replies[4], Ok(None)));
+    assert!(matches!(&replies[0], Ok(values) if values.as_slice() == [b"a".to_vec()]));
+    assert!(matches!(&replies[1], Ok(values) if values.as_slice() == [b"c".to_vec()]));
+    assert!(matches!(&replies[2], Ok(values) if values.as_slice() == [b"b".to_vec()]));
+    assert!(matches!(&replies[3], Ok(values) if values.is_empty()));
+    assert!(matches!(&replies[4], Ok(values) if values.is_empty()));
     assert!(!db.exists_readonly("batch-list"));
 
     db.insert_string("wrong-list".to_string(), "value".to_string(), None);
-    let replies = db.list_pop_batch_async(&[("wrong-list", true)]).await;
+    let replies = db
+        .list_pop_many_batch_async(&[("wrong-list", true, 1)])
+        .await;
     assert!(replies[0].is_err());
 
     db.list_push_right(

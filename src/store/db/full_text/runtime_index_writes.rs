@@ -98,6 +98,20 @@ impl FullTextRuntime {
         Ok(())
     }
 
+    pub(super) fn publish_through(&mut self, outbox_seq: u64) -> Result<(), Error> {
+        self.publish()?;
+        self.published_outbox_seq = self.published_outbox_seq.max(outbox_seq);
+        Ok(())
+    }
+
+    pub(super) fn published_outbox_seq(&self) -> u64 {
+        self.published_outbox_seq
+    }
+
+    pub(super) fn durable_outbox_seq(&self) -> u64 {
+        self.durable_outbox_seq
+    }
+
     pub(super) fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
     }

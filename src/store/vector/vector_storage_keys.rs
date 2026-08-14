@@ -19,6 +19,16 @@ fn vector_meta_key(
     key
 }
 
+pub(super) fn vector_internal_marker_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    index: &str,
+) -> Vec<u8> {
+    // Version zero is never assigned to a user structure.  The marker lives
+    // under a known sub-key namespace, so it cannot surface as a Redis key.
+    vector_meta_key(layout, db_index, index, 0)
+}
+
 fn vector_doc_prefix(
     layout: KeyEncodingLayout,
     db_index: u16,
@@ -61,7 +71,7 @@ fn vector_segment_key(
     key
 }
 
-fn vector_graph_key(
+fn vector_segment_source_key(
     layout: KeyEncodingLayout,
     db_index: u16,
     index: &str,
@@ -69,6 +79,20 @@ fn vector_graph_key(
     segment_id: u64,
 ) -> Vec<u8> {
     let mut key = vector_prefix(layout, db_index, &VECTOR_GRAPH_NAMESPACE, index, version);
+    key.push(b's');
+    key.extend_from_slice(&segment_id.to_be_bytes());
+    key
+}
+
+fn vector_segment_index_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    index: &str,
+    version: u64,
+    segment_id: u64,
+) -> Vec<u8> {
+    let mut key = vector_prefix(layout, db_index, &VECTOR_GRAPH_NAMESPACE, index, version);
+    key.push(b'i');
     key.extend_from_slice(&segment_id.to_be_bytes());
     key
 }

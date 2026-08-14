@@ -9,14 +9,18 @@ pub enum Structure {
     Set(HashSet<String>),
     List(Vec<String>),
     Stream(Vec<StreamEntry>),
-    Json(String), // 使用字符串存储JSON数据
+    Json(String), // Indexed JSON layout marker; document nodes are stored separately.
 }
 
-#[derive(Clone, Encode, Decode)]
+#[derive(Clone, PartialEq, Eq, Encode, Decode)]
 pub(in crate::store::db) enum JsonNode {
     Scalar(String),
-    Object(Vec<String>),
-    Array(usize),
+    /// Generation changes only when direct children are added or removed. Existing child updates
+    /// stay independent, while ancestor replacement can detect concurrent structural changes.
+    Object(u64),
+    /// Stable physical element ids in logical array order. Deleting one element only changes
+    /// this directory and removes that element subtree; later elements keep their storage keys.
+    Array(Vec<u64>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,6 +308,85 @@ pub(crate) struct CounterCacheRuntime {
     pub(in crate::store::db) zset_key_epochs: DashMap<(u16, Vec<u8>), u64>,
     pub(in crate::store::db) zset_db_epochs: DashMap<u16, u64>,
     pub(in crate::store::db) zset_ever_populated: AtomicBool,
+    pub(in crate::store::db) zset_increment_queues:
+        DashMap<(u16, Vec<u8>, Vec<u8>), Arc<ZsetIncrementMergeQueue>>,
+    pub(in crate::store::db) zset_add_queues:
+        DashMap<(u16, Vec<u8>, Vec<u8>), Arc<ZsetAddMergeQueue>>,
+    pub(in crate::store::db) list_push_queues: DashMap<(u16, Vec<u8>), Arc<ListPushMergeQueue>>,
+    pub(in crate::store::db) list_pop_queues: DashMap<(u16, Vec<u8>), Arc<ListPopMergeQueue>>,
+    pub(in crate::store::db) stream_add_queues: DashMap<(u16, Vec<u8>), Arc<StreamAddMergeQueue>>,
+    pub(in crate::store::db) bitop_queues: DashMap<(u16, Vec<u8>), Arc<BitopMergeQueue>>,
+}
+
+pub(in crate::store::db) struct ZsetIncrementMergeRequest {
+    pub(in crate::store::db) increment: f64,
+    pub(in crate::store::db) reply: tokio::sync::oneshot::Sender<Result<f64, Error>>,
+}
+
+pub(in crate::store::db) struct ZsetAddMergeRequest {
+    pub(in crate::store::db) score: f64,
+    pub(in crate::store::db) reply: tokio::sync::oneshot::Sender<Result<usize, Error>>,
+}
+
+#[derive(Default)]
+pub(in crate::store::db) struct ZsetAddMergeQueue {
+    pub(in crate::store::db) pending: Mutex<VecDeque<ZsetAddMergeRequest>>,
+    pub(in crate::store::db) running: AtomicBool,
+}
+
+#[derive(Default)]
+pub(in crate::store::db) struct ZsetIncrementMergeQueue {
+    pub(in crate::store::db) pending: Mutex<VecDeque<ZsetIncrementMergeRequest>>,
+    pub(in crate::store::db) running: AtomicBool,
+}
+
+pub(in crate::store::db) struct ListPushMergeRequest {
+    pub(in crate::store::db) left: bool,
+    pub(in crate::store::db) values: Vec<Vec<u8>>,
+    pub(in crate::store::db) only_if_exists: bool,
+    pub(in crate::store::db) reply: tokio::sync::oneshot::Sender<Result<usize, Error>>,
+}
+
+#[derive(Default)]
+pub(in crate::store::db) struct ListPushMergeQueue {
+    pub(in crate::store::db) pending: Mutex<VecDeque<ListPushMergeRequest>>,
+    pub(in crate::store::db) running: AtomicBool,
+}
+
+pub(in crate::store::db) struct ListPopMergeRequest {
+    pub(in crate::store::db) left: bool,
+    pub(in crate::store::db) count: usize,
+    pub(in crate::store::db) reply: tokio::sync::oneshot::Sender<Result<Vec<Vec<u8>>, Error>>,
+}
+
+#[derive(Default)]
+pub(in crate::store::db) struct ListPopMergeQueue {
+    pub(in crate::store::db) pending: Mutex<VecDeque<ListPopMergeRequest>>,
+    pub(in crate::store::db) running: AtomicBool,
+}
+
+pub(in crate::store::db) struct StreamAddMergeRequest {
+    pub(in crate::store::db) requested_id: Option<StreamId>,
+    pub(in crate::store::db) fields: Vec<(String, String)>,
+    pub(in crate::store::db) reply: tokio::sync::oneshot::Sender<Result<StreamId, Error>>,
+}
+
+#[derive(Default)]
+pub(in crate::store::db) struct StreamAddMergeQueue {
+    pub(in crate::store::db) pending: Mutex<VecDeque<StreamAddMergeRequest>>,
+    pub(in crate::store::db) running: AtomicBool,
+}
+
+pub(in crate::store::db) struct BitopMergeRequest {
+    pub(in crate::store::db) operation: String,
+    pub(in crate::store::db) sources: Vec<String>,
+    pub(in crate::store::db) reply: tokio::sync::oneshot::Sender<Result<usize, Error>>,
+}
+
+#[derive(Default)]
+pub(in crate::store::db) struct BitopMergeQueue {
+    pub(in crate::store::db) pending: Mutex<VecDeque<BitopMergeRequest>>,
+    pub(in crate::store::db) running: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -507,6 +590,10 @@ pub struct StreamObservabilitySnapshot {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VectorObservabilitySnapshot {
     pub indexes: u64,
+    pub segments: u64,
+    pub pending_segments: u64,
+    pub hnsw_nodes: u64,
+    pub hnsw_deleted_nodes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

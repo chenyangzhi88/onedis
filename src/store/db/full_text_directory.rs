@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt, io,
     io::{Cursor, Write},
     ops::Range,
@@ -27,6 +27,7 @@ use crate::store::{
 };
 
 const FULLTEXT_FILE_CHUNK_BYTES: usize = 1024 * 1024;
+const DEFAULT_FULLTEXT_BLOCK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MANIFEST_BYTES: usize = 16;
 
 #[derive(Clone)]
@@ -38,6 +39,22 @@ pub struct KvTantivyDirectory {
     writes: Arc<Mutex<()>>,
     reservations: Arc<Mutex<HashSet<PathBuf>>>,
     chunk_leases: Arc<Mutex<HashMap<Vec<u8>, Weak<KvChunkLease>>>>,
+    hot: Option<Arc<Mutex<HotDirectoryState>>>,
+    block_cache: Arc<Mutex<KvBlockCache>>,
+}
+
+#[derive(Default)]
+struct HotDirectoryState {
+    files: HashMap<PathBuf, Arc<[u8]>>,
+    deleted: HashSet<PathBuf>,
+    dirty: bool,
+}
+
+struct KvBlockCache {
+    entries: HashMap<Vec<u8>, Arc<[u8]>>,
+    order: VecDeque<Vec<u8>>,
+    bytes: usize,
+    max_bytes: usize,
 }
 
 struct KvDirectoryWriter {
@@ -53,6 +70,11 @@ struct KvChunkFileHandle {
     chunk_prefix: Vec<u8>,
     len: usize,
     _lease: Arc<KvChunkLease>,
+    block_cache: Arc<Mutex<KvBlockCache>>,
+}
+
+struct HotFileHandle {
+    data: Arc<[u8]>,
 }
 
 struct KvChunkLease {
@@ -69,8 +91,97 @@ impl fmt::Debug for KvChunkFileHandle {
     }
 }
 
+impl fmt::Debug for HotFileHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HotFileHandle")
+            .field("len", &self.data.len())
+            .finish()
+    }
+}
+
+impl KvBlockCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, key: &[u8]) -> Option<Arc<[u8]>> {
+        let value = self.entries.get(key)?.clone();
+        self.order.retain(|existing| existing.as_slice() != key);
+        self.order.push_back(key.to_vec());
+        Some(value)
+    }
+
+    fn insert(&mut self, key: Vec<u8>, value: Arc<[u8]>) {
+        if self.max_bytes == 0 || value.len() > self.max_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.insert(key.clone(), value.clone()) {
+            self.bytes = self.bytes.saturating_sub(previous.len());
+            self.order.retain(|existing| existing != &key);
+        }
+        self.bytes = self.bytes.saturating_add(value.len());
+        self.order.push_back(key);
+        while self.bytes > self.max_bytes {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.len());
+            }
+        }
+    }
+
+    fn remove_prefix(&mut self, prefix: &[u8]) {
+        let keys = self
+            .entries
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(removed) = self.entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(removed.len());
+            }
+        }
+        self.order.retain(|key| !key.as_slice().starts_with(prefix));
+    }
+}
+
 impl KvTantivyDirectory {
     pub fn new(store: KvStore, db_index: u16, index: &str) -> Self {
+        Self::with_mode(
+            store,
+            db_index,
+            index,
+            false,
+            DEFAULT_FULLTEXT_BLOCK_CACHE_BYTES,
+        )
+    }
+
+    /// Creates a two-tier directory. Tantivy commits are first published in the
+    /// process-local overlay and become searchable immediately. `checkpoint`
+    /// durably installs the same immutable files in the KV-backed directory.
+    pub fn new_tiered(
+        store: KvStore,
+        db_index: u16,
+        index: &str,
+        block_cache_bytes: usize,
+    ) -> Self {
+        Self::with_mode(store, db_index, index, true, block_cache_bytes)
+    }
+
+    fn with_mode(
+        store: KvStore,
+        db_index: u16,
+        index: &str,
+        tiered: bool,
+        block_cache_bytes: usize,
+    ) -> Self {
         Self {
             store,
             db_index,
@@ -79,7 +190,16 @@ impl KvTantivyDirectory {
             writes: Arc::new(Mutex::new(())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             chunk_leases: Arc::new(Mutex::new(HashMap::new())),
+            hot: tiered.then(|| Arc::new(Mutex::new(HotDirectoryState::default()))),
+            block_cache: Arc::new(Mutex::new(KvBlockCache::new(block_cache_bytes))),
         }
+    }
+
+    pub fn has_hot_changes(&self) -> bool {
+        self.hot
+            .as_ref()
+            .and_then(|hot| hot.lock().ok().map(|hot| hot.dirty))
+            .unwrap_or(false)
     }
 
     fn file_prefix(&self) -> Vec<u8> {
@@ -166,6 +286,27 @@ impl KvTantivyDirectory {
             .writes
             .lock()
             .map_err(|_| io::Error::other("fulltext directory write lock poisoned"))?;
+        if let Some(hot) = &self.hot {
+            let mut hot = hot
+                .lock()
+                .map_err(|_| io::Error::other("fulltext hot directory lock poisoned"))?;
+            hot.files
+                .insert(path.to_path_buf(), Arc::<[u8]>::from(data));
+            hot.deleted.remove(path);
+            hot.dirty = true;
+            drop(hot);
+            if let Ok(mut reservations) = self.reservations.lock() {
+                reservations.remove(path);
+            }
+            if path == Path::new("meta.json") {
+                drop(self.watchers.broadcast());
+            }
+            return Ok(());
+        }
+        self.put_file_durable(path, data, true)
+    }
+
+    fn put_file_durable(&self, path: &Path, data: &[u8], notify: bool) -> io::Result<()> {
         let previous = self.manifest(path);
         let previous_len = previous.map(|(_, len)| len).unwrap_or(0);
         let version = self
@@ -185,13 +326,21 @@ impl KvTantivyDirectory {
             self.store.blob_put_raw(&key, chunk);
         }
         let mut batch = WriteBatch::new();
-        batch.put(
-            &self.manifest_key(path),
-            &encode_manifest(version, data.len()),
-        );
-        batch.put(&self.total_key(), &(total as u64).to_be_bytes());
-        batch.put(&self.version_key(), &version.to_be_bytes());
-        batch.delete(&self.reservation_key(path));
+        batch
+            .put(
+                &self.manifest_key(path),
+                &encode_manifest(version, data.len()),
+            )
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        batch
+            .put(&self.total_key(), &(total as u64).to_be_bytes())
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        batch
+            .put(&self.version_key(), &version.to_be_bytes())
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        batch
+            .delete(&self.reservation_key(path))
+            .map_err(|error| io::Error::other(error.to_string()))?;
         self.store.write_batch(&batch);
         if let Some((previous_version, _)) = previous {
             self.retire_chunks(path, previous_version);
@@ -199,14 +348,99 @@ impl KvTantivyDirectory {
         if let Ok(mut reservations) = self.reservations.lock() {
             reservations.remove(path);
         }
-        if path == Path::new("meta.json") {
+        if notify && path == Path::new("meta.json") {
             drop(self.watchers.broadcast());
         }
         Ok(())
     }
 
+    /// Persists one coherent hot Tantivy generation. Immutable data files are
+    /// installed first and `meta.json` is installed last, so a crash can leave
+    /// only unreachable files, never a durable manifest referring to missing
+    /// segment data.
+    pub fn checkpoint(&self) -> io::Result<bool> {
+        let Some(hot) = &self.hot else {
+            self.store
+                .sync_wal()
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            return Ok(false);
+        };
+        let _guard = self
+            .writes
+            .lock()
+            .map_err(|_| io::Error::other("fulltext directory write lock poisoned"))?;
+        let mut hot = hot
+            .lock()
+            .map_err(|_| io::Error::other("fulltext hot directory lock poisoned"))?;
+        if !hot.dirty {
+            return Ok(false);
+        }
+
+        let meta_path = Path::new("meta.json");
+        let lock_paths = [
+            Path::new(".tantivy-writer.lock"),
+            Path::new(".tantivy-meta.lock"),
+        ];
+        let files = hot
+            .files
+            .iter()
+            .filter(|(path, _)| {
+                path.as_path() != meta_path && !lock_paths.contains(&path.as_path())
+            })
+            .map(|(path, data)| (path.clone(), data.clone()))
+            .collect::<Vec<_>>();
+        for (path, data) in files {
+            self.put_file_durable(&path, &data, false)?;
+        }
+        if let Some(meta) = hot.files.get(meta_path).cloned() {
+            self.put_file_durable(meta_path, &meta, false)?;
+        }
+
+        let deleted = hot
+            .deleted
+            .iter()
+            .filter(|path| !lock_paths.contains(&path.as_path()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in deleted {
+            self.delete_durable_if_present(&path)?;
+        }
+        self.store
+            .sync_wal()
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        hot.files
+            .retain(|path, _| lock_paths.contains(&path.as_path()));
+        hot.deleted.clear();
+        hot.dirty = false;
+        Ok(true)
+    }
+
+    fn delete_durable_if_present(&self, path: &Path) -> io::Result<()> {
+        let Some((version, len)) = self.manifest(path) else {
+            return Ok(());
+        };
+        let mut batch = WriteBatch::new();
+        batch
+            .delete(&self.manifest_key(path))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        batch
+            .delete(&self.reservation_key(path))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        batch
+            .put(
+                &self.total_key(),
+                &(self.total_bytes().saturating_sub(len) as u64).to_be_bytes(),
+            )
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.store.write_batch(&batch);
+        self.retire_chunks(path, version);
+        Ok(())
+    }
+
     fn release_reservation(&self, path: &Path) {
-        self.store.delete_key(&self.reservation_key(path));
+        if self.hot.is_none() {
+            self.store.delete_key(&self.reservation_key(path));
+        }
         if let Ok(mut reservations) = self.reservations.lock() {
             reservations.remove(path);
         }
@@ -231,6 +465,9 @@ impl KvTantivyDirectory {
 
     fn retire_chunks(&self, path: &Path, version: u64) {
         let chunk_prefix = self.chunk_prefix(path, version);
+        if let Ok(mut cache) = self.block_cache.lock() {
+            cache.remove_prefix(&chunk_prefix);
+        }
         let lease = self
             .chunk_leases
             .lock()
@@ -267,11 +504,45 @@ impl FileHandle for KvChunkFileHandle {
         }
         let first_chunk = range.start / FULLTEXT_FILE_CHUNK_BYTES;
         let last_chunk = (range.end - 1) / FULLTEXT_FILE_CHUNK_BYTES;
+        let keys = (first_chunk..=last_chunk)
+            .map(|chunk_index| {
+                let mut key = self.chunk_prefix.clone();
+                key.extend_from_slice(&(chunk_index as u32).to_be_bytes());
+                key
+            })
+            .collect::<Vec<_>>();
+        let mut chunks = if let Ok(mut cache) = self.block_cache.lock() {
+            keys.iter().map(|key| cache.get(key)).collect::<Vec<_>>()
+        } else {
+            vec![None; keys.len()]
+        };
+        let missing = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, chunk)| chunk.is_none())
+            .map(|(index, _)| (index, keys[index].clone()))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let missing_keys = missing
+                .iter()
+                .map(|(_, key)| key.clone())
+                .collect::<Vec<_>>();
+            let loaded = self.store.multi_get_raw(&missing_keys);
+            let mut cache = self.block_cache.lock().ok();
+            for ((chunk_offset, key), value) in missing.into_iter().zip(loaded) {
+                let chunk = Arc::<[u8]>::from(value.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "missing fulltext file chunk")
+                })?);
+                if let Some(cache) = cache.as_mut() {
+                    cache.insert(key, chunk.clone());
+                }
+                chunks[chunk_offset] = Some(chunk);
+            }
+        }
         let mut bytes = Vec::with_capacity(range.len());
-        for chunk_index in first_chunk..=last_chunk {
-            let mut key = self.chunk_prefix.clone();
-            key.extend_from_slice(&(chunk_index as u32).to_be_bytes());
-            let chunk = self.store.get_raw(&key).ok_or_else(|| {
+        for (chunk_offset, chunk) in chunks.into_iter().enumerate() {
+            let chunk_index = first_chunk + chunk_offset;
+            let chunk = chunk.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "missing fulltext file chunk")
             })?;
             let chunk_start = chunk_index * FULLTEXT_FILE_CHUNK_BYTES;
@@ -295,9 +566,27 @@ impl FileHandle for KvChunkFileHandle {
     }
 }
 
+impl FileHandle for HotFileHandle {
+    fn read_bytes(&self, range: Range<usize>) -> io::Result<OwnedBytes> {
+        if range.start > range.end || range.end > self.data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fulltext hot file read outside bounds",
+            ));
+        }
+        Ok(OwnedBytes::new(self.data.clone()).slice(range))
+    }
+}
+
 impl HasLen for KvChunkFileHandle {
     fn len(&self) -> usize {
         self.len
+    }
+}
+
+impl HasLen for HotFileHandle {
+    fn len(&self) -> usize {
+        self.data.len()
     }
 }
 
@@ -317,6 +606,20 @@ impl Directory for KvTantivyDirectory {
                 path.to_path_buf(),
             )
         })?;
+        if let Some(hot) = &self.hot {
+            let hot = hot.lock().map_err(|_| {
+                OpenReadError::wrap_io_error(
+                    io::Error::other("fulltext hot directory lock poisoned"),
+                    path.to_path_buf(),
+                )
+            })?;
+            if let Some(data) = hot.files.get(path) {
+                return Ok(Arc::new(HotFileHandle { data: data.clone() }));
+            }
+            if hot.deleted.contains(path) {
+                return Err(OpenReadError::FileDoesNotExist(path.to_path_buf()));
+            }
+        }
         let (version, len) = self
             .manifest(path)
             .ok_or_else(|| OpenReadError::FileDoesNotExist(path.to_path_buf()))?;
@@ -329,6 +632,7 @@ impl Directory for KvTantivyDirectory {
             chunk_prefix,
             len,
             _lease: lease,
+            block_cache: self.block_cache.clone(),
         }))
     }
 
@@ -341,16 +645,45 @@ impl Directory for KvTantivyDirectory {
             io_error: Arc::new(io::Error::other("fulltext directory write lock poisoned")),
             filepath: path.to_path_buf(),
         })?;
+        if let Some(hot) = &self.hot {
+            let mut hot = hot.lock().map_err(|_| DeleteError::IoError {
+                io_error: Arc::new(io::Error::other("fulltext hot directory lock poisoned")),
+                filepath: path.to_path_buf(),
+            })?;
+            let hot_exists = hot.files.remove(path).is_some();
+            let durable_exists = !hot.deleted.contains(path) && self.manifest(path).is_some();
+            if !hot_exists && !durable_exists {
+                return Err(DeleteError::FileDoesNotExist(path.to_path_buf()));
+            }
+            hot.deleted.insert(path.to_path_buf());
+            hot.dirty = true;
+            return Ok(());
+        }
         let Some((version, len)) = self.manifest(path) else {
             return Err(DeleteError::FileDoesNotExist(path.to_path_buf()));
         };
         let mut batch = WriteBatch::new();
-        batch.delete(&self.manifest_key(path));
-        batch.delete(&self.reservation_key(path));
-        batch.put(
-            &self.total_key(),
-            &(self.total_bytes().saturating_sub(len) as u64).to_be_bytes(),
-        );
+        batch
+            .delete(&self.manifest_key(path))
+            .map_err(|error| DeleteError::IoError {
+                io_error: Arc::new(io::Error::other(error.to_string())),
+                filepath: path.to_path_buf(),
+            })?;
+        batch
+            .delete(&self.reservation_key(path))
+            .map_err(|error| DeleteError::IoError {
+                io_error: Arc::new(io::Error::other(error.to_string())),
+                filepath: path.to_path_buf(),
+            })?;
+        batch
+            .put(
+                &self.total_key(),
+                &(self.total_bytes().saturating_sub(len) as u64).to_be_bytes(),
+            )
+            .map_err(|error| DeleteError::IoError {
+                io_error: Arc::new(io::Error::other(error.to_string())),
+                filepath: path.to_path_buf(),
+            })?;
         // Chunks are immutable and remain readable by already-open FileHandles;
         // their final lease reclaims the retired version.
         self.store.write_batch(&batch);
@@ -359,6 +692,20 @@ impl Directory for KvTantivyDirectory {
     }
 
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
+        if let Some(hot) = &self.hot {
+            let hot = hot.lock().map_err(|_| {
+                OpenReadError::wrap_io_error(
+                    io::Error::other("fulltext hot directory lock poisoned"),
+                    path.to_path_buf(),
+                )
+            })?;
+            if hot.files.contains_key(path) {
+                return Ok(true);
+            }
+            if hot.deleted.contains(path) {
+                return Ok(false);
+            }
+        }
         Ok(self.store.contains_key(&self.manifest_key(path)))
     }
 
@@ -374,8 +721,38 @@ impl Directory for KvTantivyDirectory {
         if reservations.contains(path) {
             return Err(OpenWriteError::FileAlreadyExists(path.to_path_buf()));
         }
+        if self.hot.is_some() {
+            if self.exists(path).map_err(|error| match error {
+                OpenReadError::FileDoesNotExist(path) => OpenWriteError::FileAlreadyExists(path),
+                OpenReadError::IoError { io_error, filepath } => {
+                    OpenWriteError::IoError { io_error, filepath }
+                }
+                OpenReadError::IncompatibleIndex(_) => OpenWriteError::wrap_io_error(
+                    io::Error::other("incompatible fulltext index"),
+                    path.to_path_buf(),
+                ),
+            })? {
+                return Err(OpenWriteError::FileAlreadyExists(path.to_path_buf()));
+            }
+            reservations.insert(path.to_path_buf());
+            drop(reservations);
+            return Ok(std::io::BufWriter::new(Box::new(KvDirectoryWriter {
+                directory: self.clone(),
+                path: path.to_path_buf(),
+                data: Cursor::new(Vec::new()),
+                dirty: true,
+                ever_persisted: false,
+            })));
+        }
         let mut reservation = WriteBatch::new();
-        reservation.put(&reservation_key, b"\x01");
+        reservation
+            .put(&reservation_key, b"\x01")
+            .map_err(|error| {
+                OpenWriteError::wrap_io_error(
+                    io::Error::other(error.to_string()),
+                    path.to_path_buf(),
+                )
+            })?;
         if self
             .store
             .compare_and_write_batch(&[CompareCondition::absent(&manifest_key)], &reservation)
@@ -407,6 +784,9 @@ impl Directory for KvTantivyDirectory {
     }
 
     fn sync_directory(&self) -> io::Result<()> {
+        if self.hot.is_some() {
+            return Ok(());
+        }
         self.store
             .sync_wal()
             .map_err(|err| io::Error::other(err.to_string()))
@@ -480,10 +860,16 @@ fn path_to_key(path: &Path) -> String {
 fn delete_chunk_prefix(store: &KvStore, prefix: &[u8]) {
     let mut batch = WriteBatch::new();
     if let Some(end) = exclusive_upper_bound(prefix) {
-        batch.delete_range(prefix, &end);
+        if let Err(error) = batch.delete_range(prefix, &end) {
+            log::warn!("failed to plan retired fulltext chunk cleanup: {error}");
+            return;
+        }
     } else {
         for (key, _) in store.scan_prefix_raw(prefix) {
-            batch.delete(&key);
+            if let Err(error) = batch.delete(&key) {
+                log::warn!("failed to plan retired fulltext chunk cleanup: {error}");
+                return;
+            }
         }
     }
     store.write_batch(&batch);

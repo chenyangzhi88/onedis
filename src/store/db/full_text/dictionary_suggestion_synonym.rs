@@ -9,7 +9,9 @@ impl Db {
             if self.store.get_raw(&key).is_none() {
                 inserted += 1;
             }
-            batch.put(&key, normalized.as_bytes());
+            batch
+                .put(&key, normalized.as_bytes())
+                .map_err(|error| Error::msg(error.to_string()))?;
         }
         self.write_batch_if_not_empty(&batch);
         Ok(Frame::Integer(inserted))
@@ -32,7 +34,9 @@ impl Db {
             let key = fulltext_dict_term_key(self.db_index, dict, &term.to_lowercase());
             if self.store.get_raw(&key).is_some() {
                 deleted += 1;
-                batch.delete(&key);
+                batch
+                    .delete(&key)
+                    .map_err(|error| Error::msg(error.to_string()))?;
             }
         }
         self.write_batch_if_not_empty(&batch);
@@ -186,7 +190,9 @@ impl Db {
             payload: payload.or_else(|| old.and_then(|record| record.payload)),
         };
         let mut batch = WriteBatch::new();
-        batch.put(&storage_key, &encode_record(&record)?);
+        batch
+            .put(&storage_key, &encode_record(&record)?)
+            .map_err(|error| Error::msg(error.to_string()))?;
         self.write_batch_if_not_empty(&batch);
         Ok(Frame::Integer(if existed.is_some() { 0 } else { 1 }))
     }
@@ -279,7 +285,9 @@ impl Db {
         let existed = self.store.get_raw(&storage_key).is_some();
         if existed {
             let mut batch = WriteBatch::new();
-            batch.delete(&storage_key);
+            batch
+                .delete(&storage_key)
+                .map_err(|error| Error::msg(error.to_string()))?;
             self.write_batch_if_not_empty(&batch);
         }
         Ok(Frame::Integer(i64::from(existed)))
@@ -325,10 +333,12 @@ impl Db {
             terms: terms.into_iter().map(|term| term.to_lowercase()).collect(),
         };
         let mut batch = WriteBatch::new();
-        batch.put(
-            &fulltext_syn_key(self.db_index, &index, group),
-            &encode_record(&record)?,
-        );
+        batch
+            .put(
+                &fulltext_syn_key(self.db_index, &index, group),
+                &encode_record(&record)?,
+            )
+            .map_err(|error| Error::msg(error.to_string()))?;
         self.write_batch_if_not_empty(&batch);
         if skip_initial_scan {
             if let Some(runtime) = self.fulltext_runtimes.get(self.db_index, &index) {

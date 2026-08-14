@@ -1,5 +1,14 @@
 use super::*;
 
+const BITOP_MERGE_BATCH_MAX: usize = 64;
+
+#[derive(Clone)]
+enum BitopBatchValue {
+    Missing,
+    String(Vec<u8>),
+    Other,
+}
+
 impl Db {
     pub(crate) fn string_get_bit_from_live_raw(
         raw: Option<&[u8]>,
@@ -281,6 +290,46 @@ impl Db {
         dest: &str,
         keys: &[String],
     ) -> Result<usize, Error> {
+        validate_bitop(op, keys.len())?;
+        if !self.store.is_transactional() {
+            let queue_key = (self.db_index, dest.as_bytes().to_vec());
+            let queue = self
+                .counter_cache
+                .bitop_queues
+                .entry(queue_key)
+                .or_insert_with(|| Arc::new(BitopMergeQueue::default()))
+                .clone();
+            let (reply, result) = tokio::sync::oneshot::channel();
+            queue
+                .pending
+                .lock()
+                .expect("BITOP merge queue mutex poisoned")
+                .push_back(BitopMergeRequest {
+                    operation: op.to_string(),
+                    sources: keys.to_vec(),
+                    reply,
+                });
+            if queue
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.spawn_bitop_merge_worker(dest.to_string(), queue.clone());
+            }
+            drop(queue);
+            return result
+                .await
+                .map_err(|_| Error::msg("ERR BITOP merger stopped"))?;
+        }
+        self.string_bitop_strict_async(op, dest, keys).await
+    }
+
+    async fn string_bitop_strict_async(
+        &self,
+        op: &str,
+        dest: &str,
+        keys: &[String],
+    ) -> Result<usize, Error> {
         let op = validate_bitop(op, keys.len())?;
         let mut logical_keys = Vec::with_capacity(keys.len().saturating_add(1));
         logical_keys.push(dest);
@@ -299,62 +348,240 @@ impl Db {
             .map(|key| self.mk(key))
             .collect::<Vec<_>>();
 
-        for _ in 0..64 {
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
-            let now = now_ms();
-            let mut out = Vec::new();
-            for (source_index, key) in keys.iter().enumerate() {
-                let position = logical_keys
-                    .iter()
-                    .position(|candidate| *candidate == key)
-                    .expect("BITOP source key is observed");
-                let source = match observations[position].value() {
-                    Some(raw) if decode_expire_ms(raw) == 0 || now < decode_expire_ms(raw) => {
-                        decode_string_bytes_slice(raw)
-                            .ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?
-                    }
-                    _ => &[],
-                };
-                combine_bitop(&mut out, source, op, source_index)?;
-            }
-            if op == BitOperation::Not {
-                out.iter_mut().for_each(|byte| *byte = !*byte);
-            }
-            let len = out.len();
-            let old_dest_raw = observations[0].value().map(AsRef::as_ref);
-            let old_expire_ms = old_dest_raw
-                .and_then(decode_meta_header)
-                .map_or(0, |header| header.expire_ms);
-            let mut batch = WriteBatch::new();
-            if len == 0 {
-                self.delete_main_key_with_ttl_to_batch(&mut batch, dest, old_expire_ms);
-            } else {
-                self.prepare_string_overwrite_to_batch(&mut batch, dest, old_dest_raw);
-                self.write_string_to_batch_with_deferred_old_raw(
-                    &mut batch,
-                    dest,
-                    &out,
-                    0,
-                    old_dest_raw,
-                );
-            }
-            let conditions = observations
+        let raw_values = self.store.multi_get_raw_async(&raw_keys).await;
+        let now = now_ms();
+        let mut out = Vec::new();
+        for (source_index, key) in keys.iter().enumerate() {
+            let position = logical_keys
                 .iter()
-                .map(CompareCondition::from_observed)
-                .collect::<Vec<_>>();
-            match self
-                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
-                .await
-            {
-                Ok(true) => {
-                    self.changes.fetch_add(1, Ordering::Relaxed);
-                    return Ok(len);
+                .position(|candidate| *candidate == key)
+                .expect("BITOP source key is observed");
+            let source = match raw_values[position].as_deref() {
+                Some(raw) if decode_expire_ms(raw) == 0 || now < decode_expire_ms(raw) => {
+                    decode_string_bytes_slice(raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?
                 }
-                Ok(false) => continue,
-                Err(error) => return Err(error),
+                _ => &[],
+            };
+            combine_bitop(&mut out, source, op, source_index)?;
+        }
+        if op == BitOperation::Not {
+            out.iter_mut().for_each(|byte| *byte = !*byte);
+        }
+        let len = out.len();
+        let old_dest_raw = raw_values[0].as_deref();
+        let old_expire_ms = old_dest_raw
+            .and_then(decode_meta_header)
+            .map_or(0, |header| header.expire_ms);
+        let mut batch = WriteBatch::new();
+        if len == 0 {
+            self.delete_main_key_with_ttl_to_batch(&mut batch, dest, old_expire_ms);
+        } else {
+            self.prepare_string_overwrite_to_batch(&mut batch, dest, old_dest_raw);
+            self.write_string_to_batch_with_deferred_old_raw(
+                &mut batch,
+                dest,
+                &out,
+                0,
+                old_dest_raw,
+            );
+        }
+        self.write_batch_if_not_empty_async(&batch).await;
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        Ok(len)
+    }
+
+    fn spawn_bitop_merge_worker(&self, dest: String, queue: Arc<BitopMergeQueue>) {
+        let db = self.shared_task_view();
+        let queue_key = (self.db_index, dest.as_bytes().to_vec());
+        tokio::spawn(async move {
+            loop {
+                tokio::task::yield_now().await;
+                let requests = {
+                    let mut pending = queue
+                        .pending
+                        .lock()
+                        .expect("BITOP merge queue mutex poisoned");
+                    let count = pending.len().min(BITOP_MERGE_BATCH_MAX);
+                    pending.drain(..count).collect::<Vec<_>>()
+                };
+                if !requests.is_empty() {
+                    let commands = requests
+                        .iter()
+                        .map(|request| {
+                            (
+                                request.operation.as_str(),
+                                dest.as_str(),
+                                request
+                                    .sources
+                                    .iter()
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let replies = db.string_bitop_batch_async(&commands).await;
+                    for (request, reply) in requests.into_iter().zip(replies) {
+                        let _ = request.reply.send(reply);
+                    }
+                }
+                let pending = queue
+                    .pending
+                    .lock()
+                    .expect("BITOP merge queue mutex poisoned");
+                if pending.is_empty() {
+                    queue.running.store(false, Ordering::Release);
+                    db.counter_cache
+                        .bitop_queues
+                        .remove_if(&queue_key, |_, existing| {
+                            Arc::ptr_eq(existing, &queue) && Arc::strong_count(existing) == 2
+                        });
+                    break;
+                }
+                drop(pending);
+            }
+        });
+    }
+
+    /// Execute an ordered BITOP pipeline from one consistent snapshot and commit only the final
+    /// value of each destination. Sources that name a destination changed earlier in the same
+    /// pipeline observe that intermediate value.
+    pub(crate) async fn string_bitop_batch_async(
+        &self,
+        commands: &[(&str, &str, Vec<&str>)],
+    ) -> Vec<Result<usize, Error>> {
+        if commands.is_empty() {
+            return Vec::new();
+        }
+        let operations = commands
+            .iter()
+            .map(|(op, _, keys)| validate_bitop(op, keys.len()))
+            .collect::<Vec<_>>();
+
+        let mut positions = HashMap::<&str, usize>::new();
+        let mut logical_keys = Vec::<&str>::new();
+        for (_, dest, sources) in commands {
+            if !positions.contains_key(dest) {
+                positions.insert(dest, logical_keys.len());
+                logical_keys.push(dest);
+            }
+            for source in sources {
+                if !positions.contains_key(source) {
+                    positions.insert(source, logical_keys.len());
+                    logical_keys.push(source);
+                }
             }
         }
-        Err(Error::msg("ERR BITOP write conflict"))
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            logical_keys.iter().map(|key| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
+        let raw_keys = logical_keys
+            .iter()
+            .map(|key| self.mk(key))
+            .collect::<Vec<_>>();
+
+        {
+            let raw_values = self.store.multi_get_raw_async(&raw_keys).await;
+            let now = now_ms();
+            let mut values = raw_values
+                .iter()
+                .map(|raw| match raw.as_deref() {
+                    None => BitopBatchValue::Missing,
+                    Some(raw) => {
+                        let expire_ms = decode_expire_ms(raw);
+                        if expire_ms > 0 && now >= expire_ms {
+                            BitopBatchValue::Missing
+                        } else if let Some(value) = decode_string_bytes_slice(raw) {
+                            BitopBatchValue::String(value.to_vec())
+                        } else {
+                            BitopBatchValue::Other
+                        }
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut touched_destinations = HashSet::new();
+            let mut replies = Vec::with_capacity(commands.len());
+            let mut successful_commands = 0u64;
+
+            for ((_, dest, sources), operation) in commands.iter().zip(&operations) {
+                let operation = match operation {
+                    Ok(operation) => *operation,
+                    Err(error) => {
+                        replies.push(Err(Error::msg(error.to_string())));
+                        continue;
+                    }
+                };
+                let mut out = Vec::new();
+                let mut error = None;
+                for (source_index, source) in sources.iter().enumerate() {
+                    let source = match &values[positions[source]] {
+                        BitopBatchValue::Missing => &[][..],
+                        BitopBatchValue::String(value) => value.as_slice(),
+                        BitopBatchValue::Other => {
+                            error = Some(Error::msg(WRONG_TYPE_ERROR));
+                            break;
+                        }
+                    };
+                    if let Err(combine_error) =
+                        combine_bitop(&mut out, source, operation, source_index)
+                    {
+                        error = Some(combine_error);
+                        break;
+                    }
+                }
+                if let Some(error) = error {
+                    replies.push(Err(error));
+                    continue;
+                }
+                if operation == BitOperation::Not {
+                    out.iter_mut().for_each(|byte| *byte = !*byte);
+                }
+                let len = out.len();
+                let dest_position = positions[dest];
+                values[dest_position] = if out.is_empty() {
+                    BitopBatchValue::Missing
+                } else {
+                    BitopBatchValue::String(out)
+                };
+                touched_destinations.insert(dest_position);
+                successful_commands += 1;
+                replies.push(Ok(len));
+            }
+
+            if touched_destinations.is_empty() {
+                return replies;
+            }
+            let mut batch = WriteBatch::new();
+            for position in touched_destinations {
+                let key = logical_keys[position];
+                let old_raw = raw_values[position].as_deref();
+                let old_expire_ms = old_raw
+                    .and_then(decode_meta_header)
+                    .map_or(0, |header| header.expire_ms);
+                match &values[position] {
+                    BitopBatchValue::Missing => {
+                        self.delete_main_key_with_ttl_to_batch(&mut batch, key, old_expire_ms);
+                    }
+                    BitopBatchValue::String(value) => {
+                        self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw);
+                        self.write_string_to_batch_with_deferred_old_raw(
+                            &mut batch, key, value, 0, old_raw,
+                        );
+                    }
+                    BitopBatchValue::Other => {
+                        unreachable!("a successful BITOP never leaves a non-string destination")
+                    }
+                }
+            }
+            // Every logical source and destination is held by an exclusive key barrier for this
+            // whole simulation, so a second storage-level compare phase cannot detect a writer
+            // that the barrier has not already excluded.
+            self.write_batch_if_not_empty_async(&batch).await;
+            self.changes
+                .fetch_add(successful_commands, Ordering::Relaxed);
+            return replies;
+        }
     }
 
     pub fn string_read_bits(

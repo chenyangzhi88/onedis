@@ -661,4 +661,39 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
         0
     );
     assert!(!db.exists_readonly("empty-out-async"));
+
+    db.insert_string_bytes("batch-a".to_string(), vec![0b1010_0000], None);
+    db.insert_string_bytes("batch-b".to_string(), vec![0b1100_0000], None);
+    let replies = db
+        .string_bitop_batch_async(&[
+            ("OR", "batch-dst", vec!["batch-a", "batch-b"]),
+            ("XOR", "batch-next", vec!["batch-dst", "batch-a"]),
+            ("NOT", "batch-dst", vec!["batch-next"]),
+        ])
+        .await;
+    assert!(matches!(replies.as_slice(), [Ok(1), Ok(1), Ok(1)]));
+    assert_eq!(
+        db.get_string_bytes("batch-next").unwrap(),
+        Some(vec![0b0100_0000])
+    );
+    assert_eq!(
+        db.get_string_bytes("batch-dst").unwrap(),
+        Some(vec![0b1011_1111])
+    );
+
+    let db = Arc::new(db);
+    db.insert_string_bytes("hot-bitop".to_string(), vec![0], None);
+    let mut bitop_tasks = Vec::new();
+    for _ in 0..64 {
+        let db = Arc::clone(&db);
+        bitop_tasks.push(tokio::spawn(async move {
+            db.string_bitop_async("NOT", "hot-bitop", &["hot-bitop".to_string()])
+                .await
+                .unwrap()
+        }));
+    }
+    for task in bitop_tasks {
+        assert_eq!(task.await.unwrap(), 1);
+    }
+    assert_eq!(db.get_string_bytes("hot-bitop").unwrap(), Some(vec![0]));
 }

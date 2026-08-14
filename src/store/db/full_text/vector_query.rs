@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::db::VectorQuantization;
 pub(super) fn fulltext_vector_plan(ast: &FullTextQueryAst) -> Result<FullTextVectorPlan, Error> {
     match ast {
         FullTextQueryAst::VectorKnn {
@@ -94,7 +95,11 @@ pub(super) fn fulltext_vector_schema_field<'a>(
 }
 
 pub(super) fn fulltext_vector_index_name(index: &str, generation: u64, field: &str) -> String {
-    format!("__onedis_fulltext_vector__:{generation}:{index}:{field}")
+    format!(
+        "__onedis_fulltext_vector__:{generation}:{}:{index}:{}:{field}",
+        index.len(),
+        field.len()
+    )
 }
 
 pub(super) fn fulltext_vector_create_options(
@@ -107,6 +112,7 @@ pub(super) fn fulltext_vector_create_options(
         .ok_or_else(|| Error::msg("ERR missing VECTOR options"))?;
     Ok(VectorCreateOptions {
         dim: fulltext_vector_attr_usize(options, "DIM")?,
+        source_dim: None,
         distance: fulltext_vector_attr(options, "DISTANCE_METRIC")?,
         schema: Vec::new(),
         segment_max_docs: None,
@@ -114,6 +120,7 @@ pub(super) fn fulltext_vector_create_options(
         ef_construction: fulltext_vector_attr_optional_usize(options, "EF_CONSTRUCTION")?,
         ef_runtime: fulltext_vector_attr_optional_usize(options, "EF_RUNTIME")?,
         initial_cap: fulltext_vector_attr_optional_usize(options, "INITIAL_CAP")?,
+        quantization: VectorQuantization::F32,
     })
 }
 

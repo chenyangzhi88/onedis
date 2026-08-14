@@ -5,7 +5,10 @@ use onedis_server::{
     command::Command,
     frame::Frame,
     store::{
-        db::{Db, VectorCreateOptions, VectorFieldKind, VectorFieldSchema, VectorSearchOptions},
+        db::{
+            Db, VectorCreateOptions, VectorFieldKind, VectorFieldSchema, VectorQuantization,
+            VectorSearchOptions,
+        },
         kv_store::KvStore,
         ttl::{TtlConfig, TtlManager, VersionCounter},
     },
@@ -124,6 +127,7 @@ fn info_value(frame: &Frame, key: &str) -> Option<String> {
 fn vector_options(dim: usize) -> VectorCreateOptions {
     VectorCreateOptions {
         dim,
+        source_dim: None,
         distance: "COSINE".to_string(),
         schema: Vec::new(),
         segment_max_docs: None,
@@ -131,6 +135,7 @@ fn vector_options(dim: usize) -> VectorCreateOptions {
         ef_construction: None,
         ef_runtime: None,
         initial_cap: None,
+        quantization: VectorQuantization::F32,
     }
 }
 
@@ -654,24 +659,67 @@ fn redis_vector_set_advanced_options_cover_reduce_fp32_epsilon_and_attr_clear() 
         1,
     );
     assert_integer(apply(&db, &["VDIM", "advanced"]), 2);
-    for args in [
-        &[
-            "VADD",
-            "unsupported",
-            "REDUCE",
-            "2",
-            "VALUES",
-            "3",
-            "1",
-            "0",
-            "9",
-            "a",
-        ][..],
-        &["VADD", "unsupported", "VALUES", "2", "1", "0", "a", "Q8"][..],
-        &["VADD", "unsupported", "VALUES", "2", "1", "0", "a", "BIN"][..],
-    ] {
-        assert!(try_apply(&db, args).is_err());
-    }
+    assert_integer(
+        apply(
+            &db,
+            &[
+                "VADD", "reduced", "REDUCE", "2", "VALUES", "3", "1", "0", "9", "a",
+            ],
+        ),
+        1,
+    );
+    assert_integer(apply(&db, &["VDIM", "reduced"]), 2);
+    assert_eq!(
+        info_value(&apply(&db, &["VINFO", "reduced"]), "input_dim"),
+        Some("3".to_string())
+    );
+    assert!(matches!(
+        apply(&db, &["VEMB", "reduced", "a"]),
+        Frame::Array(values) if values.len() == 2
+    ));
+    assert_integer(
+        apply(&db, &["VADD", "reduced", "VALUES", "3", "0", "1", "8", "b"]),
+        1,
+    );
+    assert!(matches!(
+        apply(
+            &db,
+            &["VSIM", "reduced", "VALUES", "3", "1", "0", "9", "COUNT", "2"],
+        ),
+        Frame::Array(values) if values.len() == 2
+    ));
+    assert!(
+        try_apply(
+            &db,
+            &[
+                "VADD", "reduced", "REDUCE", "1", "VALUES", "3", "1", "0", "9", "c",
+            ],
+        )
+        .is_err()
+    );
+    assert_integer(
+        apply(&db, &["VADD", "q8", "VALUES", "2", "1", "0", "a", "Q8"]),
+        1,
+    );
+    assert_eq!(
+        info_value(&apply(&db, &["VINFO", "q8"]), "quantization"),
+        Some("Q8".to_string())
+    );
+    assert_integer(
+        apply(&db, &["VADD", "bin", "VALUES", "2", "1", "0", "a", "BIN"]),
+        1,
+    );
+    assert_eq!(
+        info_value(&apply(&db, &["VINFO", "bin"]), "quantization"),
+        Some("BIN".to_string())
+    );
+    assert!(
+        try_apply(
+            &db,
+            &["VADD", "advanced", "VALUES", "2", "1", "0", "c", "Q8"]
+        )
+        .is_err()
+    );
 
     let mut blob = Vec::new();
     blob.extend_from_slice(&0.0f32.to_le_bytes());
@@ -708,8 +756,14 @@ fn redis_vector_set_advanced_options_cover_reduce_fp32_epsilon_and_attr_clear() 
     assert!(
         matches!(exact_only, Frame::Array(values) if values.len() == 2 && bulk_string(&values[0]) == "a")
     );
-    assert!(try_apply(&db, &["VSIM", "advanced", "ELE", "a", "TRUTH"]).is_err());
-    assert!(try_apply(&db, &["VSIM", "advanced", "ELE", "a", "FILTER-EF", "10"]).is_err());
+    assert!(matches!(
+        apply(&db, &["VSIM", "advanced", "ELE", "a", "TRUTH"]),
+        Frame::Array(_)
+    ));
+    assert!(matches!(
+        apply(&db, &["VSIM", "advanced", "ELE", "a", "FILTER-EF", "10"]),
+        Frame::Array(_)
+    ));
 
     let duplicates = apply(&db, &["VRANDMEMBER", "advanced", "-3"]);
     assert!(matches!(duplicates, Frame::Array(values) if values.len() == 3));
@@ -808,7 +862,10 @@ fn vector_store_create_schema_search_drop_rebuild_and_compact_paths() {
                 filter: Some(r#".tenant == "t1" && .price >= 10"#.to_string()),
                 with_scores: true,
                 with_attrs: vec!["tenant".to_string(), "price".to_string()],
+                with_attrs_json: false,
                 ef: Some(8),
+                filter_ef: None,
+                exact: false,
                 offset: 0,
                 limit: Some(2),
             },
@@ -830,7 +887,10 @@ fn vector_store_create_schema_search_drop_rebuild_and_compact_paths() {
                 filter: None,
                 with_scores: false,
                 with_attrs: Vec::new(),
+                with_attrs_json: false,
                 ef: None,
+                filter_ef: None,
+                exact: false,
                 offset: 1,
                 limit: Some(1),
             },
@@ -897,7 +957,10 @@ async fn vector_store_async_create_add_search_rebuild_compact_and_drop_paths() {
                 filter: Some(r#".tenant == "t1""#.to_string()),
                 with_scores: true,
                 with_attrs: vec!["tenant".to_string()],
+                with_attrs_json: false,
                 ef: Some(4),
+                filter_ef: None,
+                exact: false,
                 offset: 0,
                 limit: None,
             },

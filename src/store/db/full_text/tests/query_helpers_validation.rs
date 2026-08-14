@@ -127,12 +127,16 @@ fn schema_vector_and_config_validation_cover_redissearch_edges() {
     validate_fulltext_config_value("NOGC", "yes").unwrap();
     validate_fulltext_config_value("CLUSTER_ENABLED", "0").unwrap();
     validate_fulltext_config_value("ON_TIMEOUT", "FAIL").unwrap();
+    validate_fulltext_config_value("CONSISTENCY", "EVENTUAL").unwrap();
+    validate_fulltext_config_value("MERGE_DELETE_RATIO", "0.25").unwrap();
     validate_fulltext_config_value("CLUSTER_ROUTING", "local").unwrap();
     assert!(validate_fulltext_config_value("DEFAULT_DIALECT", "9").is_err());
     assert!(validate_fulltext_config_value("MINPREFIX", "0").is_err());
     assert!(validate_fulltext_config_value("CLUSTER_SHARDS", "0").is_err());
     assert!(validate_fulltext_config_value("NOGC", "maybe").is_err());
     assert!(validate_fulltext_config_value("ON_TIMEOUT", "WAIT").is_err());
+    assert!(validate_fulltext_config_value("CONSISTENCY", "STALE").is_err());
+    assert!(validate_fulltext_config_value("MERGE_DELETE_RATIO", "0").is_err());
     assert!(validate_fulltext_config_value("CLUSTER_ROUTING", "remote").is_err());
     assert!(validate_fulltext_config_value("UNKNOWN", "1").is_err());
 }

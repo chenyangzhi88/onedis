@@ -6,7 +6,7 @@ impl VRem {
             ));
         }
         Ok(Self {
-            key: arg(&frame, 1, "ERR invalid vector key")?,
+            key: vector_key_arg(&frame, 1)?,
             element: arg(&frame, 2, "ERR invalid vector element")?,
         })
     }
@@ -77,7 +77,7 @@ impl VEmb {
             return Err(Error::msg("ERR syntax error"));
         }
         Ok(Self {
-            key: arg(&frame, 1, "ERR invalid vector key")?,
+            key: vector_key_arg(&frame, 1)?,
             element: arg(&frame, 2, "ERR invalid vector element")?,
             raw,
         })
@@ -108,7 +108,7 @@ impl VGetAttr {
             ));
         }
         Ok(Self {
-            key: arg(&frame, 1, "ERR invalid vector key")?,
+            key: vector_key_arg(&frame, 1)?,
             element: arg(&frame, 2, "ERR invalid vector element")?,
         })
     }
@@ -138,7 +138,7 @@ impl VSetAttr {
         }
         let attrs = arg(&frame, 3, "ERR invalid vector attrs")?;
         Ok(Self {
-            key: arg(&frame, 1, "ERR invalid vector key")?,
+            key: vector_key_arg(&frame, 1)?,
             element: arg(&frame, 2, "ERR invalid vector element")?,
             attrs_json: (!attrs.is_empty()).then_some(attrs),
         })
@@ -193,7 +193,7 @@ impl VRandMember {
             None
         };
         Ok(Self {
-            key: arg(&frame, 1, "ERR invalid vector key")?,
+            key: vector_key_arg(&frame, 1)?,
             count,
         })
     }
@@ -222,7 +222,7 @@ impl VLinks {
             return Err(Error::msg("ERR syntax error"));
         }
         Ok(Self {
-            key: arg(&frame, 1, "ERR invalid vector key")?,
+            key: vector_key_arg(&frame, 1)?,
             element: arg(&frame, 2, "ERR invalid vector element")?,
             with_scores,
         })

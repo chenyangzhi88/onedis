@@ -189,6 +189,19 @@ impl DatabaseManager {
             }
         });
 
+        let vector_worker_shutdown = fulltext_shutdown.clone();
+        let vector_worker_dbs = dbs.clone();
+        let vector_task = tokio::spawn(async move {
+            while !vector_worker_shutdown.load(Ordering::Acquire) {
+                for db in &vector_worker_dbs {
+                    if let Err(err) = db.vector_maintenance_tick_async().await {
+                        log::error!("vector maintenance failed db={}: {err}", db.db_index());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
         let version_scan_shutdown = Arc::new(AtomicBool::new(false));
         let version_scan_worker_shutdown = version_scan_shutdown.clone();
         let version_scan_worker_dbs = dbs.clone();
@@ -220,6 +233,7 @@ impl DatabaseManager {
             stream_notify,
             background_tasks: std::sync::Mutex::new(vec![
                 fulltext_task,
+                vector_task,
                 version_scan_task,
                 ttl_task,
             ]),
@@ -290,6 +304,10 @@ impl DatabaseManager {
         let mut stream_groups = 0;
         let mut stream_pending_entries = 0;
         let mut vector_indexes = 0;
+        let mut vector_segments = 0;
+        let mut vector_pending_segments = 0;
+        let mut vector_hnsw_nodes = 0;
+        let mut vector_hnsw_deleted_nodes = 0;
 
         let _ = writeln!(out, "# TYPE onedis_db_keys gauge");
         let _ = writeln!(out, "# TYPE onedis_db_expires gauge");
@@ -327,10 +345,20 @@ impl DatabaseManager {
 
             let vector = db.vector_observability_snapshot();
             vector_indexes += vector.indexes;
+            vector_segments += vector.segments;
+            vector_pending_segments += vector.pending_segments;
+            vector_hnsw_nodes += vector.hnsw_nodes;
+            vector_hnsw_deleted_nodes += vector.hnsw_deleted_nodes;
         }
         let metrics = global_metrics();
         metrics.set_stream_snapshot(stream_groups, stream_pending_entries);
-        metrics.set_vector_indexes(vector_indexes);
+        metrics.set_vector_snapshot(
+            vector_indexes,
+            vector_segments,
+            vector_pending_segments,
+            vector_hnsw_nodes,
+            vector_hnsw_deleted_nodes,
+        );
 
         let _ = writeln!(out, "# TYPE onedis_expired_keys_total counter");
         let _ = writeln!(out, "onedis_expired_keys_total {expired_keys}");

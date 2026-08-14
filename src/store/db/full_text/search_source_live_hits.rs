@@ -1,5 +1,73 @@
 use super::*;
 impl Db {
+    pub(super) fn fulltext_live_hits_from_source(
+        &self,
+        meta: &FullTextIndexMeta,
+        options: &FullTextSearchOptions,
+        candidates: Vec<FullTextSearchHit>,
+    ) -> Result<Vec<FullTextLiveHit>, Error> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let meta_keys = candidates
+            .iter()
+            .map(|candidate| self.mk(&candidate.key))
+            .collect::<Vec<_>>();
+        let raw_metas = self.store.multi_get_raw(&meta_keys);
+        let expected_type = match meta.source_type {
+            FullTextSourceType::Hash => TYPE_HASH,
+            FullTextSourceType::Json => TYPE_JSON,
+        };
+        let now = current_fulltext_millis();
+        let mut live = Vec::with_capacity(candidates.len());
+        for (candidate, raw_meta) in candidates.into_iter().zip(raw_metas) {
+            let Some(header) = raw_meta.as_deref().and_then(decode_meta_header) else {
+                continue;
+            };
+            if header.type_tag != expected_type {
+                continue;
+            }
+            if header.expire_ms != 0 && header.expire_ms <= now {
+                self.expire_if_needed(&candidate.key);
+                continue;
+            }
+            match meta.source_type {
+                FullTextSourceType::Hash => {
+                    let fields = self
+                        .hash_live_entries_raw(&candidate.key, header.version)
+                        .into_iter()
+                        .filter_map(|(field, value)| {
+                            Some((
+                                String::from_utf8(field).ok()?,
+                                String::from_utf8(value).ok()?,
+                            ))
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(hit) = self.fulltext_hash_live_hit(
+                        meta,
+                        options,
+                        candidate.key,
+                        candidate.score,
+                        fields,
+                    )? {
+                        live.push(hit);
+                    }
+                }
+                FullTextSourceType::Json => {
+                    if let Some(hit) = self.fulltext_live_hit_from_source(
+                        meta,
+                        options,
+                        candidate.key,
+                        candidate.score,
+                    )? {
+                        live.push(hit);
+                    }
+                }
+            }
+        }
+        Ok(live)
+    }
+
     pub(super) fn fulltext_exact_filter_hits(
         &self,
         meta: &FullTextIndexMeta,
@@ -76,25 +144,7 @@ impl Db {
         match meta.source_type {
             FullTextSourceType::Hash => {
                 let fields = self.hash_get_all(&key)?;
-                if fields.is_empty()
-                    || !fulltext_fields_match_filters(&fields, &options.filters)
-                    || !fulltext_fields_match_geo_filters(&fields, &options.geo_filters)?
-                {
-                    return Ok(None);
-                }
-                let sort_key = options
-                    .sort_by
-                    .as_ref()
-                    .and_then(|sort_by| fulltext_field_value(&fields, &sort_by.field));
-                let document_score = fulltext_document_score(meta, &fields);
-                let payload = fulltext_document_payload(meta, &fields);
-                Ok(Some(FullTextLiveHit {
-                    key,
-                    score: fulltext_effective_hit_score(score, document_score, options.scorer),
-                    fields,
-                    sort_key,
-                    payload,
-                }))
+                self.fulltext_hash_live_hit(meta, options, key, score, fields)
             }
             FullTextSourceType::Json => {
                 let Some(root) = self.fulltext_json_root(&key)? else {
@@ -124,6 +174,35 @@ impl Db {
                 }))
             }
         }
+    }
+
+    fn fulltext_hash_live_hit(
+        &self,
+        meta: &FullTextIndexMeta,
+        options: &FullTextSearchOptions,
+        key: String,
+        score: f32,
+        fields: Vec<(String, String)>,
+    ) -> Result<Option<FullTextLiveHit>, Error> {
+        if fields.is_empty()
+            || !fulltext_fields_match_filters(&fields, &options.filters)
+            || !fulltext_fields_match_geo_filters(&fields, &options.geo_filters)?
+        {
+            return Ok(None);
+        }
+        let sort_key = options
+            .sort_by
+            .as_ref()
+            .and_then(|sort_by| fulltext_field_value(&fields, &sort_by.field));
+        let document_score = fulltext_document_score(meta, &fields);
+        let payload = fulltext_document_payload(meta, &fields);
+        Ok(Some(FullTextLiveHit {
+            key,
+            score: fulltext_effective_hit_score(score, document_score, options.scorer),
+            fields,
+            sort_key,
+            payload,
+        }))
     }
 }
 

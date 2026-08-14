@@ -41,7 +41,9 @@ impl Db {
         }
         let mut batch = WriteBatch::new();
         for key in stale {
-            batch.delete(&key);
+            batch
+                .delete(&key)
+                .map_err(|error| Error::msg(error.to_string()))?;
         }
         let removed = batch.count() as u64;
         self.write_batch_if_not_empty(&batch);

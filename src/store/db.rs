@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex, OnceLock},
 };
@@ -40,8 +40,8 @@ pub use full_text::{
     FullTextSummarizeOptions, FullTextVectorAlgorithm, FullTextVectorOptions,
 };
 pub use vector::{
-    VectorCreateOptions, VectorFieldKind, VectorFieldSchema, VectorRuntimeRegistry,
-    VectorSearchOptions, VectorSearchResult,
+    VectorCreateOptions, VectorFieldKind, VectorFieldSchema, VectorQuantization,
+    VectorRuntimeRegistry, VectorSearchOptions, VectorSearchResult,
 };
 pub type VectorLinkLayers = Vec<Vec<(String, f32)>>;
 

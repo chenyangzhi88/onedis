@@ -24,7 +24,7 @@ pub(in crate::store::db) const VERSION_OWNER_NAMESPACE: [u8; 3] = [0xFF, b'o', 0
 pub(in crate::store::db) const INDEX_MARKER_VALUE: &[u8] = b"\x01";
 pub(in crate::store::db) const LIST_META_MAGIC: [u8; 4] = *b"ULST";
 pub(in crate::store::db) const STREAM_META_MAGIC: [u8; 4] = *b"USTR";
-pub(in crate::store::db) const JSON_INDEXED_MARKER: &str = "__onedis_json_indexed_v1__";
+pub(in crate::store::db) const JSON_INDEXED_MARKER: &str = "__onedis_json_indexed_v2__";
 pub(in crate::store::db) const WRONG_TYPE_ERROR: &str =
     "WRONGTYPE Operation against a key holding the wrong kind of value";
 pub(in crate::store::db) fn trace_lrange_sample() -> Option<u64> {
@@ -540,6 +540,25 @@ pub(in crate::store::db) fn zset_owner_from_raw_sub_key(
     Some(encoded_owner[..delimiter].to_vec())
 }
 
+pub(in crate::store::db) fn json_owner_from_raw_sub_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    raw_key: &[u8],
+) -> Option<Vec<u8>> {
+    let internal = layout.internal_prefix(db_index);
+    let rest = raw_key.strip_prefix(internal.as_slice())?;
+    let encoded_owner = rest.strip_prefix(&JSON_NODE_NAMESPACE)?;
+    if encoded_owner.first().copied() == Some(NUL_KEY_ENCODING_MARKER) {
+        let len = usize::try_from(u64::from_be_bytes(
+            encoded_owner.get(1..9)?.try_into().ok()?,
+        ))
+        .ok()?;
+        return Some(encoded_owner.get(9..9 + len)?.to_vec());
+    }
+    let delimiter = encoded_owner.iter().position(|byte| *byte == 0)?;
+    Some(encoded_owner[..delimiter].to_vec())
+}
+
 pub(in crate::store::db) fn collect_logical_mutations(
     layout: KeyEncodingLayout,
     db_index: u16,
@@ -560,6 +579,8 @@ pub(in crate::store::db) fn collect_logical_mutations(
                     keys.push(key);
                 } else if let Some(key) = zset_owner_from_raw_sub_key(layout, db_index, key) {
                     keys.push(key);
+                } else if let Some(key) = json_owner_from_raw_sub_key(layout, db_index, key) {
+                    keys.push(layout.main_key_bytes(db_index, &key));
                 }
             }
             common::types::write_batch::WriteType::RangeDelete => {

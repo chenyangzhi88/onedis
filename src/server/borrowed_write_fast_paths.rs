@@ -1,4 +1,53 @@
 impl Handler {
+    async fn handle_borrowed_zset_add_commands(
+        &self,
+        commands: &[BorrowedZsetAddCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = self
+            .session
+            .get_db()
+            .zset_add_many_merged_async(commands)
+            .await;
+        let mut out = Vec::with_capacity(replies.len() * 4);
+        for reply in replies {
+            match reply {
+                Ok(added) => append_integer(&mut out, added as i64),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
+    async fn handle_borrowed_bitop_commands(
+        &self,
+        commands: &[BorrowedBitopCommand<'_>],
+    ) -> Vec<u8> {
+        let replies = if let [(operation, destination, sources)] = commands {
+            let sources = sources
+                .iter()
+                .map(|source| (*source).to_string())
+                .collect::<Vec<_>>();
+            vec![self
+                .session
+                .get_db()
+                .string_bitop_async(operation, destination, &sources)
+                .await]
+        } else {
+            self.session
+                .get_db()
+                .string_bitop_batch_async(commands)
+                .await
+        };
+        let mut out = Vec::with_capacity(replies.len() * 4);
+        for reply in replies {
+            match reply {
+                Ok(len) => append_integer(&mut out, len as i64),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
+        }
+        out
+    }
+
     async fn handle_borrowed_key_delete_commands(
         &self,
         commands: &[BorrowedKeyDeleteCommand<'_>],
@@ -26,7 +75,7 @@ impl Handler {
         let replies = self
             .session
             .get_db()
-            .zset_increment_batch_async(commands)
+            .zset_increment_many_merged_async(commands)
             .await;
         let mut out = Vec::with_capacity(replies.len() * 16);
         for reply in replies {
@@ -100,7 +149,7 @@ impl Handler {
         let replies = self
             .session
             .get_db()
-            .list_pop_many_batch_async(&db_commands)
+            .list_pop_many_merged_async(&db_commands)
             .await;
         let mut out = Vec::with_capacity(replies.len() * 16);
         for ((_, _, count), reply) in commands.iter().zip(replies) {
@@ -184,7 +233,7 @@ impl Handler {
         let replies = self
             .session
             .get_db()
-            .stream_add_batch_async(commands)
+            .stream_add_many_merged_async(commands)
             .await;
         let mut out = Vec::with_capacity(replies.len() * 24);
         for reply in replies {
@@ -564,6 +613,38 @@ impl Handler {
         match self
             .command_executor
             .execute(async move { encode_borrowed_lrange_ops(db, ops).await })
+            .await
+        {
+            Ok(out) => out,
+            Err(error) => Frame::Error(error.to_string()).as_bytes(),
+        }
+    }
+
+    async fn handle_borrowed_collection_read_commands(
+        &self,
+        commands: Vec<Vec<&[u8]>>,
+    ) -> Vec<u8> {
+        let db = self.session.get_db().clone();
+        let ops = commands
+            .into_iter()
+            .map(|args| {
+                let Ok(key) = std::str::from_utf8(args[1]) else {
+                    return BorrowedCollectionReadOp::Error("ERR invalid UTF-8 key".to_string());
+                };
+                if args[0].eq_ignore_ascii_case(b"SMEMBERS") {
+                    BorrowedCollectionReadOp::SetMembers(key.to_string())
+                } else if args[0].eq_ignore_ascii_case(b"HGETALL") {
+                    BorrowedCollectionReadOp::HashGetAll(key.to_string())
+                } else if args[0].eq_ignore_ascii_case(b"HKEYS") {
+                    BorrowedCollectionReadOp::HashKeys(key.to_string())
+                } else {
+                    BorrowedCollectionReadOp::HashValues(key.to_string())
+                }
+            })
+            .collect();
+        match self
+            .command_executor
+            .execute(async move { encode_borrowed_collection_read_ops(db, ops).await })
             .await
         {
             Ok(out) => out,

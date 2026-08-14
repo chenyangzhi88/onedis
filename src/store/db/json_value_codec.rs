@@ -64,88 +64,6 @@ pub(in crate::store::db) fn parse_json_path(path: &str) -> Result<Vec<JsonPathTo
     Ok(tokens)
 }
 
-pub(in crate::store::db) fn json_get_path<'a>(
-    value: &'a JsonValue,
-    tokens: &[JsonPathToken],
-) -> Option<&'a JsonValue> {
-    let mut current = value;
-    for token in tokens {
-        current = match token {
-            JsonPathToken::Field(field) => current.as_object()?.get(field)?,
-            JsonPathToken::Index(index) => current.as_array()?.get(*index)?,
-        };
-    }
-    Some(current)
-}
-
-pub(in crate::store::db) fn json_get_parent_mut<'a>(
-    value: &'a mut JsonValue,
-    tokens: &'a [JsonPathToken],
-) -> Option<(&'a mut JsonValue, &'a JsonPathToken)> {
-    let (last, parent_tokens) = tokens.split_last()?;
-    let mut current = value;
-    for token in parent_tokens {
-        current = match token {
-            JsonPathToken::Field(field) => current.as_object_mut()?.get_mut(field)?,
-            JsonPathToken::Index(index) => current.as_array_mut()?.get_mut(*index)?,
-        };
-    }
-    Some((current, last))
-}
-
-pub(in crate::store::db) fn json_set_path(
-    value: &mut JsonValue,
-    tokens: &[JsonPathToken],
-    new_value: JsonValue,
-) -> Option<bool> {
-    if tokens.is_empty() {
-        *value = new_value;
-        return Some(true);
-    }
-
-    let (parent, last) = json_get_parent_mut(value, tokens)?;
-    match last {
-        JsonPathToken::Field(field) => {
-            let object = parent.as_object_mut()?;
-            let existed = object.contains_key(field);
-            object.insert(field.clone(), new_value);
-            Some(existed)
-        }
-        JsonPathToken::Index(index) => {
-            let array = parent.as_array_mut()?;
-            let target = array.get_mut(*index)?;
-            *target = new_value;
-            Some(true)
-        }
-    }
-}
-
-pub(in crate::store::db) fn json_del_path(value: &mut JsonValue, tokens: &[JsonPathToken]) -> bool {
-    if tokens.is_empty() {
-        return true;
-    }
-
-    let Some((parent, last)) = json_get_parent_mut(value, tokens) else {
-        return false;
-    };
-    match last {
-        JsonPathToken::Field(field) => parent
-            .as_object_mut()
-            .and_then(|object| object.remove(field))
-            .is_some(),
-        JsonPathToken::Index(index) => {
-            let Some(array) = parent.as_array_mut() else {
-                return false;
-            };
-            if *index >= array.len() {
-                return false;
-            }
-            array.remove(*index);
-            true
-        }
-    }
-}
-
 pub(in crate::store::db) fn json_type_name(value: &JsonValue) -> &'static str {
     match value {
         JsonValue::Null => "null",
@@ -187,6 +105,30 @@ pub(in crate::store::db) fn encode_json_path(tokens: &[JsonPathToken]) -> Vec<u8
     encoded
 }
 
+fn decode_json_path(mut encoded: &[u8]) -> Option<Vec<JsonPathToken>> {
+    let mut tokens = Vec::new();
+    while !encoded.is_empty() {
+        match *encoded.first()? {
+            b'f' => {
+                let len = usize::try_from(u32::from_be_bytes(encoded.get(1..5)?.try_into().ok()?))
+                    .ok()?;
+                let field = std::str::from_utf8(encoded.get(5..5 + len)?)
+                    .ok()?
+                    .to_string();
+                tokens.push(JsonPathToken::Field(field));
+                encoded = encoded.get(5 + len..)?;
+            }
+            b'i' => {
+                let id = u64::from_be_bytes(encoded.get(1..9)?.try_into().ok()?);
+                tokens.push(JsonPathToken::Index(usize::try_from(id).ok()?));
+                encoded = encoded.get(9..)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(tokens)
+}
+
 pub(in crate::store::db) fn json_node_key(
     db_index: u16,
     key: &str,
@@ -210,8 +152,10 @@ pub(in crate::store::db) fn decode_json_node(raw: &[u8]) -> Option<JsonNode> {
 
 pub(in crate::store::db) fn json_node_from_value(value: &JsonValue) -> Result<JsonNode, Error> {
     match value {
-        JsonValue::Object(object) => Ok(JsonNode::Object(object.keys().cloned().collect())),
-        JsonValue::Array(array) => Ok(JsonNode::Array(array.len())),
+        JsonValue::Object(_) => Ok(JsonNode::Object(0)),
+        JsonValue::Array(array) => Ok(JsonNode::Array(
+            (0..array.len()).map(|index| index as u64).collect(),
+        )),
         _ => serde_json::to_string(value)
             .map(JsonNode::Scalar)
             .map_err(|_| Error::msg("ERR failed to encode JSON value")),
@@ -236,7 +180,9 @@ pub(in crate::store::db) fn write_json_subtree_to_batch(
     value: &JsonValue,
 ) -> Result<(), Error> {
     let node_key = json_node_key(db_index, key, version, tokens);
-    batch.put(&node_key, &encode_json_node(&json_node_from_value(value)?));
+    batch
+        .put(&node_key, &encode_json_node(&json_node_from_value(value)?))
+        .map_err(|error| Error::msg(error.to_string()))?;
 
     match value {
         JsonValue::Object(object) => {
@@ -247,8 +193,8 @@ pub(in crate::store::db) fn write_json_subtree_to_batch(
             }
         }
         JsonValue::Array(array) => {
-            for (index, child) in array.iter().enumerate() {
-                tokens.push(JsonPathToken::Index(index));
+            for (element_id, child) in array.iter().enumerate() {
+                tokens.push(JsonPathToken::Index(element_id));
                 write_json_subtree_to_batch(batch, db_index, key, version, tokens, child)?;
                 tokens.pop();
             }
@@ -258,6 +204,125 @@ pub(in crate::store::db) fn write_json_subtree_to_batch(
     Ok(())
 }
 
+pub(in crate::store::db) async fn observe_and_delete_json_subtree_to_batch_async(
+    store: &KvStore,
+    batch: &mut WriteBatch,
+    db_index: u16,
+    key: &str,
+    version: u64,
+    tokens: &[JsonPathToken],
+) -> Result<Option<Vec<CompareCondition>>, Error> {
+    let start = json_node_key(db_index, key, version, tokens);
+    let prefix = if tokens.is_empty() {
+        json_node_prefix(db_index, key, version)
+    } else {
+        start
+    };
+    let entries = store.scan_prefix_raw_async(&prefix).await;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let keys = entries
+        .iter()
+        .map(|(node_key, _)| node_key.clone())
+        .collect::<Vec<_>>();
+    let observed = store.multi_get_raw_observed_async(&keys).await;
+    let mut conditions = Vec::with_capacity(entries.len());
+    for ((node_key, scanned_value), observation) in entries.into_iter().zip(observed) {
+        if observation.value().map(|value| value.as_ref()) != Some(scanned_value.as_slice()) {
+            return Ok(None);
+        }
+        batch
+            .delete(&node_key)
+            .map_err(|error| Error::msg(error.to_string()))?;
+        if node_key != prefix {
+            conditions.push(CompareCondition::from_observed(&observation));
+        }
+    }
+    Ok(Some(conditions))
+}
+
+pub(in crate::store::db) struct JsonNodeSnapshot {
+    nodes: HashMap<Vec<u8>, JsonNode>,
+    object_fields: HashMap<Vec<u8>, Vec<String>>,
+}
+
+impl JsonNodeSnapshot {
+    pub(in crate::store::db) fn from_entries(
+        root_prefix: &[u8],
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<Self, Error> {
+        let mut nodes = HashMap::with_capacity(entries.len());
+        let mut object_fields = HashMap::<Vec<u8>, Vec<String>>::new();
+        for (raw_key, raw_value) in entries {
+            let encoded_path = raw_key
+                .strip_prefix(root_prefix)
+                .ok_or_else(|| Error::msg("Type parsing error"))?
+                .to_vec();
+            let node =
+                decode_json_node(&raw_value).ok_or_else(|| Error::msg("Type parsing error"))?;
+            let tokens =
+                decode_json_path(&encoded_path).ok_or_else(|| Error::msg("Type parsing error"))?;
+            if let Some((JsonPathToken::Field(field), parent_tokens)) = tokens.split_last() {
+                object_fields
+                    .entry(encode_json_path(parent_tokens))
+                    .or_default()
+                    .push(field.clone());
+            }
+            nodes.insert(encoded_path, node);
+        }
+        for fields in object_fields.values_mut() {
+            fields.sort_unstable();
+            fields.dedup();
+        }
+        Ok(Self {
+            nodes,
+            object_fields,
+        })
+    }
+
+    pub(in crate::store::db) fn value_at(
+        &self,
+        tokens: &mut Vec<JsonPathToken>,
+    ) -> Result<Option<JsonValue>, Error> {
+        let encoded_path = encode_json_path(tokens);
+        let Some(node) = self.nodes.get(&encoded_path) else {
+            return Ok(None);
+        };
+        match node {
+            JsonNode::Scalar(raw) => json_scalar_to_value(raw).map(Some),
+            JsonNode::Object(_) => {
+                let mut object = serde_json::Map::new();
+                for field in self.object_fields.get(&encoded_path).into_iter().flatten() {
+                    tokens.push(JsonPathToken::Field(field.clone()));
+                    let child = self.value_at(tokens)?;
+                    tokens.pop();
+                    let Some(child) = child else {
+                        return Err(Error::msg("Type parsing error"));
+                    };
+                    object.insert(field.clone(), child);
+                }
+                Ok(Some(JsonValue::Object(object)))
+            }
+            JsonNode::Array(element_ids) => {
+                let mut array = Vec::with_capacity(element_ids.len());
+                for element_id in element_ids {
+                    let physical_id = usize::try_from(*element_id)
+                        .map_err(|_| Error::msg("Type parsing error"))?;
+                    tokens.push(JsonPathToken::Index(physical_id));
+                    let child = self.value_at(tokens)?;
+                    tokens.pop();
+                    let Some(child) = child else {
+                        return Err(Error::msg("Type parsing error"));
+                    };
+                    array.push(child);
+                }
+                Ok(Some(JsonValue::Array(array)))
+            }
+        }
+    }
+}
+
 pub(in crate::store::db) fn delete_json_subtree_to_batch(
     store: &KvStore,
     batch: &mut WriteBatch,
@@ -265,15 +330,20 @@ pub(in crate::store::db) fn delete_json_subtree_to_batch(
     key: &str,
     version: u64,
     tokens: &[JsonPathToken],
-) {
+) -> Result<(), Error> {
     let start = json_node_key(db_index, key, version, tokens);
-    batch.delete(&start);
+    batch
+        .delete(&start)
+        .map_err(|error| Error::msg(error.to_string()))?;
     let prefix = if tokens.is_empty() {
         json_node_prefix(db_index, key, version)
     } else {
         start
     };
     for (node_key, _) in store.scan_prefix_raw(&prefix) {
-        batch.delete(&node_key);
+        batch
+            .delete(&node_key)
+            .map_err(|error| Error::msg(error.to_string()))?;
     }
+    Ok(())
 }

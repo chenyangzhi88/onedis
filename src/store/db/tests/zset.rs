@@ -1,6 +1,52 @@
 use super::*;
 
 #[tokio::test]
+async fn ordered_plain_zadd_pipeline_batch_preserves_duplicate_and_existing_results() {
+    let db = test_db();
+    db.zset_add_async("add-batch", &[(1.0, "existing".to_string())])
+        .await
+        .unwrap();
+
+    let replies = db
+        .zset_add_batch_async(&[
+            (
+                "add-batch",
+                vec![(2.0, "existing"), (3.0, "new"), (4.0, "new")],
+            ),
+            ("add-batch", vec![(5.0, "later")]),
+            ("add-batch", vec![(6.0, "later"), (7.0, "third")]),
+            ("created-add-batch", vec![(8.0, "only")]),
+        ])
+        .await;
+    assert!(matches!(replies[0], Ok(1)));
+    assert!(matches!(replies[1], Ok(1)));
+    assert!(matches!(replies[2], Ok(1)));
+    assert!(matches!(replies[3], Ok(1)));
+    assert_eq!(
+        db.zset_score_async("add-batch", "existing").await.unwrap(),
+        Some(2.0)
+    );
+    assert_eq!(
+        db.zset_score_async("add-batch", "new").await.unwrap(),
+        Some(4.0)
+    );
+    assert_eq!(
+        db.zset_score_async("add-batch", "later").await.unwrap(),
+        Some(6.0)
+    );
+    assert_eq!(
+        db.zset_score_async("add-batch", "third").await.unwrap(),
+        Some(7.0)
+    );
+    assert_eq!(
+        db.zset_score_async("created-add-batch", "only")
+            .await
+            .unwrap(),
+        Some(8.0)
+    );
+}
+
+#[tokio::test]
 async fn ordered_zset_increment_pipeline_batch_preserves_command_results() {
     let db = test_db();
     db.zset_add_async(
@@ -41,6 +87,52 @@ async fn ordered_zset_increment_pipeline_batch_preserves_command_results() {
     assert_eq!(
         db.zset_score_async("created-batch", "new").await.unwrap(),
         Some(4.0)
+    );
+}
+
+#[tokio::test]
+async fn same_member_increment_pipeline_joins_merger_and_preserves_every_reply() {
+    let db = test_db();
+    let commands = (0..64)
+        .map(|_| ("merged-increment", 1.0, "member"))
+        .collect::<Vec<_>>();
+    let replies = db.zset_increment_many_merged_async(&commands).await;
+    assert_eq!(
+        replies.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
+        (1..=64).map(|score| score as f64).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        db.zset_score_async("merged-increment", "member")
+            .await
+            .unwrap(),
+        Some(64.0)
+    );
+}
+
+#[tokio::test]
+async fn same_member_plain_zadd_merger_preserves_order_and_noop_results() {
+    let db = test_db();
+    db.zset_add_async("merged-add", &[(0.0, "member".to_string())])
+        .await
+        .unwrap();
+    let commands = (1..=64)
+        .map(|score| ("merged-add", vec![(score as f64, "member")]))
+        .collect::<Vec<_>>();
+    let replies = db.zset_add_many_merged_async(&commands).await;
+    assert!(replies.into_iter().all(|reply| matches!(reply, Ok(0))));
+    assert_eq!(
+        db.zset_score_async("merged-add", "member").await.unwrap(),
+        Some(64.0)
+    );
+
+    let noops = (0..64)
+        .map(|_| ("merged-add", vec![(64.0, "member")]))
+        .collect::<Vec<_>>();
+    assert!(
+        db.zset_add_many_merged_async(&noops)
+            .await
+            .into_iter()
+            .all(|reply| matches!(reply, Ok(0)))
     );
 }
 
@@ -593,12 +685,18 @@ async fn concurrent_zset_writes_preserve_members_and_increments() {
             .unwrap();
             db.zset_increment_by_async("concurrent-score", "member", 1.0)
                 .await
-                .unwrap();
+                .unwrap()
         }));
     }
+    let mut increment_results = Vec::new();
     for task in tasks {
-        task.await.unwrap();
+        increment_results.push(task.await.unwrap());
     }
+    increment_results.sort_by(f64::total_cmp);
+    assert_eq!(
+        increment_results,
+        (1..=16).map(|score| score as f64).collect::<Vec<_>>()
+    );
 
     assert_eq!(db.zset_card_async("concurrent-members").await.unwrap(), 16);
     assert_eq!(
@@ -606,6 +704,17 @@ async fn concurrent_zset_writes_preserve_members_and_increments() {
             .await
             .unwrap(),
         Some(16.0)
+    );
+    let (_, version) = db
+        .zset_expire_ms_async("concurrent-score")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.zset_rank_entries_raw_async("concurrent-score", version)
+            .await
+            .len(),
+        1
     );
 }
 

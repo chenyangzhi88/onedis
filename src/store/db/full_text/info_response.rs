@@ -24,7 +24,18 @@ impl Db {
             {
                 snapshot.backfill_pending += 1;
             }
-            snapshot.outbox_pending += self.fulltext_pending_outbox_count(&index);
+            let published = self
+                .fulltext_runtimes
+                .get(self.db_index, &index)
+                .and_then(|runtime| {
+                    runtime
+                        .read()
+                        .ok()
+                        .map(|runtime| runtime.published_outbox_seq())
+                })
+                .unwrap_or(meta.last_indexed_outbox_seq);
+            snapshot.outbox_pending +=
+                self.fulltext_unpublished_outbox_count(&index, published) as u64;
         }
         snapshot
     }
@@ -32,8 +43,31 @@ impl Db {
     pub fn fulltext_info(&self, index: &str) -> Result<Frame, Error> {
         let index = self.resolve_fulltext_index(index)?;
         let meta = self.read_fulltext_meta_direct(&index)?;
-        let pending = self.fulltext_pending_outbox_count(&index) as usize;
-        let source_key_count = meta.indexed_docs as usize;
+        let runtime = self.fulltext_runtimes.get(self.db_index, &index);
+        let (published_seq, durable_seq, hot_dirty, segment_count, published_docs) = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.read().ok())
+            .map(|runtime| {
+                (
+                    runtime.published_outbox_seq(),
+                    runtime.durable_outbox_seq(),
+                    runtime.directory.has_hot_changes(),
+                    runtime.reader.searcher().segment_readers().len(),
+                    runtime.num_docs() as usize,
+                )
+            })
+            .unwrap_or((
+                meta.last_indexed_outbox_seq,
+                meta.last_indexed_outbox_seq,
+                false,
+                0,
+                meta.indexed_docs as usize,
+            ));
+        let outbox_seq = self
+            .fulltext_latest_outbox_seq(&index)
+            .unwrap_or(durable_seq);
+        let pending = self.fulltext_unpublished_outbox_count(&index, published_seq);
+        let source_key_count = published_docs;
         let indexed_field_count = meta
             .schema
             .iter()
@@ -156,8 +190,18 @@ impl Db {
                 .unwrap_or(Frame::Null),
             Frame::bulk_string("last_indexed_outbox_seq"),
             Frame::Integer(meta.last_indexed_outbox_seq as i64),
+            Frame::bulk_string("outbox_seq"),
+            Frame::Integer(outbox_seq as i64),
+            Frame::bulk_string("published_outbox_seq"),
+            Frame::Integer(published_seq as i64),
+            Frame::bulk_string("durable_outbox_seq"),
+            Frame::Integer(durable_seq as i64),
+            Frame::bulk_string("hot_checkpoint_pending"),
+            Frame::Integer(i64::from(hot_dirty)),
             Frame::bulk_string("pending_outbox"),
             Frame::Integer(pending as i64),
+            Frame::bulk_string("segment_count"),
+            Frame::Integer(segment_count as i64),
             Frame::bulk_string("refresh_interval_ms"),
             Frame::Integer(effective_policy.refresh_interval_ms as i64),
             Frame::bulk_string("refresh_max_docs"),

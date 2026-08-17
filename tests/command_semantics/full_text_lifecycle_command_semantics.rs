@@ -374,6 +374,46 @@ fn ft_search_removes_expired_hash_after_refresh() {
 }
 
 #[test]
+fn ft_search_excludes_expired_documents_before_total_and_pagination() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "idx",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "doc:",
+            "SCHEMA",
+            "title",
+            "TEXT",
+        ],
+    );
+    for key in ["doc:1", "doc:2", "doc:3"] {
+        apply(&db, &["HSET", key, "title", "same ranking"]);
+    }
+    wait_for_search_ids(
+        &db,
+        &["FT.SEARCH", "idx", "same", "LIMIT", "0", "3"],
+        &["doc:1", "doc:2", "doc:3"],
+    );
+
+    apply(&db, &["PEXPIRE", "doc:1", "1"]);
+    std::thread::sleep(Duration::from_millis(20));
+    let result = wait_for_search_ids(
+        &db,
+        &["FT.SEARCH", "idx", "same", "LIMIT", "0", "2"],
+        &["doc:2", "doc:3"],
+    );
+    let Frame::Array(items) = result else {
+        unreachable!();
+    };
+    assert!(matches!(items.first(), Some(Frame::Integer(2))));
+}
+
+#[test]
 fn ft_info_exposes_index_state_and_pending_work() {
     let (_dir, db) = make_db();
     apply(

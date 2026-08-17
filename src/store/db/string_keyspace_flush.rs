@@ -5,11 +5,11 @@ impl Db {
         let prefix = db_prefix(self.db_index);
         let mut batch = WriteBatch::new();
         if let Some(end) = db_prefix_exclusive_upper_bound(self.db_index) {
-            batch.delete_range(&prefix, &end);
+            (batch.delete_range(&prefix, &end)).expect("write batch append invariant violated");
         } else {
             for (key, _) in self.store.scan_prefix_raw(&prefix) {
                 if key.as_slice() != KEY_ENCODING_LAYOUT_META_KEY {
-                    batch.delete(&key);
+                    (batch.delete(&key)).expect("write batch append invariant violated");
                 }
             }
         }
@@ -30,11 +30,11 @@ impl Db {
         let prefix = db_prefix(self.db_index);
         let mut batch = WriteBatch::new();
         if let Some(end) = db_prefix_exclusive_upper_bound(self.db_index) {
-            batch.delete_range(&prefix, &end);
+            (batch.delete_range(&prefix, &end)).expect("write batch append invariant violated");
         } else {
             for (key, _) in self.store.scan_prefix_raw_async(&prefix).await {
                 if key.as_slice() != KEY_ENCODING_LAYOUT_META_KEY {
-                    batch.delete(&key);
+                    (batch.delete(&key)).expect("write batch append invariant violated");
                 }
             }
         }

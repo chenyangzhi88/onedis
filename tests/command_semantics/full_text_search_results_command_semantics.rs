@@ -325,6 +325,118 @@ fn ft_search_results_parses_execution_options_and_rejects_unsupported_ones() {
 }
 
 #[test]
+fn ft_search_fast_sort_keeps_missing_values_last_and_breaks_ties_by_key() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "sorted",
+            "PREFIX",
+            "1",
+            "sort:",
+            "SCHEMA",
+            "title",
+            "TEXT",
+            "price",
+            "NUMERIC",
+            "SORTABLE",
+        ],
+    );
+    for (key, price) in [
+        ("sort:z", Some("10")),
+        ("sort:a", Some("10")),
+        ("sort:m", None),
+    ] {
+        let mut args = vec!["HSET", key, "title", "item"];
+        if let Some(price) = price {
+            args.extend(["price", price]);
+        }
+        apply(&db, &args);
+    }
+
+    let asc = array(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "sorted",
+            "*",
+            "SORTBY",
+            "price",
+            "ASC",
+            "NOCONTENT",
+            "LIMIT",
+            "0",
+            "3",
+        ],
+    ));
+    assert_eq!(
+        asc[1..].iter().map(bulk_text).collect::<Vec<_>>(),
+        ["sort:a", "sort:z", "sort:m"]
+    );
+
+    let desc = array(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "sorted",
+            "*",
+            "SORTBY",
+            "price",
+            "DESC",
+            "NOCONTENT",
+            "LIMIT",
+            "0",
+            "3",
+        ],
+    ));
+    assert_eq!(
+        desc[1..].iter().map(bulk_text).collect::<Vec<_>>(),
+        ["sort:a", "sort:z", "sort:m"]
+    );
+}
+
+#[test]
+fn ft_search_executes_verbatim_and_nostopwords() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "analysis",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "analysis:",
+            "STOPWORDS",
+            "1",
+            "the",
+            "SCHEMA",
+            "title",
+            "TEXT",
+        ],
+    );
+    apply(&db, &["HSET", "analysis:1", "title", "the walking example"]);
+
+    let stemmed = array(apply(&db, &["FT.SEARCH", "analysis", "walk", "NOCONTENT"]));
+    assert_eq!(integer(&stemmed[0]), 1);
+    let verbatim = array(apply(
+        &db,
+        &["FT.SEARCH", "analysis", "walk", "VERBATIM", "NOCONTENT"],
+    ));
+    assert_eq!(integer(&verbatim[0]), 0);
+
+    let stopped = array(apply(&db, &["FT.SEARCH", "analysis", "the", "NOCONTENT"]));
+    assert_eq!(integer(&stopped[0]), 0);
+    let included = array(apply(
+        &db,
+        &["FT.SEARCH", "analysis", "the", "NOSTOPWORDS", "NOCONTENT"],
+    ));
+    assert_eq!(integer(&included[0]), 1);
+}
+
+#[test]
 fn ft_search_executes_field_weights_optional_terms_and_selected_scorers() {
     let (_dir, db) = make_db();
     apply(

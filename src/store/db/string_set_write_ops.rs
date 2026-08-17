@@ -157,7 +157,7 @@ impl Db {
             let mut batch = WriteBatch::new();
             self.prepare_string_overwrite_to_batch(&mut batch, &key, old_raw.as_deref());
             if expire_ms > 0 && now_ms() >= expire_ms {
-                batch.delete(&key_bytes);
+                (batch.delete(&key_bytes)).expect("write batch append invariant violated");
                 if let Some(header) = old_header
                     && header.expire_ms > 0
                 {

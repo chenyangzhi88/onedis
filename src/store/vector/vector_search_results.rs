@@ -21,6 +21,7 @@ fn runtime_doc_to_search_result(
     doc: &VectorDocRecord,
     meta: &VectorIndexMeta,
     query: &[f32],
+    query_norm_squared: f64,
     candidate_score: Option<f32>,
     return_attrs: &[String],
     return_attrs_json: bool,
@@ -40,7 +41,14 @@ fn runtime_doc_to_search_result(
         id: id.to_string(),
         score: candidate_score
             .map(Ok)
-            .unwrap_or_else(|| distance_score(meta.distance, query, &doc.vector))?,
+            .unwrap_or_else(|| {
+                distance_score_prepared(
+                    meta.distance,
+                    query,
+                    query_norm_squared,
+                    &doc.vector,
+                )
+            })?,
         attrs: attrs
             .as_ref()
             .map(|attrs| collect_return_attrs(attrs, return_attrs))
@@ -50,6 +58,15 @@ fn runtime_doc_to_search_result(
 }
 
 fn distance_score(distance: VectorDistance, lhs: &[f32], rhs: &[f32]) -> Result<f32, Error> {
+    distance_score_prepared(distance, lhs, vector_norm_squared(lhs), rhs)
+}
+
+fn distance_score_prepared(
+    distance: VectorDistance,
+    lhs: &[f32],
+    lhs_norm_squared: f64,
+    rhs: &[f32],
+) -> Result<f32, Error> {
     let score = match distance {
         VectorDistance::L2 => lhs
             .iter()
@@ -70,11 +87,7 @@ fn distance_score(distance: VectorDistance, lhs: &[f32], rhs: &[f32]) -> Result<
                 .zip(rhs)
                 .map(|(a, b)| f64::from(*a) * f64::from(*b))
                 .sum::<f64>();
-            let lhs_norm = lhs
-                .iter()
-                .map(|value| f64::from(*value).powi(2))
-                .sum::<f64>()
-                .sqrt();
+            let lhs_norm = lhs_norm_squared.sqrt();
             let rhs_norm = rhs
                 .iter()
                 .map(|value| f64::from(*value).powi(2))
@@ -207,26 +220,39 @@ fn reduce_vector_candidates(
     candidates: Vec<VectorCandidate>,
     limit: usize,
 ) -> Result<Vec<VectorCandidate>, Error> {
-    let mut latest_by_id = HashMap::<String, VectorCandidate>::new();
+    let mut latest_by_id = HashMap::<String, (u64, f32)>::new();
     for candidate in candidates {
-        match latest_by_id.entry(candidate.id.clone()) {
-            std::collections::hash_map::Entry::Occupied(mut entry)
-                if candidate.doc_version > entry.get().doc_version =>
-            {
-                entry.insert(candidate);
+        match latest_by_id.entry(candidate.id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let current = entry.get_mut();
+                if candidate.doc_version > current.0
+                    || (candidate.doc_version == current.0 && candidate.distance < current.1)
+                {
+                    *current = (candidate.doc_version, candidate.distance);
+                }
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(candidate);
+                entry.insert((candidate.doc_version, candidate.distance));
             }
-            _ => {}
         }
     }
-    let mut candidates = latest_by_id.into_values().collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
+    let mut candidates = latest_by_id
+        .into_iter()
+        .map(|(id, (doc_version, distance))| VectorCandidate {
+            id,
+            doc_version,
+            distance,
+        })
+        .collect::<Vec<_>>();
+    let compare = |left: &VectorCandidate, right: &VectorCandidate| {
         left.distance
             .total_cmp(&right.distance)
             .then_with(|| left.id.cmp(&right.id))
-    });
-    candidates.truncate(limit);
+    };
+    if candidates.len() > limit {
+        candidates.select_nth_unstable_by(limit, compare);
+        candidates.truncate(limit);
+    }
+    candidates.sort_by(compare);
     Ok(candidates)
 }

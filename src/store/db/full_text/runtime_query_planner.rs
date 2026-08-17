@@ -1,4 +1,27 @@
 use super::*;
+
+pub(super) struct FullTextLevenshteinDfa(DFA);
+
+impl Automaton for FullTextLevenshteinDfa {
+    type State = u32;
+
+    fn start(&self) -> Self::State {
+        self.0.initial_state()
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        matches!(self.0.distance(*state), LevenshteinDistance::Exact(_))
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        *state != SINK_STATE
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        self.0.transition(*state, byte)
+    }
+}
+
 impl FullTextRuntime {
     pub(super) fn build_query(
         &self,
@@ -48,22 +71,13 @@ impl FullTextRuntime {
                 lat,
                 radius,
                 unit,
-            } => {
-                let _ = (field, lon, lat, radius, unit);
-                Err(Error::msg(
-                    "ERR fulltext geo query execution is not implemented",
-                ))
-            }
+            } => self.plan_geo_query(field, *lon, *lat, *radius, unit),
             FullTextQueryAst::GeoShape {
                 field,
                 relation,
                 shape,
-            } => {
-                let _ = (field, relation, shape);
-                Err(Error::msg(
-                    "ERR fulltext geoshape query execution is not implemented",
-                ))
-            }
+            } => self.plan_geoshape_query(field, relation, shape),
+            FullTextQueryAst::Missing { field } => self.plan_missing_query(field),
             FullTextQueryAst::VectorKnn {
                 filter,
                 k,
@@ -108,8 +122,24 @@ impl FullTextRuntime {
                 (Occur::Must, Box::new(AllQuery) as Box<dyn Query>),
                 (Occur::Should, self.plan_query(child, field_scope, options)?),
             ]))),
-            FullTextQueryAst::Attributed { expr, weight } => {
-                let query = self.plan_query(expr, field_scope, options)?;
+            FullTextQueryAst::Attributed {
+                expr,
+                weight,
+                slop,
+                inorder,
+                phonetic,
+            } => {
+                let mut attributed_options = options.clone();
+                if let Some(slop) = slop {
+                    attributed_options.slop = Some(*slop);
+                }
+                if let Some(inorder) = inorder {
+                    attributed_options.inorder = *inorder;
+                }
+                if let Some(phonetic) = phonetic {
+                    attributed_options.phonetic = Some(*phonetic);
+                }
+                let query = self.plan_query(expr, field_scope, &attributed_options)?;
                 if let Some(weight) = weight {
                     Ok(Box::new(BoostQuery::new(query, *weight)))
                 } else {
@@ -203,18 +233,27 @@ impl FullTextRuntime {
                     if variants.len() > self.max_expansions {
                         return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
                     }
-                    let query_field = self.text_variant_field(field);
+                    let query_fields = if options.verbatim {
+                        vec![field]
+                    } else if options.no_stopwords {
+                        vec![self.text_variant_field(field), field]
+                    } else {
+                        vec![self.text_variant_field(field)]
+                    };
                     let query = Box::new(BooleanQuery::new(
                         variants
                             .into_iter()
-                            .map(|variant| {
-                                (
-                                    Occur::Should,
-                                    Box::new(TermQuery::new(
-                                        Term::from_field_text(query_field, &variant),
-                                        IndexRecordOption::Basic,
-                                    )) as Box<dyn Query>,
-                                )
+                            .flat_map(|variant| {
+                                query_fields.iter().copied().map(move |query_field| {
+                                    (
+                                        Occur::Should,
+                                        Box::new(TermQuery::new(
+                                            Term::from_field_text(query_field, &variant),
+                                            IndexRecordOption::Basic,
+                                        ))
+                                            as Box<dyn Query>,
+                                    )
+                                })
                             })
                             .collect(),
                     )) as Box<dyn Query>;
@@ -239,6 +278,9 @@ impl FullTextRuntime {
             ));
         }
         let fields = self.text_fields_for_scope(field_scope)?;
+        if phrase.is_empty() {
+            return self.plan_empty_query(field_scope, FullTextFieldKind::Text);
+        }
         self.or_field_queries(
             fields.into_iter().map(|field| {
                 let settings =
@@ -256,6 +298,21 @@ impl FullTextRuntime {
                         IndexRecordOption::WithFreqsAndPositions,
                     )) as Box<dyn Query>;
                     return Ok(self.boost_text_field(query, field));
+                }
+                if options.slop.unwrap_or(0) > 0 && !options.inorder {
+                    let clauses = tokens
+                        .into_iter()
+                        .map(|token| {
+                            (
+                                Occur::Must,
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(field, &token),
+                                    IndexRecordOption::WithFreqsAndPositions,
+                                )) as Box<dyn Query>,
+                            )
+                        })
+                        .collect();
+                    return Ok(self.boost_text_field(Box::new(BooleanQuery::new(clauses)), field));
                 }
                 let terms = tokens
                     .into_iter()
@@ -286,15 +343,13 @@ impl FullTextRuntime {
         if fields.is_empty() {
             return Err(Error::msg("ERR invalid text field"));
         }
-        let match_regex = regex::Regex::new(&format!("^(?:{regex})$"))
-            .map_err(|_| Error::msg("ERR invalid wildcard query"))?;
+        let automaton =
+            FstRegex::new(&regex).map_err(|_| Error::msg("ERR invalid wildcard query"))?;
         let variant_fields = fields
             .iter()
             .map(|field| self.text_variant_field(*field))
             .collect::<Vec<_>>();
-        self.validate_term_expansions(&variant_fields, self.max_expansions, |term| {
-            match_regex.is_match(term)
-        })?;
+        self.validate_automaton_expansions(&variant_fields, self.max_expansions, &automaton)?;
         self.or_field_queries(
             fields.into_iter().map(|field| {
                 let query_field = self.text_variant_field(field);
@@ -327,10 +382,10 @@ impl FullTextRuntime {
             .iter()
             .map(|field| self.text_variant_field(*field))
             .collect::<Vec<_>>();
-        self.validate_term_expansions(
+        self.validate_prefix_term_expansions(
             &variant_fields,
             self.max_prefix_expansions as usize,
-            |candidate| candidate.starts_with(&prefix),
+            &prefix,
         )?;
         self.or_field_queries(
             fields.into_iter().map(|field| {
@@ -359,13 +414,14 @@ impl FullTextRuntime {
             return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
         }
         let normalized = term.to_lowercase();
+        let automaton = FullTextLevenshteinDfa(
+            LevenshteinAutomatonBuilder::new(1, true).build_dfa(&normalized),
+        );
         let variant_fields = fields
             .iter()
             .map(|field| self.text_variant_field(*field))
             .collect::<Vec<_>>();
-        self.validate_term_expansions(&variant_fields, self.max_expansions, |candidate| {
-            fulltext_edit_distance(candidate, &normalized) <= 1
-        })?;
+        self.validate_automaton_expansions(&variant_fields, self.max_expansions, &automaton)?;
         self.or_field_queries(
             fields.into_iter().map(|field| {
                 let query_field = self.text_variant_field(field);
@@ -396,6 +452,10 @@ impl FullTextRuntime {
                 separator: ',',
                 case_sensitive: false,
             });
+        if values.len() == 1 && values[0].is_empty() {
+            let fields = [field.to_string()];
+            return self.plan_empty_query(Some(&fields), FullTextFieldKind::Tag);
+        }
         if values.len() > self.max_expansions {
             return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
         }
@@ -408,6 +468,56 @@ impl FullTextRuntime {
                 };
                 Ok(Box::new(TermQuery::new(
                     Term::from_field_text(*tantivy_field, &value),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>)
+            }),
+            FullTextScorer::Bm25Std,
+        )
+    }
+
+    pub(super) fn plan_missing_query(&self, field: &str) -> Result<Box<dyn Query>, Error> {
+        let marker = self
+            .presence_fields
+            .get(field)
+            .ok_or_else(|| Error::msg("ERR field does not have INDEXMISSING"))?;
+        Ok(Box::new(BooleanQuery::new(vec![
+            (Occur::Must, Box::new(AllQuery) as Box<dyn Query>),
+            (
+                Occur::MustNot,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(*marker, 1),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+        ])))
+    }
+
+    pub(super) fn plan_empty_query(
+        &self,
+        field_scope: Option<&[String]>,
+        expected_kind: FullTextFieldKind,
+    ) -> Result<Box<dyn Query>, Error> {
+        let names = match field_scope {
+            Some(fields) => fields.to_vec(),
+            None => self
+                .query_fields
+                .iter()
+                .filter_map(|(name, (_, kind))| (*kind == expected_kind).then_some(name.clone()))
+                .collect(),
+        };
+        let mut markers = names
+            .into_iter()
+            .filter_map(|name| self.empty_fields.get(&name).copied())
+            .collect::<Vec<_>>();
+        markers.sort_by_key(|field| field.field_id());
+        markers.dedup();
+        if markers.is_empty() {
+            return Err(Error::msg("ERR field does not have INDEXEMPTY"));
+        }
+        self.or_field_queries(
+            markers.into_iter().map(|marker| {
+                Ok(Box::new(TermQuery::new(
+                    Term::from_field_u64(marker, 1),
                     IndexRecordOption::Basic,
                 )) as Box<dyn Query>)
             }),
@@ -429,6 +539,104 @@ impl FullTextRuntime {
         Ok(Box::new(RangeQuery::new(lower, upper)))
     }
 
+    pub(super) fn plan_geo_query(
+        &self,
+        field: &str,
+        lon: f64,
+        lat: f64,
+        radius: f64,
+        unit: &str,
+    ) -> Result<Box<dyn Query>, Error> {
+        let (lon_field, lat_field) = self
+            .geo_fields
+            .get(field)
+            .ok_or_else(|| Error::msg("ERR invalid geo field"))?;
+        let radius_meters = radius * fulltext_geo_unit_meters(unit)?;
+        let lat_delta = (radius_meters / 6_371_000.0).to_degrees();
+        let lon_delta = if lat.abs() + lat_delta >= 90.0 {
+            180.0
+        } else {
+            (radius_meters / (6_371_000.0 * lat.to_radians().cos().abs().max(1e-12)))
+                .to_degrees()
+                .min(180.0)
+        };
+        let lat_query = fulltext_f64_range_query(
+            *lat_field,
+            (lat - lat_delta).max(-90.0),
+            (lat + lat_delta).min(90.0),
+        );
+        let lon_query: Box<dyn Query> = if lon_delta >= 180.0 {
+            fulltext_f64_range_query(*lon_field, -180.0, 180.0)
+        } else {
+            let min = lon - lon_delta;
+            let max = lon + lon_delta;
+            if min < -180.0 {
+                Box::new(BooleanQuery::new(vec![
+                    (
+                        Occur::Should,
+                        fulltext_f64_range_query(*lon_field, min + 360.0, 180.0),
+                    ),
+                    (
+                        Occur::Should,
+                        fulltext_f64_range_query(*lon_field, -180.0, max),
+                    ),
+                ]))
+            } else if max > 180.0 {
+                Box::new(BooleanQuery::new(vec![
+                    (
+                        Occur::Should,
+                        fulltext_f64_range_query(*lon_field, min, 180.0),
+                    ),
+                    (
+                        Occur::Should,
+                        fulltext_f64_range_query(*lon_field, -180.0, max - 360.0),
+                    ),
+                ]))
+            } else {
+                fulltext_f64_range_query(*lon_field, min, max)
+            }
+        };
+        Ok(Box::new(BooleanQuery::new(vec![
+            (Occur::Must, lon_query),
+            (Occur::Must, lat_query),
+        ])))
+    }
+
+    pub(super) fn plan_geoshape_query(
+        &self,
+        field: &str,
+        relation: &str,
+        shape: &str,
+    ) -> Result<Box<dyn Query>, Error> {
+        let fields = self
+            .geoshape_fields
+            .get(field)
+            .ok_or_else(|| Error::msg("ERR invalid geoshape field"))?;
+        let bounds = fulltext_geometry_bounds(&parse_fulltext_wkt(shape)?)
+            .ok_or_else(|| Error::msg("ERR invalid WKT"))?;
+        let queries = match relation.to_ascii_uppercase().as_str() {
+            "WITHIN" => vec![
+                fulltext_f64_lower_query(fields[0], bounds.0),
+                fulltext_f64_upper_query(fields[1], bounds.1),
+                fulltext_f64_lower_query(fields[2], bounds.2),
+                fulltext_f64_upper_query(fields[3], bounds.3),
+            ],
+            "CONTAINS" => vec![
+                fulltext_f64_upper_query(fields[0], bounds.0),
+                fulltext_f64_lower_query(fields[1], bounds.1),
+                fulltext_f64_upper_query(fields[2], bounds.2),
+                fulltext_f64_lower_query(fields[3], bounds.3),
+            ],
+            _ => return Err(Error::msg("ERR invalid GEOSHAPE relation")),
+        };
+        Ok(Box::new(BooleanQuery::new(
+            queries
+                .into_iter()
+                .map(|query| (Occur::Must, query))
+                .collect(),
+        )))
+    }
+
     pub(super) fn text_fields_for_scope(
         &self,
         field_scope: Option<&[String]>,
@@ -446,27 +654,58 @@ impl FullTextRuntime {
         }
     }
 
-    pub(super) fn validate_term_expansions(
+    pub(super) fn validate_prefix_term_expansions(
         &self,
         fields: &[Field],
         limit: usize,
-        mut matches: impl FnMut(&str) -> bool,
+        prefix: &str,
     ) -> Result<(), Error> {
         let searcher = self.reader.searcher();
         let mut matched = HashSet::new();
         for segment in searcher.segment_readers() {
             for field in fields {
                 let inverted = segment.inverted_index(*field)?;
-                let mut stream = inverted.terms().stream()?;
+                let mut stream = inverted
+                    .terms()
+                    .range()
+                    .ge(prefix.as_bytes())
+                    .into_stream()?;
                 while stream.advance() {
                     let Ok(term) = std::str::from_utf8(stream.key()) else {
                         continue;
                     };
-                    if matches(term) {
-                        matched.insert(term.to_string());
-                        if matched.len() > limit {
-                            return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
-                        }
+                    if !term.starts_with(prefix) {
+                        break;
+                    }
+                    matched.insert(term.to_string());
+                    if matched.len() > limit {
+                        return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_automaton_expansions<A: Automaton>(
+        &self,
+        fields: &[Field],
+        limit: usize,
+        automaton: &A,
+    ) -> Result<(), Error>
+    where
+        A::State: Clone,
+    {
+        let searcher = self.reader.searcher();
+        let mut matched = HashSet::new();
+        for segment in searcher.segment_readers() {
+            for field in fields {
+                let inverted = segment.inverted_index(*field)?;
+                let mut stream = inverted.terms().search(automaton).into_stream()?;
+                while stream.advance() {
+                    matched.insert(stream.key().to_vec());
+                    if matched.len() > limit {
+                        return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
                     }
                 }
             }
@@ -540,6 +779,16 @@ impl FullTextRuntime {
             });
         if let Some(language) = &options.language {
             settings.language.clone_from(language);
+        }
+        if let Some(phonetic) = options.phonetic {
+            settings.phonetic = phonetic;
+        }
+        if options.verbatim {
+            settings.nostem = true;
+            settings.phonetic = false;
+        }
+        if options.no_stopwords {
+            settings.stopwords.clear();
         }
         settings
     }

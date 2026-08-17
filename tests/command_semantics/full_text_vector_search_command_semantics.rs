@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use onedis_server::{
     command::Command,
@@ -46,6 +46,15 @@ fn apply(db: &Db, args: &[&str]) -> Frame {
         command(args).expect("failed to parse command"),
     )
     .expect("command failed")
+}
+
+fn apply_frames(db: &Db, args: Vec<Frame>) -> Frame {
+    let command = Command::parse_from_frame(Frame::Array(args)).expect("failed to parse command");
+    onedis_server::command_dispatch::handle_command(db, command).expect("command failed")
+}
+
+fn bulk(value: impl Into<Vec<u8>>) -> Frame {
+    Frame::BulkString(value.into())
 }
 
 fn array(frame: Frame) -> Vec<Frame> {
@@ -256,6 +265,30 @@ fn ft_search_vector_hybrid_filter_and_range_are_ranked_by_vector() {
 }
 
 #[test]
+fn ft_search_vector_overfetches_past_expired_nearest_documents() {
+    let (_dir, db) = seed_vector_index();
+    apply(&db, &["PEXPIRE", "doc:1", "1"]);
+    std::thread::sleep(Duration::from_millis(20));
+
+    let ids = search_ids(apply(
+        &db,
+        &[
+            "FT.SEARCH",
+            "idx",
+            "*=>[KNN 1 @embedding $vec]",
+            "PARAMS",
+            "2",
+            "vec",
+            "[1,0]",
+            "NOCONTENT",
+            "DIALECT",
+            "2",
+        ],
+    ));
+    assert_eq!(ids, vec!["doc:3"]);
+}
+
+#[test]
 fn ft_search_vector_clause_can_be_nested_in_conjunctions() {
     let (_dir, db) = seed_vector_index();
 
@@ -345,6 +378,148 @@ fn ft_hybrid_vector_reuses_search_vector_execution() {
     assert!(field_value(&result[3], "text_score").is_some());
     assert!(field_value(&result[3], "distance").is_some());
     assert!(field_value(&result[3], "hybrid_score").is_some());
+}
+
+#[test]
+fn ft_hybrid_collects_only_the_requested_combiner_window() {
+    let (_dir, db) = seed_vector_index();
+    apply(&db, &["FT.CONFIG", "SET", "MAXAGGREGATERESULTS", "2"]);
+
+    let result = array(apply(
+        &db,
+        &[
+            "FT.HYBRID",
+            "idx",
+            "SEARCH",
+            "red|blue",
+            "VSIM",
+            "@embedding",
+            "$vec",
+            "KNN",
+            "2",
+            "K",
+            "2",
+            "COMBINE",
+            "RRF",
+            "4",
+            "WINDOW",
+            "2",
+            "CONSTANT",
+            "10",
+            "PARAMS",
+            "2",
+            "vec",
+            "[1,0]",
+            "DIALECT",
+            "2",
+        ],
+    ));
+    assert!(matches!(result.first(), Some(Frame::Integer(2))));
+    assert_eq!(result.len(), 5);
+}
+
+#[test]
+fn ft_search_vector_decodes_all_declared_binary_element_types() {
+    let (_dir, db) = make_db();
+    let fields = [
+        ("v_f32", "FLOAT32"),
+        ("v_f64", "FLOAT64"),
+        ("v_bf16", "BFLOAT16"),
+        ("v_f16", "FLOAT16"),
+        ("v_i8", "INT8"),
+        ("v_u8", "UINT8"),
+    ];
+    let mut create = vec![
+        bulk(b"FT.CREATE".to_vec()),
+        bulk(b"typed".to_vec()),
+        bulk(b"ON".to_vec()),
+        bulk(b"HASH".to_vec()),
+        bulk(b"PREFIX".to_vec()),
+        bulk(b"1".to_vec()),
+        bulk(b"typed:".to_vec()),
+        bulk(b"SCHEMA".to_vec()),
+        bulk(b"title".to_vec()),
+        bulk(b"TEXT".to_vec()),
+    ];
+    for (field, element_type) in fields {
+        create.extend([
+            bulk(field.as_bytes().to_vec()),
+            bulk(b"VECTOR".to_vec()),
+            bulk(b"HNSW".to_vec()),
+            bulk(b"6".to_vec()),
+            bulk(b"TYPE".to_vec()),
+            bulk(element_type.as_bytes().to_vec()),
+            bulk(b"DIM".to_vec()),
+            bulk(b"2".to_vec()),
+            bulk(b"DISTANCE_METRIC".to_vec()),
+            bulk(b"L2".to_vec()),
+        ]);
+    }
+    assert!(matches!(apply_frames(&db, create), Frame::Ok));
+
+    let typed_vectors = [
+        (
+            "v_f32",
+            [1.0_f32, 0.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "v_f64",
+            [1.0_f64, 0.0]
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "v_bf16",
+            [half::bf16::from_f32(1.0), half::bf16::from_f32(0.0)]
+                .into_iter()
+                .flat_map(|value| value.to_bits().to_le_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "v_f16",
+            [half::f16::from_f32(1.0), half::f16::from_f32(0.0)]
+                .into_iter()
+                .flat_map(|value| value.to_bits().to_le_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        ("v_i8", vec![1_i8 as u8, 0_i8 as u8]),
+        ("v_u8", vec![1_u8, 0_u8]),
+    ];
+    let mut hset = vec![
+        bulk(b"HSET".to_vec()),
+        bulk(b"typed:1".to_vec()),
+        bulk(b"title".to_vec()),
+        bulk(b"typed vector".to_vec()),
+    ];
+    for (field, vector) in &typed_vectors {
+        hset.push(bulk(field.as_bytes().to_vec()));
+        hset.push(bulk(vector.clone()));
+    }
+    assert!(matches!(apply_frames(&db, hset), Frame::Integer(7)));
+
+    for (field, vector) in typed_vectors {
+        let query = format!("*=>[KNN 1 @{field} $vec]");
+        let result = apply_frames(
+            &db,
+            vec![
+                bulk(b"FT.SEARCH".to_vec()),
+                bulk(b"typed".to_vec()),
+                bulk(query.into_bytes()),
+                bulk(b"PARAMS".to_vec()),
+                bulk(b"2".to_vec()),
+                bulk(b"vec".to_vec()),
+                bulk(vector),
+                bulk(b"NOCONTENT".to_vec()),
+                bulk(b"DIALECT".to_vec()),
+                bulk(b"2".to_vec()),
+            ],
+        );
+        assert_eq!(search_ids(result), vec!["typed:1"], "field {field}");
+    }
 }
 
 #[test]

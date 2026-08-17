@@ -70,8 +70,8 @@ fn stale_hash_field_expiry_cleanup_cannot_delete_new_value() {
     db.hash_set("hash", "field", "new").unwrap();
 
     let mut stale_cleanup = WriteBatch::new();
-    stale_cleanup.delete(&field_key);
-    stale_cleanup.delete(&expire_key);
+    (stale_cleanup.delete(&field_key)).expect("write batch append invariant violated");
+    (stale_cleanup.delete(&expire_key)).expect("write batch append invariant violated");
     assert!(
         !db.compare_and_write_batch_if_not_empty(
             &[

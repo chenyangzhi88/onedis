@@ -91,7 +91,8 @@ impl Db {
                     .value()
                     .map_or(0, |raw| decode_expire_ms(raw));
                 let final_expire_ms = decode_expire_ms(raw);
-                batch.put(&raw_keys[position], raw);
+                (batch.put(&raw_keys[position], raw))
+                    .expect("write batch append invariant violated");
                 if initial_expire_ms > 0 && initial_expire_ms != final_expire_ms {
                     self.ttl_manager.remove_known_to_batch(
                         &mut batch,
@@ -176,7 +177,7 @@ impl Db {
                 let Some(patched) = patch_meta_expire_ms(raw, expire_ms) else {
                     return false;
                 };
-                batch.put(&key_bytes, &patched);
+                (batch.put(&key_bytes, &patched)).expect("write batch append invariant violated");
                 if header.expire_ms > 0 && header.expire_ms != expire_ms {
                     self.ttl_manager.remove_known_to_batch(
                         &mut batch,
@@ -274,7 +275,7 @@ impl Db {
                 return false;
             };
             let mut batch = WriteBatch::new();
-            batch.put(&key_bytes, &patched);
+            (batch.put(&key_bytes, &patched)).expect("write batch append invariant violated");
             if header.expire_ms > 0 && header.expire_ms != expire_ms {
                 self.ttl_manager.remove_known_to_batch(
                     &mut batch,
@@ -343,7 +344,7 @@ impl Db {
                 return false;
             };
             let mut batch = WriteBatch::new();
-            batch.put(&key_bytes, &patched);
+            (batch.put(&key_bytes, &patched)).expect("write batch append invariant violated");
             self.ttl_manager
                 .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
             match self.compare_and_write_batch_if_not_empty(
@@ -387,7 +388,7 @@ impl Db {
                 return false;
             };
             let mut batch = WriteBatch::new();
-            batch.put(&key_bytes, &patched);
+            (batch.put(&key_bytes, &patched)).expect("write batch append invariant violated");
             self.ttl_manager
                 .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
             match self

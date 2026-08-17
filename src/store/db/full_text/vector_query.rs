@@ -1,5 +1,27 @@
 use super::*;
 use crate::store::db::VectorQuantization;
+use half::{bf16, f16};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FullTextVectorElementType {
+    Float32,
+    Float64,
+    BFloat16,
+    Float16,
+    Int8,
+    UInt8,
+}
+
+impl FullTextVectorElementType {
+    fn byte_width(self) -> usize {
+        match self {
+            Self::Float64 => 8,
+            Self::Float32 => 4,
+            Self::BFloat16 | Self::Float16 => 2,
+            Self::Int8 | Self::UInt8 => 1,
+        }
+    }
+}
 pub(super) fn fulltext_vector_plan(ast: &FullTextQueryAst) -> Result<FullTextVectorPlan, Error> {
     match ast {
         FullTextQueryAst::VectorKnn {
@@ -161,6 +183,7 @@ pub(super) fn fulltext_vector_attr_optional_usize(
         .transpose()
 }
 
+#[cfg(test)]
 pub(super) fn parse_fulltext_vector_param(
     params: &HashMap<String, Vec<u8>>,
     name: &str,
@@ -171,6 +194,106 @@ pub(super) fn parse_fulltext_vector_param(
     parse_fulltext_vector_bytes(raw)
 }
 
+pub(super) fn parse_fulltext_vector_param_for_field(
+    params: &HashMap<String, Vec<u8>>,
+    name: &str,
+    field: &FullTextFieldSchema,
+) -> Result<Vec<f32>, Error> {
+    let raw = params
+        .get(name)
+        .ok_or_else(|| Error::msg("ERR missing query parameter"))?;
+    parse_fulltext_vector_value(raw, field)
+}
+
+pub(super) fn fulltext_vector_element_type(
+    field: &FullTextFieldSchema,
+) -> Result<FullTextVectorElementType, Error> {
+    let options = field
+        .options
+        .vector
+        .as_ref()
+        .ok_or_else(|| Error::msg("ERR missing VECTOR options"))?;
+    match fulltext_vector_attr(options, "TYPE")?
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "FLOAT32" => Ok(FullTextVectorElementType::Float32),
+        "FLOAT64" => Ok(FullTextVectorElementType::Float64),
+        "BFLOAT16" => Ok(FullTextVectorElementType::BFloat16),
+        "FLOAT16" => Ok(FullTextVectorElementType::Float16),
+        "INT8" => Ok(FullTextVectorElementType::Int8),
+        "UINT8" => Ok(FullTextVectorElementType::UInt8),
+        _ => Err(Error::msg("ERR invalid VECTOR TYPE")),
+    }
+}
+
+pub(super) fn parse_fulltext_vector_value(
+    raw: &[u8],
+    field: &FullTextFieldSchema,
+) -> Result<Vec<f32>, Error> {
+    let options = field
+        .options
+        .vector
+        .as_ref()
+        .ok_or_else(|| Error::msg("ERR missing VECTOR options"))?;
+    let dim = fulltext_vector_attr_usize(options, "DIM")?;
+    let element_type = fulltext_vector_element_type(field)?;
+    let binary_len = dim
+        .checked_mul(element_type.byte_width())
+        .ok_or_else(|| Error::msg("ERR invalid vector blob"))?;
+    let text = std::str::from_utf8(raw).ok().map(str::trim);
+    let looks_textual = text.is_some_and(|text| {
+        (text.starts_with('[') && text.ends_with(']'))
+            || text.contains(',')
+            || text.split_ascii_whitespace().count() > 1
+    });
+    let vector = if looks_textual {
+        parse_fulltext_vector_text(text.expect("checked textual vector"))?
+    } else if raw.len() == binary_len {
+        parse_fulltext_vector_binary(raw, element_type)?
+    } else if let Some(text) = text {
+        parse_fulltext_vector_text(text)?
+    } else {
+        return Err(Error::msg("ERR invalid vector blob"));
+    };
+    validate_fulltext_vector_values(vector, dim)
+}
+
+fn parse_fulltext_vector_binary(
+    raw: &[u8],
+    element_type: FullTextVectorElementType,
+) -> Result<Vec<f32>, Error> {
+    let values = match element_type {
+        FullTextVectorElementType::Float32 => raw
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+            .collect(),
+        FullTextVectorElementType::Float64 => raw
+            .chunks_exact(8)
+            .map(|chunk| f64::from_le_bytes(chunk.try_into().expect("eight-byte chunk")) as f32)
+            .collect(),
+        FullTextVectorElementType::BFloat16 => raw
+            .chunks_exact(2)
+            .map(|chunk| bf16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32())
+            .collect(),
+        FullTextVectorElementType::Float16 => raw
+            .chunks_exact(2)
+            .map(|chunk| f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32())
+            .collect(),
+        FullTextVectorElementType::Int8 => raw.iter().map(|value| (*value as i8) as f32).collect(),
+        FullTextVectorElementType::UInt8 => raw.iter().map(|value| *value as f32).collect(),
+    };
+    Ok(values)
+}
+
+fn validate_fulltext_vector_values(vector: Vec<f32>, dim: usize) -> Result<Vec<f32>, Error> {
+    if vector.len() != dim || vector.iter().any(|value| !value.is_finite()) {
+        return Err(Error::msg("ERR invalid vector blob"));
+    }
+    Ok(vector)
+}
+
+#[cfg(test)]
 pub(super) fn parse_fulltext_vector_bytes(raw: &[u8]) -> Result<Vec<f32>, Error> {
     if let Ok(text) = std::str::from_utf8(raw)
         && let Ok(vector) = parse_fulltext_vector_text(text)
@@ -224,9 +347,20 @@ pub(super) fn parse_fulltext_vector_json_value(
     }
 }
 
+#[cfg(test)]
 pub(super) fn fulltext_vector_distance(
     distance: &str,
     lhs: &[f32],
+    rhs: &[f32],
+) -> Result<f32, Error> {
+    let lhs_norm_squared = lhs.iter().map(|value| value * value).sum::<f32>();
+    fulltext_vector_distance_prepared(distance, lhs, lhs_norm_squared, rhs)
+}
+
+pub(super) fn fulltext_vector_distance_prepared(
+    distance: &str,
+    lhs: &[f32],
+    lhs_norm_squared: f32,
     rhs: &[f32],
 ) -> Result<f32, Error> {
     if lhs.len() != rhs.len() {
@@ -252,7 +386,7 @@ pub(super) fn fulltext_vector_distance(
                 .zip(rhs)
                 .map(|(left, right)| left * right)
                 .sum::<f32>();
-            let lhs_norm = lhs.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let lhs_norm = lhs_norm_squared.sqrt();
             let rhs_norm = rhs.iter().map(|value| value * value).sum::<f32>().sqrt();
             if lhs_norm == 0.0 || rhs_norm == 0.0 {
                 return Err(Error::msg("ERR zero norm vector for cosine distance"));

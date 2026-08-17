@@ -16,7 +16,7 @@ impl Db {
             }
             let key = stream_pel_key(self.db_index, key, meta.version, group, *id);
             if self.store.get_raw(&key).is_some() {
-                batch.delete(&key);
+                (batch.delete(&key)).expect("write batch append invariant violated");
                 acked += 1;
             }
         }
@@ -61,7 +61,7 @@ impl Db {
         let existing = self.store.multi_get_raw_async(&pel_keys).await;
         for (pel_key, value) in pel_keys.into_iter().zip(existing) {
             if value.is_some() {
-                batch.delete(&pel_key);
+                (batch.delete(&pel_key)).expect("write batch append invariant violated");
                 acked += 1;
             }
         }
@@ -292,14 +292,16 @@ impl Db {
             pel.consumer = consumer.to_string();
             pel.last_delivery_ms = now;
             pel.deliveries = pel.deliveries.saturating_add(1);
-            batch.put(&pel_key, &encode_stream_pel_state(&pel));
+            (batch.put(&pel_key, &encode_stream_pel_state(&pel)))
+                .expect("write batch append invariant violated");
             claimed.push(entry);
         }
         if batch.count() > 0 {
-            batch.put(
+            (batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
-            );
+            ))
+            .expect("write batch append invariant violated");
             self.write_batch_if_not_empty(&batch);
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -359,17 +361,19 @@ impl Db {
             pel.consumer = consumer.to_string();
             pel.last_delivery_ms = now;
             pel.deliveries = pel.deliveries.saturating_add(1);
-            batch.put(&pel_key, &encode_stream_pel_state(&pel));
+            (batch.put(&pel_key, &encode_stream_pel_state(&pel)))
+                .expect("write batch append invariant violated");
             claimed.push(StreamEntry {
                 id: id.to_redis_id(),
                 fields,
             });
         }
         if batch.count() > 0 {
-            batch.put(
+            (batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
-            );
+            ))
+            .expect("write batch append invariant violated");
             self.write_batch_if_not_empty_async(&batch).await;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -440,10 +444,11 @@ impl Db {
             pel.consumer = consumer.to_string();
             pel.last_delivery_ms = now;
             pel.deliveries = pel.deliveries.saturating_add(1);
-            batch.put(
+            (batch.put(
                 &stream_pel_key(self.db_index, key, meta.version, group, *id),
                 &encode_stream_pel_state(&pel),
-            );
+            ))
+            .expect("write batch append invariant violated");
             entries.push(StreamEntry {
                 id: id.to_redis_id(),
                 fields,
@@ -457,10 +462,11 @@ impl Db {
             .map(|(id, _)| *id)
             .unwrap_or(StreamId { ms: 0, seq: 0 });
         if batch.count() > 0 {
-            batch.put(
+            (batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
-            );
+            ))
+            .expect("write batch append invariant violated");
             self.write_batch_if_not_empty(&batch);
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -538,10 +544,11 @@ impl Db {
             pel.consumer = consumer.to_string();
             pel.last_delivery_ms = now;
             pel.deliveries = pel.deliveries.saturating_add(1);
-            batch.put(
+            (batch.put(
                 &stream_pel_key(self.db_index, key, meta.version, group, *id),
                 &encode_stream_pel_state(&pel),
-            );
+            ))
+            .expect("write batch append invariant violated");
             entries.push(StreamEntry {
                 id: id.to_redis_id(),
                 fields,
@@ -555,10 +562,11 @@ impl Db {
             .map(|(id, _)| *id)
             .unwrap_or(StreamId { ms: 0, seq: 0 });
         if batch.count() > 0 {
-            batch.put(
+            (batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
-            );
+            ))
+            .expect("write batch append invariant violated");
             self.write_batch_if_not_empty_async(&batch).await;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }

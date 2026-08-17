@@ -177,6 +177,131 @@ fn ensure_runtime_recovers_writer_lock_left_by_unclean_exit() {
 }
 
 #[test]
+fn concurrent_cold_runtime_initialization_publishes_one_runtime() {
+    let store = test_store("concurrent-cold-runtime");
+    let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
+    let ttl_manager =
+        crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
+    let db = Arc::new(Db::new(0, store, version_counter, ttl_manager));
+    db.fulltext_create(
+        "idx",
+        FullTextCreateOptions {
+            source_type: FullTextSourceType::Hash,
+            prefixes: vec!["doc:".to_string()],
+            schema: vec![text_field("title")],
+            index_options: FullTextIndexOptions::default(),
+        },
+    )
+    .unwrap();
+    db.fulltext_runtimes.remove(0, "idx");
+
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let workers = (0..8)
+        .map(|_| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                db.ensure_fulltext_runtime("idx").unwrap();
+                db.fulltext_runtimes.get(0, "idx").unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let runtimes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        runtimes
+            .iter()
+            .skip(1)
+            .all(|runtime| Arc::ptr_eq(&runtimes[0], runtime))
+    );
+}
+
+#[test]
+fn runtime_registry_prunes_dead_per_index_locks() {
+    let registry = FullTextRuntimeRegistry::default();
+    for id in 0..128 {
+        drop(registry.lifecycle_lock(0, &format!("lifecycle-{id}")));
+        drop(registry.refresh_lock(0, &format!("refresh-{id}")));
+    }
+
+    let lifecycle = registry.lifecycle_lock(0, "live");
+    let refresh = registry.refresh_lock(0, "live");
+    assert!(registry.lifecycle_locks.len() <= 64);
+    assert!(registry.refresh_locks.len() <= 64);
+    drop(lifecycle);
+    drop(refresh);
+
+    drop(registry.lifecycle_lock(0, "next"));
+    drop(registry.refresh_lock(0, "next"));
+    assert!(registry.lifecycle_locks.len() <= 64);
+    assert!(registry.refresh_locks.len() <= 64);
+}
+
+#[test]
+fn search_rebuilds_a_persisted_index_with_the_legacy_runtime_schema() {
+    let store = test_store("legacy-runtime-schema");
+    let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
+    let ttl_manager =
+        crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
+    let db = Db::new(0, store.clone(), version_counter, ttl_manager);
+    db.fulltext_create(
+        "idx",
+        FullTextCreateOptions {
+            source_type: FullTextSourceType::Hash,
+            prefixes: vec!["doc:".to_string()],
+            schema: vec![text_field("title")],
+            index_options: FullTextIndexOptions::default(),
+        },
+    )
+    .unwrap();
+    db.hash_set("doc:1", "title", "schema migration").unwrap();
+    let meta = db.read_fulltext_meta_direct("idx").unwrap();
+    db.fulltext_runtimes.remove(0, "idx");
+    let mut cleanup = WriteBatch::new();
+    db.delete_fulltext_storage_to_batch(&mut cleanup, &meta.active_storage)
+        .unwrap();
+    db.write_batch_if_not_empty(&cleanup);
+
+    let mut legacy_schema = Schema::builder();
+    legacy_schema.add_text_field(FULLTEXT_KEY_FIELD, STRING | STORED);
+    legacy_schema.add_text_field("title", TextOptions::default());
+    let directory = KvTantivyDirectory::new(store, 0, &meta.active_storage);
+    let legacy = Index::open_or_create(directory, legacy_schema.build()).unwrap();
+    let mut writer = legacy
+        .writer::<TantivyDocument>(FULLTEXT_WRITER_HEAP_BYTES)
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+    drop(legacy);
+
+    let hits = db
+        .fulltext_collect_live_hits(
+            "idx",
+            "migration",
+            &search_options(),
+            FullTextCollectMode::Page,
+        )
+        .unwrap();
+    assert_eq!(hits.total, 1);
+    let runtime = db.fulltext_runtimes.get(0, "idx").unwrap();
+    assert!(
+        runtime
+            .read()
+            .unwrap()
+            .index
+            .schema()
+            .get_field(FULLTEXT_EXPIRES_AT_FIELD)
+            .is_ok()
+    );
+    let schema = runtime.read().unwrap().index.schema();
+    let key_field = schema.get_field(FULLTEXT_KEY_FIELD).unwrap();
+    assert!(schema.get_field_entry(key_field).is_fast());
+}
+
+#[test]
 fn recreated_index_ignores_late_outbox_records_from_the_dropped_incarnation() {
     let store = test_store("outbox-incarnation");
     let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());

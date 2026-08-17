@@ -9,12 +9,23 @@ impl Db {
     ) -> Result<FullTextCollectedHits, Error> {
         let index = self.resolve_fulltext_index(index)?;
         let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, &index);
+        if self.fulltext_runtime_schema_needs_rebuild(&index)? {
+            let _lifecycle_guard = lifecycle_lock
+                .write()
+                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+            if self.fulltext_runtime_schema_needs_rebuild(&index)? {
+                self.fulltext_rebuild_index(&index)?;
+            }
+        }
         let result_cap = match mode {
             FullTextCollectMode::Page => self.fulltext_config_usize("MAXSEARCHRESULTS", 10_000)?,
-            FullTextCollectMode::All => {
+            FullTextCollectMode::All | FullTextCollectMode::Window(_) => {
                 self.fulltext_config_usize("MAXAGGREGATERESULTS", 10_000)?
             }
         };
+        if matches!(mode, FullTextCollectMode::Window(window) if window > result_cap) {
+            return Err(Error::msg("ERR fulltext result limit exceeded"));
+        }
         let reader_budget = self.fulltext_config_usize("MEMORY_BUDGET_READER_BYTES", 67_108_864)?;
         let sort_budget = self.fulltext_config_usize("MEMORY_BUDGET_SORT_BYTES", 16_777_216)?;
         let query_timeout_ms = options.timeout_ms.unwrap_or(500);
@@ -60,6 +71,23 @@ impl Db {
             ));
         }
         fulltext_validate_search_geo_filters(&meta, &options.geo_filters)?;
+        let fast_sort = if let Some(sort_by) = &options.sort_by {
+            let field = fulltext_schema_field(&meta, &sort_by.field)
+                .ok_or_else(|| Error::msg("ERR invalid SORTBY field"))?;
+            if !field.options.sortable {
+                return Err(Error::msg("ERR SORTBY field is not SORTABLE"));
+            }
+            options.in_keys.is_none()
+                && options.filters.is_empty()
+                && options.geo_filters.is_empty()
+                && !options.inorder
+                && matches!(options.scorer, FullTextScorer::Bm25Std)
+                && meta.index_options.score_field.is_none()
+                && !options.with_scores
+                && !options.explain_score
+        } else {
+            false
+        };
         // RedisSearch's TIMEOUT applies to query execution. Near-real-time
         // publication has its own REFRESH_TIMEOUT_MS budget and must not
         // consume the client's query budget.
@@ -99,36 +127,95 @@ impl Db {
                 hits,
             });
         }
-        if contains_fulltext_geo_query(&ast) {
-            fulltext_validate_geo_query_ast(&meta, &ast)?;
-            let hits = self.fulltext_exact_filter_hits(
-                &meta,
-                &ast,
-                options,
-                FullTextSearchLimits {
-                    timeout: FullTextSearchDeadline {
+        if contains_fulltext_geo_query(&ast) || !options.geo_filters.is_empty() {
+            let mut geo_children = vec![ast.clone()];
+            geo_children.extend(
+                options
+                    .geo_filters
+                    .iter()
+                    .map(|filter| FullTextQueryAst::Geo {
+                        field: filter.field.clone(),
+                        lon: filter.lon,
+                        lat: filter.lat,
+                        radius: filter.radius,
+                        unit: filter.unit.clone(),
+                    }),
+            );
+            let geo_ast = if geo_children.len() == 1 {
+                geo_children.pop().expect("one geo query")
+            } else {
+                FullTextQueryAst::And(geo_children)
+            };
+            fulltext_validate_geo_query_ast(&meta, &geo_ast)?;
+            let candidate_limit = reader_budget
+                .checked_div(std::mem::size_of::<FullTextSearchHit>().max(1))
+                .unwrap_or(0)
+                .max(result_cap);
+            let candidates = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+                .search_ast(
+                    &geo_ast,
+                    options,
+                    candidate_limit.saturating_add(1),
+                    FullTextSearchDeadline {
                         at: deadline,
                         fail_on_timeout,
                     },
-                    result_cap,
-                    reader_budget,
-                },
-            )?;
+                )?;
+            let candidate_bytes = candidates.iter().fold(0usize, |used, hit| {
+                used.saturating_add(
+                    std::mem::size_of::<FullTextSearchHit>().saturating_add(hit.key.len()),
+                )
+            });
+            if candidates.len() > candidate_limit || candidate_bytes > reader_budget {
+                return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
+            }
+            let mut hits = Vec::new();
+            for candidate in candidates {
+                let Some(fields) =
+                    self.fulltext_filter_fields_from_source(&meta, &candidate.key)?
+                else {
+                    continue;
+                };
+                if !fulltext_eval_ast_against_fields(&geo_ast, &fields, &meta, options)? {
+                    continue;
+                }
+                if let Some(hit) = self.fulltext_live_hit_from_source(
+                    &meta,
+                    options,
+                    candidate.key,
+                    candidate.score,
+                )? {
+                    hits.push(hit);
+                    if hits.len() > result_cap {
+                        return Err(Error::msg("ERR fulltext result limit exceeded"));
+                    }
+                }
+            }
             fulltext_validate_collected_hit_budget(&hits, result_cap, reader_budget)?;
             return Ok(FullTextCollectedHits {
                 total: hits.len(),
                 hits,
             });
         }
-        let fetch_all = matches!(mode, FullTextCollectMode::All)
-            || options.sort_by.is_some()
-            || options.in_keys.is_some()
-            || !options.filters.is_empty()
-            || !options.geo_filters.is_empty()
-            || options.inorder
-            || !matches!(options.scorer, FullTextScorer::Bm25Std)
-            || meta.index_options.score_field.is_some();
-        let fetch_limit = if fetch_all {
+        let requires_source_validation = fulltext_query_requires_source_validation(&ast, options);
+        let bounded_window = match mode {
+            FullTextCollectMode::Window(window) if !requires_source_validation => Some(window),
+            _ => None,
+        };
+        let fetch_all = bounded_window.is_none()
+            && (matches!(mode, FullTextCollectMode::All)
+                || (options.sort_by.is_some() && !fast_sort)
+                || options.in_keys.is_some()
+                || !options.filters.is_empty()
+                || !options.geo_filters.is_empty()
+                || requires_source_validation
+                || !matches!(options.scorer, FullTextScorer::Bm25Std)
+                || meta.index_options.score_field.is_some());
+        let fetch_limit = if let Some(window) = bounded_window {
+            Some(window)
+        } else if fetch_all {
             Some(result_cap.saturating_add(1))
         } else {
             Some(options.offset.saturating_add(options.limit))
@@ -150,15 +237,27 @@ impl Db {
         {
             return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
         }
-        let candidate_hits = runtime_guard.search(
-            query,
-            options,
-            fetch_limit,
-            FullTextSearchDeadline {
-                at: deadline,
-                fail_on_timeout,
-            },
-        )?;
+        let candidate_hits = if fast_sort {
+            runtime_guard.search_sorted(
+                query,
+                options,
+                fetch_limit.unwrap_or(0),
+                FullTextSearchDeadline {
+                    at: deadline,
+                    fail_on_timeout,
+                },
+            )?
+        } else {
+            runtime_guard.search(
+                query,
+                options,
+                fetch_limit,
+                FullTextSearchDeadline {
+                    at: deadline,
+                    fail_on_timeout,
+                },
+            )?
+        };
         drop(runtime_guard);
         if fetch_all && candidate_hits.hits.len() > result_cap {
             return Err(Error::msg("ERR fulltext result limit exceeded"));
@@ -191,7 +290,7 @@ impl Db {
             if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
                 break;
             }
-            if options.inorder
+            if requires_source_validation
                 && !fulltext_eval_ast_against_fields(&ast, &hit.fields, &meta, options)?
             {
                 continue;
@@ -223,7 +322,7 @@ impl Db {
             });
         }
         Ok(FullTextCollectedHits {
-            total: if fetch_all {
+            total: if fetch_all || bounded_window.is_some() {
                 live.len()
             } else {
                 candidate_hits.total

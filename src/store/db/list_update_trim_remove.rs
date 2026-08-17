@@ -11,10 +11,11 @@ impl Db {
             .ok_or_else(|| Error::msg("ERR index out of range"))?;
 
         let mut batch = WriteBatch::new();
-        batch.put(
+        (batch.put(
             &list_item_key(self.db_index, key, meta.version, storage_index),
             value.as_bytes(),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
@@ -33,10 +34,11 @@ impl Db {
             .ok_or_else(|| Error::msg("ERR index out of range"))?;
 
         let mut batch = WriteBatch::new();
-        batch.put(
+        (batch.put(
             &list_item_key(self.db_index, key, meta.version, storage_index),
             value.as_bytes(),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
@@ -85,10 +87,11 @@ impl Db {
             storage_end.saturating_add(1),
             meta.tail,
         );
-        batch.put(
+        (batch.put(
             &self.mk(key),
             &encode_list_meta(meta.expire_ms, meta.version, storage_start, storage_end + 1),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
@@ -137,10 +140,11 @@ impl Db {
             storage_end.saturating_add(1),
             meta.tail,
         );
-        batch.put(
+        (batch.put(
             &self.mk(key),
             &encode_list_meta(meta.expire_ms, meta.version, storage_start, storage_end + 1),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
@@ -305,10 +309,11 @@ impl Db {
                 destination -= 1;
                 let source = meta.head + position as i64;
                 if source != destination {
-                    batch.put(
+                    (batch.put(
                         &list_item_key(self.db_index, key, meta.version, destination),
                         &values[position],
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             updated.head += removed as i64;
@@ -322,7 +327,7 @@ impl Db {
                 updated.head,
             );
         }
-        batch.put(
+        (batch.put(
             &self.mk(key),
             &encode_list_meta(
                 updated.expire_ms,
@@ -330,7 +335,8 @@ impl Db {
                 updated.head,
                 updated.tail,
             ),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_existing_version_batch_if_not_empty_async(&batch)
             .await;
         self.cache_list_meta_if_non_transactional(key, updated);
@@ -419,10 +425,11 @@ impl Db {
                 }
                 let source = meta.head + position as i64;
                 if source != destination {
-                    batch.put(
+                    (batch.put(
                         &list_item_key(self.db_index, key, meta.version, destination),
                         item,
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
                 destination += 1;
             }
@@ -445,10 +452,11 @@ impl Db {
                 destination -= 1;
                 let source = meta.head + position as i64;
                 if source != destination {
-                    batch.put(
+                    (batch.put(
                         &list_item_key(self.db_index, key, meta.version, destination),
                         &items[position],
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             debug_assert_eq!(destination, updated.head);
@@ -461,7 +469,7 @@ impl Db {
                 updated.head,
             );
         }
-        batch.put(
+        (batch.put(
             &self.mk(key),
             &encode_list_meta(
                 updated.expire_ms,
@@ -469,7 +477,8 @@ impl Db {
                 updated.head,
                 updated.tail,
             ),
-        );
+        ))
+        .expect("write batch append invariant violated");
         (removed, batch, Some(updated))
     }
 }
@@ -493,10 +502,11 @@ fn write_list_remove_survivor(state: &mut ListRemoveRewriteState, value: &[u8]) 
         return true;
     }
     if source != state.destination {
-        state.batch.put(
+        (state.batch.put(
             &list_item_key(state.db_index, &state.key, state.version, state.destination),
             value,
-        );
+        ))
+        .expect("write batch append invariant violated");
     }
     state.destination += 1;
     true
@@ -525,12 +535,12 @@ pub(in crate::store::db) fn delete_list_storage_range_to_batch(
         } else {
             list_item_key(db_index, key, version, negative_end)
         };
-        batch.delete_range(&lower, &upper);
+        (batch.delete_range(&lower, &upper)).expect("write batch append invariant violated");
     }
     if end > 0 {
         let positive_start = start.max(0);
         let lower = list_item_key(db_index, key, version, positive_start);
         let upper = list_item_key(db_index, key, version, end);
-        batch.delete_range(&lower, &upper);
+        (batch.delete_range(&lower, &upper)).expect("write batch append invariant violated");
     }
 }

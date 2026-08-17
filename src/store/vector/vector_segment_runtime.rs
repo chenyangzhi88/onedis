@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct VectorSegmentRuntime {
     meta: VectorSegmentMeta,
     source: Option<Arc<VectorSegmentBlob>>,
@@ -7,14 +8,21 @@ struct VectorSegmentRuntime {
 struct VectorRuntime {
     /// Mutable LSM component.  Values are already durable as per-document KV
     /// records; this table only batches them into immutable source blobs.
-    memtable: HashMap<String, VectorDocRecord>,
+    memtable: HashMap<String, Arc<VectorDocRecord>>,
     segments: Vec<VectorSegmentRuntime>,
     next_segment_id: u64,
     /// Lightweight latest-version directory.  Full vectors and attributes
     /// live only in the bounded memtable, immutable segment blobs, or the
     /// per-document KV records; keeping them here would defeat the LSM memory
     /// bound.
-    current_versions: HashMap<String, u64>,
+    current_versions: Arc<DashMap<String, u64>>,
+    config: VectorRuntimeConfig,
+}
+
+struct VectorRuntimeSearchSnapshot {
+    segments: Vec<VectorSegmentRuntime>,
+    memtable: Vec<Arc<VectorDocRecord>>,
+    current_versions: Arc<DashMap<String, u64>>,
     config: VectorRuntimeConfig,
 }
 
@@ -73,7 +81,7 @@ impl VectorRuntime {
             memtable: HashMap::new(),
             segments: Vec::new(),
             next_segment_id,
-            current_versions: HashMap::new(),
+            current_versions: Arc::new(DashMap::new()),
             config: VectorRuntimeConfig {
                 dim,
                 distance,
@@ -99,7 +107,7 @@ impl VectorRuntime {
             memtable: HashMap::new(),
             segments,
             next_segment_id,
-            current_versions: HashMap::new(),
+            current_versions: Arc::new(DashMap::new()),
             config: VectorRuntimeConfig {
                 dim,
                 distance,
@@ -142,7 +150,7 @@ impl VectorRuntime {
             self.current_versions
                 .insert(doc.id.clone(), doc.doc_version);
         }
-        self.memtable.insert(doc.id.clone(), doc);
+        self.memtable.insert(doc.id.clone(), Arc::new(doc));
     }
 
     fn mark_deleted(&mut self, doc: VectorDocRecord) {
@@ -155,12 +163,28 @@ impl VectorRuntime {
         self.memtable.clear();
         for doc in docs {
             if doc.doc_version > flushed_through {
-                self.memtable.insert(doc.id.clone(), doc.clone());
+                self.memtable
+                    .insert(doc.id.clone(), Arc::new(doc.clone()));
             }
             if !doc.deleted {
                 self.current_versions.insert(doc.id, doc.doc_version);
             }
         }
+    }
+
+    fn restore_version_state(
+        &mut self,
+        current_versions: HashMap<String, u64>,
+        tail_docs: Vec<VectorDocRecord>,
+    ) {
+        self.current_versions.clear();
+        for (id, version) in current_versions {
+            self.current_versions.insert(id, version);
+        }
+        self.memtable = tail_docs
+            .into_iter()
+            .map(|doc| (doc.id.clone(), Arc::new(doc)))
+            .collect();
     }
 
     fn len(&self) -> usize {
@@ -190,9 +214,10 @@ impl VectorRuntime {
                         .count()
                 } else if let Some(index) = &segment.index {
                     index
-                        .nodes
+                        .ids
                         .iter()
-                        .filter(|node| !self.is_current(&node.id, node.doc_version))
+                        .zip(&index.doc_versions)
+                        .filter(|(id, version)| !self.is_current(id, **version))
                         .count()
                 } else {
                     0
@@ -207,7 +232,11 @@ impl VectorRuntime {
         if self.memtable.is_empty() || (!force && self.memtable.len() < limit) {
             return None;
         }
-        let mut entries = self.memtable.values().cloned().collect::<Vec<_>>();
+        let mut entries = self
+            .memtable
+            .values()
+            .map(|doc| doc.as_ref().clone())
+            .collect::<Vec<_>>();
         entries.sort_by(|left, right| {
             left.doc_version
                 .cmp(&right.doc_version)
@@ -321,12 +350,14 @@ impl VectorRuntime {
     }
 
     fn is_current(&self, id: &str, doc_version: u64) -> bool {
-        self.current_versions.get(id).copied() == Some(doc_version)
+        self.current_versions
+            .get(id)
+            .is_some_and(|version| *version == doc_version)
     }
 
     fn set_attrs(&mut self, id: &str, attrs_json: String) {
         if let Some(doc) = self.memtable.get_mut(id) {
-            doc.attrs_json = attrs_json;
+            Arc::make_mut(doc).attrs_json = attrs_json;
         }
     }
 
@@ -398,10 +429,40 @@ impl VectorRuntime {
         })
     }
 
+    fn search_snapshot(&self) -> VectorRuntimeSearchSnapshot {
+        VectorRuntimeSearchSnapshot {
+            segments: self.segments.clone(),
+            memtable: self.memtable.values().cloned().collect(),
+            current_versions: Arc::clone(&self.current_versions),
+            config: self.config,
+        }
+    }
+
+    #[cfg(test)]
+    fn search(
+        &self,
+        query: &[f32],
+        candidate_limit: usize,
+        ef: usize,
+        allow_doc_ids: Option<&HashSet<String>>,
+    ) -> Result<Vec<VectorCandidate>, Error> {
+        self.search_snapshot()
+            .search(query, candidate_limit, ef, allow_doc_ids)
+    }
+}
+
+impl VectorRuntimeSearchSnapshot {
+    fn is_current(&self, id: &str, doc_version: u64) -> bool {
+        self.current_versions
+            .get(id)
+            .is_some_and(|version| *version == doc_version)
+    }
+
     fn brute_force_entries<'a, T: VectorSearchEntry + 'a>(
         &'a self,
         entries: impl Iterator<Item = &'a T>,
         query: &[f32],
+        query_norm_squared: f64,
         allow_doc_ids: Option<&HashSet<String>>,
     ) -> Result<Vec<VectorCandidate>, Error> {
         let mut output = Vec::new();
@@ -417,7 +478,12 @@ impl VectorRuntime {
             output.push(VectorCandidate {
                 id: entry.id().to_string(),
                 doc_version: entry.doc_version(),
-                distance: distance_score(self.config.distance, query, entry.vector())?,
+                distance: distance_score_prepared(
+                    self.config.distance,
+                    query,
+                    query_norm_squared,
+                    entry.vector(),
+                )?,
             });
         }
         Ok(output)
@@ -431,11 +497,18 @@ impl VectorRuntime {
         allow_doc_ids: Option<&HashSet<String>>,
     ) -> Result<Vec<VectorCandidate>, Error> {
         let mut candidates = Vec::new();
+        let query_norm_squared = vector_norm_squared(query);
+        let query_payload = hnsw_query_payload(
+            self.config.distance,
+            query,
+            self.config.quantization,
+        );
         for segment in &self.segments {
             let mut segment_candidates = if let Some(index) = &segment.index {
-                index.search(
+                index.search_prepared(
                     query,
-                    candidate_limit.min(index.nodes.len()),
+                    &query_payload,
+                    candidate_limit.min(index.node_count()),
                     ef,
                     allow_doc_ids,
                     &self.current_versions,
@@ -444,7 +517,12 @@ impl VectorRuntime {
                 let source = segment.source.as_ref().ok_or_else(|| {
                     Error::msg("ERR vector source segment is not loaded")
                 })?;
-                self.brute_force_entries(source.entries.iter(), query, allow_doc_ids)?
+                self.brute_force_entries(
+                    source.entries.iter(),
+                    query,
+                    query_norm_squared,
+                    allow_doc_ids,
+                )?
             };
             segment_candidates.sort_by(|left, right| {
                 left.distance
@@ -453,12 +531,12 @@ impl VectorRuntime {
             });
             segment_candidates.truncate(candidate_limit);
             candidates.extend(segment_candidates);
-            candidates = reduce_vector_candidates(candidates, candidate_limit)?;
         }
 
         candidates.extend(self.brute_force_entries(
-            self.memtable.values(),
+            self.memtable.iter().map(Arc::as_ref),
             query,
+            query_norm_squared,
             allow_doc_ids,
         )?);
         reduce_vector_candidates(candidates, candidate_limit)

@@ -388,7 +388,7 @@ impl Db {
             let expire_ms = expiration_ms(expiration, old_header.map(|header| header.expire_ms));
             self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
             if expire_ms > 0 && now_ms() >= expire_ms {
-                batch.delete(&self.mk(key));
+                (batch.delete(&self.mk(key))).expect("write batch append invariant violated");
                 if let Some(header) = old_header
                     && header.expire_ms > 0
                 {
@@ -453,7 +453,7 @@ impl Db {
                     expiration_ms(expiration, old_header.map(|header| header.expire_ms));
                 self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
                 if expire_ms > 0 && now_ms() >= expire_ms {
-                    batch.delete(&self.mk(key));
+                    (batch.delete(&self.mk(key))).expect("write batch append invariant violated");
                     if let Some(header) = old_header
                         && header.expire_ms > 0
                     {

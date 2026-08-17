@@ -93,14 +93,17 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         if meta.is_none() {
-            batch.put(&self.mk(key), &encode_hash_meta(0, version));
+            (batch.put(&self.mk(key), &encode_hash_meta(0, version)))
+                .expect("write batch append invariant violated");
         }
-        batch.put(
+        (batch.put(
             &hash_field_key(self.db_index, key, version, field),
             next.to_string().as_bytes(),
-        );
+        ))
+        .expect("write batch append invariant violated");
         if current_value.is_none() {
-            batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+            (batch.delete(&hash_field_expire_key(self.db_index, key, version, field)))
+                .expect("write batch append invariant violated");
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
         self.write_batch_if_not_empty(&batch);
@@ -352,14 +355,17 @@ impl Db {
         let formatted = crate::cmds::string::incrbyfloat::IncrbyFloat::format_float(next);
         let mut batch = WriteBatch::new();
         if meta.is_none() {
-            batch.put(&self.mk(key), &encode_hash_meta(0, version));
+            (batch.put(&self.mk(key), &encode_hash_meta(0, version)))
+                .expect("write batch append invariant violated");
         }
-        batch.put(
+        (batch.put(
             &hash_field_key(self.db_index, key, version, field),
             formatted.as_bytes(),
-        );
+        ))
+        .expect("write batch append invariant violated");
         if current_value.is_none() {
-            batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+            (batch.delete(&hash_field_expire_key(self.db_index, key, version, field)))
+                .expect("write batch append invariant violated");
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
         self.write_batch_if_not_empty(&batch);
@@ -460,7 +466,8 @@ impl Db {
                 .remove_known_to_batch(batch, expire_ms, self.db_index, key);
         }
         if !state.meta_exists {
-            batch.put(&state.key_bytes, &encode_hash_meta(0, state.version));
+            (batch.put(&state.key_bytes, &encode_hash_meta(0, state.version)))
+                .expect("write batch append invariant violated");
         }
     }
 
@@ -498,9 +505,9 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         self.prepare_hash_field_cas_batch(&mut batch, key, &state);
-        batch.put(&state.field_key, value);
+        (batch.put(&state.field_key, value)).expect("write batch append invariant violated");
         if state.expire_raw.is_some() {
-            batch.delete(&state.expire_key);
+            (batch.delete(&state.expire_key)).expect("write batch append invariant violated");
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
         if !self
@@ -537,9 +544,10 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         self.prepare_hash_field_cas_batch(&mut batch, key, &state);
-        batch.put(&state.field_key, next.to_string().as_bytes());
+        (batch.put(&state.field_key, next.to_string().as_bytes()))
+            .expect("write batch append invariant violated");
         if !state.live && state.expire_raw.is_some() {
-            batch.delete(&state.expire_key);
+            (batch.delete(&state.expire_key)).expect("write batch append invariant violated");
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
         if !self
@@ -584,9 +592,10 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         self.prepare_hash_field_cas_batch(&mut batch, key, &state);
-        batch.put(&state.field_key, formatted.as_bytes());
+        (batch.put(&state.field_key, formatted.as_bytes()))
+            .expect("write batch append invariant violated");
         if !state.live && state.expire_raw.is_some() {
-            batch.delete(&state.expire_key);
+            (batch.delete(&state.expire_key)).expect("write batch append invariant violated");
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
         if !self

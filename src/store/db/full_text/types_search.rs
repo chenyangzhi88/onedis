@@ -16,6 +16,9 @@ pub struct FullTextSearchOptions {
     pub timeout_ms: Option<u64>,
     pub slop: Option<u32>,
     pub inorder: bool,
+    pub phonetic: Option<bool>,
+    pub verbatim: bool,
+    pub no_stopwords: bool,
     pub language: Option<String>,
     pub payload: Option<Vec<u8>>,
     pub scorer: FullTextScorer,
@@ -25,6 +28,9 @@ pub struct FullTextSearchOptions {
     pub params: HashMap<String, Vec<u8>>,
     pub dialect: u8,
     pub dialect_explicit: bool,
+    pub vector_ef_runtime: Option<usize>,
+    pub vector_filter_ef: Option<usize>,
+    pub vector_epsilon: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +178,7 @@ pub(super) struct FullTextSearchDeadline {
 pub(super) enum FullTextCollectMode {
     Page,
     All,
+    Window(usize),
 }
 
 #[derive(Clone, Debug)]

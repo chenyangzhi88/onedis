@@ -22,7 +22,7 @@ impl Db {
                 .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
             let encoded = encode_raw_string(next.to_string().as_bytes(), expire_ms);
             let mut batch = WriteBatch::new();
-            batch.put(&key_bytes, &encoded);
+            (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
             if expire_ms > 0 {
                 self.ttl_manager
                     .add_to_batch(&mut batch, expire_ms, self.db_index, key);
@@ -63,7 +63,7 @@ impl Db {
 
         let encoded = encode_raw_string(next.to_string().as_bytes(), expire_ms);
         let mut batch = WriteBatch::new();
-        batch.put(&key_bytes, &encoded);
+        (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
         if expire_ms > 0 {
             self.ttl_manager
                 .add_to_batch(&mut batch, expire_ms, self.db_index, key);

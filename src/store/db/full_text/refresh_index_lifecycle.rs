@@ -19,10 +19,20 @@ impl Db {
     pub(super) fn fulltext_refresh_index(&self, index: &str, force: bool) -> Result<(), Error> {
         let started = Instant::now();
         let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, index);
+        let schema_upgrade = self.fulltext_runtime_schema_needs_rebuild(index)?;
         let dirty = self
             .read_fulltext_meta_direct(index)
             .is_ok_and(|meta| matches!(meta.state, FullTextIndexState::Dirty));
-        let result = if dirty {
+        let result = if schema_upgrade {
+            let _lifecycle_guard = lifecycle_lock
+                .write()
+                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+            if self.fulltext_runtime_schema_needs_rebuild(index)? {
+                self.fulltext_rebuild_index(index)
+            } else {
+                self.fulltext_refresh_index_inner(index, force, None)
+            }
+        } else if dirty {
             let _lifecycle_guard = lifecycle_lock
                 .write()
                 .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
@@ -43,6 +53,26 @@ impl Db {
         };
         global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
         result
+    }
+
+    pub(super) fn fulltext_runtime_schema_needs_rebuild(&self, index: &str) -> Result<bool, Error> {
+        if self.fulltext_runtimes.get(self.db_index, index).is_some() {
+            return Ok(false);
+        }
+        let meta = self.read_fulltext_meta_direct(index)?;
+        let storage_name = self.fulltext_active_storage_name(index, &meta);
+        let directory = KvTantivyDirectory::new(self.store.clone(), self.db_index, &storage_name);
+        if !Index::exists(&directory)? {
+            return Ok(false);
+        }
+        let persisted = Index::open(directory)?;
+        let schema = persisted.schema();
+        let missing_expiration = schema.get_field(FULLTEXT_EXPIRES_AT_FIELD).is_err();
+        let key_is_not_fast = schema
+            .get_field(FULLTEXT_KEY_FIELD)
+            .ok()
+            .is_none_or(|field| !schema.get_field_entry(field).is_fast());
+        Ok(missing_expiration || key_is_not_fast)
     }
 
     pub(super) fn fulltext_refresh_index_inner(
@@ -275,28 +305,31 @@ impl Db {
         if self.fulltext_runtimes.get(self.db_index, index).is_some() {
             return Ok(());
         }
-        let meta = self.read_fulltext_meta_direct(index)?;
-        self.fulltext_create_vector_indexes(index, &meta)?;
-        let storage_name = self.fulltext_active_storage_name(index, &meta);
-        let runtime_config = self.fulltext_runtime_config()?;
-        let directory = KvTantivyDirectory::new(self.store.clone(), self.db_index, &storage_name);
-        if directory.remove_stale_writer_lock()? {
-            log::warn!(
-                "removed stale fulltext writer lock db={} index={} storage={}",
-                self.db_index,
-                index,
-                storage_name
-            );
-        }
-        let runtime = FullTextRuntime::new(
-            self.store.clone(),
-            self.db_index,
-            index,
-            &storage_name,
-            &meta,
-            &runtime_config,
-        )?;
-        self.fulltext_runtimes.insert(self.db_index, index, runtime);
+        self.fulltext_runtimes
+            .get_or_try_insert(self.db_index, index, || {
+                let meta = self.read_fulltext_meta_direct(index)?;
+                self.fulltext_create_vector_indexes(index, &meta)?;
+                let storage_name = self.fulltext_active_storage_name(index, &meta);
+                let runtime_config = self.fulltext_runtime_config()?;
+                let directory =
+                    KvTantivyDirectory::new(self.store.clone(), self.db_index, &storage_name);
+                if directory.remove_stale_writer_lock()? {
+                    log::warn!(
+                        "removed stale fulltext writer lock db={} index={} storage={}",
+                        self.db_index,
+                        index,
+                        storage_name
+                    );
+                }
+                FullTextRuntime::new(
+                    self.store.clone(),
+                    self.db_index,
+                    index,
+                    &storage_name,
+                    &meta,
+                    &runtime_config,
+                )
+            })?;
         Ok(())
     }
 

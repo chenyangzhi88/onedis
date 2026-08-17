@@ -5,17 +5,19 @@ pub(super) fn compare_fulltext_sort_keys(
     asc: bool,
 ) -> std::cmp::Ordering {
     let ordering = match (&left.sort_key, &right.sort_key) {
-        (Some(left), Some(right)) => match (left.parse::<f64>(), right.parse::<f64>()) {
-            (Ok(left), Ok(right)) => left
-                .partial_cmp(&right)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            _ => left.cmp(right),
-        },
+        (Some(left), Some(right)) => {
+            let ordering = match (left.parse::<f64>(), right.parse::<f64>()) {
+                (Ok(left), Ok(right)) => left
+                    .partial_cmp(&right)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                _ => left.cmp(right),
+            };
+            if asc { ordering } else { ordering.reverse() }
+        }
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => left.key.cmp(&right.key),
     };
-    let ordering = if asc { ordering } else { ordering.reverse() };
     ordering.then_with(|| left.key.cmp(&right.key))
 }
 

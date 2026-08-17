@@ -59,10 +59,11 @@ impl Db {
         if meta.head >= meta.tail {
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         self.write_batch_if_not_empty(&batch);
         if meta.head >= meta.tail {
@@ -134,10 +135,11 @@ impl Db {
         if meta.head >= meta.tail {
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         self.write_batch_if_not_empty_async(&batch).await;
         if meta.head >= meta.tail {
@@ -318,10 +320,11 @@ impl Db {
             if state.head >= state.tail {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, keys[position], state.expire_ms);
             } else {
-                batch.put(
+                (batch.put(
                     &self.mk(keys[position]),
                     &encode_list_meta(state.expire_ms, state.version, state.head, state.tail),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
         }
         self.write_existing_version_batch_if_not_empty_async(&batch)
@@ -373,15 +376,16 @@ impl Db {
             .get_raw(&item_key)
             .and_then(|value| String::from_utf8(value).ok());
         let mut batch = WriteBatch::new();
-        batch.delete(&item_key);
+        (batch.delete(&item_key)).expect("write batch append invariant violated");
         meta.head += 1;
         if meta.head >= meta.tail {
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         self.write_batch_if_not_empty(&batch);
         if meta.head >= meta.tail {
@@ -425,14 +429,15 @@ impl Db {
             .get_raw(&item_key)
             .and_then(|value| String::from_utf8(value).ok());
         let mut batch = WriteBatch::new();
-        batch.delete(&item_key);
+        (batch.delete(&item_key)).expect("write batch append invariant violated");
         if meta.head >= meta.tail {
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         self.write_batch_if_not_empty(&batch);
         if meta.head >= meta.tail {

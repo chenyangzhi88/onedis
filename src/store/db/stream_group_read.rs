@@ -64,31 +64,34 @@ impl Db {
             }
             let mut batch = WriteBatch::new();
             let now = now_ms();
-            batch.put(
+            (batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
-            );
+            ))
+            .expect("write batch append invariant violated");
             if matches!(start, StreamReadGroupStart::New)
                 && let Some(last) = entries.last().and_then(|entry| parse_stream_id(&entry.id))
             {
                 group_state.last_delivered_id = last;
                 group_state.entries_read += entries.len() as u64;
-                batch.put(
+                (batch.put(
                     &stream_group_key(self.db_index, key, meta.version, group),
                     &encode_stream_group_state(&group_state),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
             if !noack {
                 for entry in &entries {
                     if let Some(id) = parse_stream_id(&entry.id) {
-                        batch.put(
+                        (batch.put(
                             &stream_pel_key(self.db_index, key, meta.version, group, id),
                             &encode_stream_pel_state(&StreamPelState {
                                 consumer: consumer.to_string(),
                                 last_delivery_ms: now,
                                 deliveries: 1,
                             }),
-                        );
+                        ))
+                        .expect("write batch append invariant violated");
                     }
                 }
             }
@@ -179,31 +182,34 @@ impl Db {
             }
             let mut batch = WriteBatch::new();
             let now = now_ms();
-            batch.put(
+            (batch.put(
                 &stream_consumer_key(self.db_index, key, meta.version, group, consumer),
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
-            );
+            ))
+            .expect("write batch append invariant violated");
             if matches!(start, StreamReadGroupStart::New)
                 && let Some(last) = entries.last().and_then(|entry| parse_stream_id(&entry.id))
             {
                 group_state.last_delivered_id = last;
                 group_state.entries_read += entries.len() as u64;
-                batch.put(
+                (batch.put(
                     &stream_group_key(self.db_index, key, meta.version, group),
                     &encode_stream_group_state(&group_state),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
             if !noack {
                 for entry in &entries {
                     if let Some(id) = parse_stream_id(&entry.id) {
-                        batch.put(
+                        (batch.put(
                             &stream_pel_key(self.db_index, key, meta.version, group, id),
                             &encode_stream_pel_state(&StreamPelState {
                                 consumer: consumer.to_string(),
                                 last_delivery_ms: now,
                                 deliveries: 1,
                             }),
-                        );
+                        ))
+                        .expect("write batch append invariant violated");
                     }
                 }
             }

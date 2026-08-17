@@ -186,6 +186,7 @@ pub(super) fn fulltext_collect_legacy_terms(
         FullTextQueryAst::Attributed {
             expr,
             weight: boost,
+            ..
         } => {
             fulltext_collect_legacy_terms(
                 expr,
@@ -202,6 +203,7 @@ pub(super) fn fulltext_collect_legacy_terms(
         | FullTextQueryAst::Fuzzy(_)
         | FullTextQueryAst::Tag { .. }
         | FullTextQueryAst::Numeric { .. }
+        | FullTextQueryAst::Missing { .. }
         | FullTextQueryAst::Geo { .. }
         | FullTextQueryAst::GeoShape { .. }
         | FullTextQueryAst::VectorRange { .. }
@@ -330,7 +332,7 @@ pub(super) fn fulltext_dismax_score(
         FullTextQueryAst::Optional(child) => {
             fulltext_dismax_score(child, fields, meta, options, scope)
         }
-        FullTextQueryAst::Attributed { expr, weight } => {
+        FullTextQueryAst::Attributed { expr, weight, .. } => {
             Ok(fulltext_dismax_score(expr, fields, meta, options, scope)? * weight.unwrap_or(1.0))
         }
         FullTextQueryAst::Not(_) => Ok(0.0),
@@ -339,6 +341,7 @@ pub(super) fn fulltext_dismax_score(
         | FullTextQueryAst::Fuzzy(_)
         | FullTextQueryAst::Tag { .. }
         | FullTextQueryAst::Numeric { .. }
+        | FullTextQueryAst::Missing { .. }
         | FullTextQueryAst::Geo { .. }
         | FullTextQueryAst::GeoShape { .. } => Ok(
             if fulltext_eval_ast_against_fields(ast, fields, meta, options)? {

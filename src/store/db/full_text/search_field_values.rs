@@ -44,18 +44,50 @@ pub(super) fn fulltext_field_value(fields: &[(String, String)], name: &str) -> O
         .map(|(_, value)| value.clone())
 }
 
+pub(super) fn fulltext_field_values<'a>(
+    fields: &'a [(String, String)],
+    name: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    fields
+        .iter()
+        .filter(move |(field, _)| field == name)
+        .map(|(_, value)| value.as_str())
+}
+
+pub(super) fn fulltext_sort_field_value(
+    fields: &[(String, String)],
+    meta: &FullTextIndexMeta,
+    name: &str,
+) -> Option<String> {
+    let schema_field = meta
+        .schema
+        .iter()
+        .find(|field| field.name == name || field.attribute_name() == name)?;
+    let value = fulltext_field_value(fields, name)
+        .or_else(|| fulltext_field_value(fields, schema_field.attribute_name()))
+        .or_else(|| fulltext_field_value(fields, &schema_field.name))?;
+    match schema_field.kind {
+        FullTextFieldKind::Numeric => value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|_| value),
+        FullTextFieldKind::Text | FullTextFieldKind::Tag => Some(value),
+        _ => None,
+    }
+}
+
 pub(super) fn fulltext_fields_match_filters(
     fields: &[(String, String)],
     filters: &[FullTextSearchNumericFilter],
 ) -> bool {
     filters.iter().all(|filter| {
-        let Some(value) =
-            fulltext_field_value(fields, &filter.field).and_then(|value| value.parse::<f64>().ok())
-        else {
-            return false;
-        };
-        fulltext_bound_allows(value, filter.min, true)
-            && fulltext_bound_allows(value, filter.max, false)
+        fulltext_field_values(fields, &filter.field).any(|value| {
+            value.parse::<f64>().ok().is_some_and(|value| {
+                fulltext_bound_allows(value, filter.min, true)
+                    && fulltext_bound_allows(value, filter.max, false)
+            })
+        })
     })
 }
 
@@ -64,11 +96,20 @@ pub(super) fn fulltext_fields_match_geo_filters(
     filters: &[FullTextSearchGeoFilter],
 ) -> Result<bool, Error> {
     for filter in filters {
-        let Some(value) = fulltext_field_value(fields, &filter.field) else {
-            return Ok(false);
-        };
-        if !fulltext_geo_value_within(&value, filter.lon, filter.lat, filter.radius, &filter.unit)?
-        {
+        let mut matched = false;
+        for value in fulltext_field_values(fields, &filter.field) {
+            if fulltext_geo_value_within(
+                value,
+                filter.lon,
+                filter.lat,
+                filter.radius,
+                &filter.unit,
+            )? {
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
             return Ok(false);
         }
     }

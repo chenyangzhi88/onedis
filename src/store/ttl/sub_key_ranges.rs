@@ -60,69 +60,69 @@ fn delete_sub_keys_to_batch_with_encoding(
 ) {
     match type_tag {
         TYPE_HASH => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &HASH_FIELD_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &HASH_FIELD_NS, key, version),
-            );
-            batch.delete_range(
+            )).expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &HASH_FIELD_EXPIRE_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &HASH_FIELD_EXPIRE_NS, key, version),
-            );
+            )).expect("write batch append invariant violated");
         }
         TYPE_SET => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &SET_MEMBER_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &SET_MEMBER_NS, key, version),
-            );
+            )).expect("write batch append invariant violated");
         }
         TYPE_SORTED_SET => {
             // member index
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &ZSET_MEMBER_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &ZSET_MEMBER_NS, key, version),
-            );
+            )).expect("write batch append invariant violated");
             // rank index
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &ZSET_RANK_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &ZSET_RANK_NS, key, version),
-            );
+            )).expect("write batch append invariant violated");
         }
         TYPE_LIST => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &LIST_ITEM_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &LIST_ITEM_NS, key, version),
-            );
+            )).expect("write batch append invariant violated");
         }
         TYPE_STREAM => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &STREAM_ENTRY_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &STREAM_ENTRY_NS, key, version),
-            );
-            batch.delete_range(
+            )).expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &STREAM_GROUP_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &STREAM_GROUP_NS, key, version),
-            );
-            batch.delete_range(
+            )).expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &STREAM_PEL_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &STREAM_PEL_NS, key, version),
-            );
-            batch.delete_range(
+            )).expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &STREAM_CONSUMER_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &STREAM_CONSUMER_NS, key, version),
-            );
+            )).expect("write batch append invariant violated");
         }
         TYPE_JSON => {
-            batch.delete(&sub_key_range_start(
+            (batch.delete(&sub_key_range_start(
                 key_encoding,
                 db_index,
                 &JSON_NODE_NS,
                 key,
                 version,
-            ));
-            batch.delete_range(
+            ))).expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start(key_encoding, db_index, &JSON_NODE_NS, key, version),
                 &sub_key_range_end(key_encoding, db_index, &JSON_NODE_NS, key, version),
-            );
+            )).expect("write batch append invariant violated");
         }
         TYPE_VECTOR => {
             for ns in [
@@ -133,10 +133,10 @@ fn delete_sub_keys_to_batch_with_encoding(
                 &VECTOR_SEGMENT_NS,
                 &VECTOR_GRAPH_NS,
             ] {
-                batch.delete_range(
+                (batch.delete_range(
                     &sub_key_range_start(key_encoding, db_index, ns, key, version),
                     &sub_key_range_end(key_encoding, db_index, ns, key, version),
-                );
+                )).expect("write batch append invariant violated");
             }
         }
         // String — no sub-keys

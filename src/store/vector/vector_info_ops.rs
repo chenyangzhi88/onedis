@@ -261,6 +261,14 @@ impl Db {
                 "quantization".to_string(),
                 quantization_name(meta.quantization).to_string(),
             ),
+            (
+                "algorithm".to_string(),
+                match meta.algorithm {
+                    VectorIndexAlgorithm::Hnsw => "HNSW",
+                    VectorIndexAlgorithm::Flat => "FLAT",
+                }
+                .to_string(),
+            ),
             ("doc_count".to_string(), meta.doc_count.to_string()),
             (
                 "memtable_docs".to_string(),
@@ -283,8 +291,12 @@ impl Db {
             ("ef_runtime".to_string(), meta.ef_runtime.to_string()),
             (
                 "hnsw_nodes".to_string(),
-                self.vector_runtime_len(index, version, meta.doc_count)
-                    .to_string(),
+                if meta.algorithm == VectorIndexAlgorithm::Hnsw {
+                    self.vector_runtime_len(index, version, meta.doc_count)
+                } else {
+                    0
+                }
+                .to_string(),
             ),
             (
                 "snapshot_doc_version".to_string(),
@@ -328,6 +340,14 @@ impl Db {
                 "quantization".to_string(),
                 quantization_name(meta.quantization).to_string(),
             ),
+            (
+                "algorithm".to_string(),
+                match meta.algorithm {
+                    VectorIndexAlgorithm::Hnsw => "HNSW",
+                    VectorIndexAlgorithm::Flat => "FLAT",
+                }
+                .to_string(),
+            ),
             ("doc_count".to_string(), meta.doc_count.to_string()),
             (
                 "memtable_docs".to_string(),
@@ -350,8 +370,12 @@ impl Db {
             ("ef_runtime".to_string(), meta.ef_runtime.to_string()),
             (
                 "hnsw_nodes".to_string(),
-                self.vector_runtime_len(index, version, meta.doc_count)
-                    .to_string(),
+                if meta.algorithm == VectorIndexAlgorithm::Hnsw {
+                    self.vector_runtime_len(index, version, meta.doc_count)
+                } else {
+                    0
+                }
+                .to_string(),
             ),
             (
                 "snapshot_doc_version".to_string(),

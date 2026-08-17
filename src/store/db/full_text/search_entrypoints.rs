@@ -59,25 +59,38 @@ impl Db {
     ) -> Result<Frame, Error> {
         self.fulltext_reject_cluster_multi_shard("FT.HYBRID")?;
         let search_options = self.fulltext_effective_search_options(options.search.clone())?;
+        let window = match options.combine {
+            FullTextHybridCombine::Rrf { window, .. }
+            | FullTextHybridCombine::Linear { window, .. } => window,
+        };
         let text = self.fulltext_collect_live_hits(
             index,
             search_query,
             &search_options,
-            FullTextCollectMode::All,
+            FullTextCollectMode::Window(window),
         )?;
         let vector = self.fulltext_collect_live_hits(
             index,
             vector_query,
             &search_options,
-            FullTextCollectMode::All,
+            FullTextCollectMode::Window(window),
         )?;
         let mut combined = combine_fulltext_hybrid_hits(text, vector, &options)?;
         if let Some(post_filter) = &options.post_filter {
+            let candidate_keys = combined
+                .hits
+                .iter()
+                .map(|hit| hit.key.clone())
+                .collect::<HashSet<_>>();
+            let mut post_options = search_options.clone();
+            post_options.in_keys = Some(candidate_keys);
+            post_options.offset = 0;
+            post_options.limit = combined.hits.len();
             let allowed = self.fulltext_collect_live_hits(
                 index,
                 post_filter,
-                &search_options,
-                FullTextCollectMode::All,
+                &post_options,
+                FullTextCollectMode::Window(combined.hits.len()),
             )?;
             let allowed = allowed
                 .hits
@@ -86,11 +99,6 @@ impl Db {
                 .collect::<HashSet<_>>();
             combined.hits.retain(|hit| allowed.contains(&hit.key));
             combined.total = combined.hits.len();
-        }
-        if let Some(sort_by) = &search_options.sort_by {
-            for hit in &mut combined.hits {
-                hit.sort_key = fulltext_field_value(&hit.fields, &sort_by.field);
-            }
         }
         self.fulltext_search_frame(
             combined,
@@ -241,6 +249,7 @@ fn combine_fulltext_hybrid_hits(
                 .then_with(|| left.key.cmp(&right.key))
         });
     }
+    combined.truncate(window);
     Ok(FullTextCollectedHits {
         total: combined.len(),
         hits: combined,

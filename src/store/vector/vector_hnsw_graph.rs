@@ -1,3 +1,4 @@
+#[cfg(test)]
 #[derive(Clone)]
 struct HnswNode {
     id: String,
@@ -6,6 +7,7 @@ struct HnswNode {
     deleted: bool,
 }
 
+#[cfg(test)]
 struct HnswGraph {
     dim: usize,
     distance: VectorDistance,
@@ -193,13 +195,19 @@ fn hnsw_payload_distance(
 ) -> Result<f32, Error> {
     let value = match (left, right) {
         (HnswSnapshotVector::F32(left), HnswSnapshotVector::F32(right)) => {
-            let payload_distance = if distance == VectorDistance::Cosine {
-                VectorDistance::Cosine
+            if distance == VectorDistance::Cosine {
+                // COSINE payloads are normalized before they enter the graph.
+                // Avoid recomputing two norms and square roots for every edge.
+                let dot = left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| f64::from(*left) * f64::from(*right))
+                    .sum::<f64>();
+                (1.0 - dot.clamp(-1.0, 1.0)) as f32
             } else {
                 // IP vectors have already been embedded into L2 space.
-                VectorDistance::L2
-            };
-            distance_score(payload_distance, left, right)?
+                distance_score(VectorDistance::L2, left, right)?
+            }
         }
         (
             HnswSnapshotVector::Q8 {
@@ -233,6 +241,38 @@ fn hnsw_payload_distance(
         return Err(Error::msg("ERR invalid persisted HNSW distance"));
     }
     Ok(value)
+}
+
+fn hnsw_candidate_distance(
+    distance: VectorDistance,
+    query: &[f32],
+    payload: &HnswSnapshotVector,
+    graph_distance: f32,
+) -> Result<f32, Error> {
+    if distance != VectorDistance::Ip {
+        return Ok(graph_distance);
+    }
+    let score = match payload {
+        HnswSnapshotVector::F32(values) => -query
+            .iter()
+            .zip(values.iter().take(query.len()))
+            .map(|(query, value)| f64::from(*query) * f64::from(*value))
+            .sum::<f64>(),
+        HnswSnapshotVector::Q8 { scale, values } => -query
+            .iter()
+            .zip(values.iter().take(query.len()))
+            .map(|(query, value)| {
+                f64::from(*query) * f64::from((*value as i8) as f32 * *scale)
+            })
+            .sum::<f64>(),
+        // One-bit payloads intentionally retain only angular/sign information;
+        // their graph distance is already comparable across segments.
+        HnswSnapshotVector::Binary { .. } => return Ok(graph_distance),
+    };
+    if !score.is_finite() || score < -f64::from(f32::MAX) || score > f64::from(f32::MAX) {
+        return Err(Error::msg("ERR vector distance overflow"));
+    }
+    Ok(score as f32)
 }
 
 fn vector_norm_squared(vector: &[f32]) -> f64 {
@@ -283,6 +323,7 @@ fn hnsw_query_vector(distance: VectorDistance, vector: &[f32]) -> Vec<f32> {
     hnsw_data_vector(distance, vector, 0.0)
 }
 
+#[cfg(test)]
 impl HnswGraph {
     fn new(
         dim: usize,
@@ -381,6 +422,7 @@ impl HnswGraph {
         }
     }
 
+    #[cfg(test)]
     fn mark_deleted(&mut self, id: &str) {
         if let Some(pos) = self.id_to_pos.get(id).copied()
             && !self.nodes[pos].deleted
@@ -390,6 +432,7 @@ impl HnswGraph {
         }
     }
 
+    #[cfg(test)]
     fn search(
         &self,
         query: &[f32],
@@ -440,83 +483,12 @@ impl HnswGraph {
             .collect())
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.live_count
     }
 
-    fn links(&self, id: &str) -> Option<Vec<Vec<(String, f32)>>> {
-        let origin_id = self.id_to_pos.get(id).copied()?;
-        if self.nodes.get(origin_id).is_none_or(|node| node.deleted) {
-            return None;
-        }
-        let mut layers = self
-            .backend
-            .neighborhood(origin_id)
-            .into_iter()
-            .map(|layer| {
-                layer
-                    .into_iter()
-                    .filter_map(|neighbor| {
-                        let node = self.nodes.get(neighbor.d_id)?;
-                        (!node.deleted && node.id != id).then(|| {
-                            (
-                                node.id.clone(),
-                                distance_score(
-                                    self.distance,
-                                    &self.nodes[origin_id].vector,
-                                    &node.vector,
-                                )
-                                .unwrap_or(neighbor.distance),
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
-        // hnsw_rs may retain an outgoing edge to a tombstoned version of an
-        // updated document while live nodes still have real incoming edges to
-        // the replacement. VLINKS is a graph-neighborhood view, so include
-        // those incoming edges as well instead of intermittently reporting no
-        // live links for the replacement node.
-        for (candidate_id, candidate) in self.nodes.iter().enumerate() {
-            if candidate_id == origin_id || candidate.deleted {
-                continue;
-            }
-            for (layer_index, layer) in self
-                .backend
-                .neighborhood(candidate_id)
-                .into_iter()
-                .enumerate()
-            {
-                let Some(edge) = layer.into_iter().find(|edge| edge.d_id == origin_id) else {
-                    continue;
-                };
-                if layers.len() <= layer_index {
-                    layers.resize_with(layer_index + 1, Vec::new);
-                }
-                if !layers[layer_index]
-                    .iter()
-                    .any(|(neighbor_id, _)| neighbor_id == &candidate.id)
-                {
-                    layers[layer_index].push((
-                        candidate.id.clone(),
-                        distance_score(
-                            self.distance,
-                            &self.nodes[origin_id].vector,
-                            &candidate.vector,
-                        )
-                        .unwrap_or(edge.distance),
-                    ));
-                }
-            }
-        }
-        while layers.last().is_some_and(Vec::is_empty) {
-            layers.pop();
-        }
-        Some(layers)
-    }
-
+    #[cfg(test)]
     fn max_doc_version(&self) -> u64 {
         self.max_doc_version
     }
@@ -553,17 +525,17 @@ impl HnswGraph {
             if layers.is_empty() {
                 layers.push(Vec::new());
             }
-            nodes.push(VectorHnswIndexNode {
-                id: node.id.clone(),
-                doc_version: node.doc_version,
-                vector: hnsw_index_payload(
+            nodes.push((
+                node.id.clone(),
+                node.doc_version,
+                hnsw_index_payload(
                     self.distance,
                     &node.vector,
                     self.ip_radius_squared,
                     self.quantization,
                 ),
                 layers,
-            });
+            ));
         }
 
         let entry_point = self
@@ -574,29 +546,195 @@ impl HnswGraph {
                 nodes
                     .iter()
                     .enumerate()
-                    .max_by_key(|(_, node)| node.layers.len())
+                    .max_by_key(|(_, node)| node.3.len())
                     .map(|(position, _)| position as u32)
                     .unwrap_or(0)
             });
-        let max_layer = nodes
-            .get(entry_point as usize)
-            .map(|node| node.layers.len().saturating_sub(1) as u32)
-            .unwrap_or(0);
-        Ok(VectorHnswIndexBlob {
-            dim: self.dim as u32,
-            distance: self.distance,
-            m: self.m as u32,
-            ef_construction: self.ef_construction as u32,
-            quantization: self.quantization,
+        let max_layer = nodes[entry_point as usize].3.len().saturating_sub(1) as u32;
+        Ok(VectorHnswIndexBlob::from_node_parts(
+            self.dim as u32,
+            self.distance,
+            self.m as u32,
+            self.ef_construction as u32,
+            self.quantization,
             entry_point,
             max_layer,
             nodes,
-        })
+        ))
     }
 
 }
 
 impl VectorHnswIndexBlob {
+    fn build(source: &VectorSegmentBlob, meta: &VectorIndexMeta) -> Result<Self, Error> {
+        if source.entries.is_empty() {
+            return Err(Error::msg("ERR cannot index an empty vector segment"));
+        }
+        let ip_radius_squared = if meta.distance == VectorDistance::Ip {
+            source
+                .entries
+                .iter()
+                .map(|entry| vector_norm_squared(&entry.vector))
+                .fold(0.0f64, f64::max)
+                * 4.0
+        } else {
+            0.0
+        };
+        let payloads = source
+            .entries
+            .iter()
+            .map(|entry| {
+                hnsw_index_payload(
+                    meta.distance,
+                    &entry.vector,
+                    ip_radius_squared,
+                    meta.quantization,
+                )
+            })
+            .collect::<Vec<_>>();
+        let backend = HnswBackend::new(
+            meta.distance,
+            meta.quantization,
+            meta.m as usize,
+            source.entries.len(),
+            meta.ef_construction as usize,
+        );
+        backend.insert_payloads(&payloads);
+
+        let mut nodes = Vec::with_capacity(source.entries.len());
+        for (position, (entry, payload)) in source.entries.iter().zip(payloads).enumerate() {
+            let mut layers = backend
+                .neighborhood(position)
+                .into_iter()
+                .map(|neighbors| {
+                    neighbors
+                        .into_iter()
+                        .filter_map(|neighbor| {
+                            (neighbor.d_id < source.entries.len()).then_some(neighbor.d_id as u32)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            if layers.is_empty() {
+                layers.push(Vec::new());
+            }
+            nodes.push((entry.id.clone(), entry.doc_version, payload, layers));
+        }
+        let entry_point = backend
+            .entry_point_origin_id()
+            .filter(|position| *position < nodes.len())
+            .unwrap_or_else(|| {
+                nodes
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, node)| node.3.len())
+                    .map(|(position, _)| position)
+                    .unwrap_or(0)
+            }) as u32;
+        let max_layer = nodes[entry_point as usize].3.len().saturating_sub(1) as u32;
+        let index = Self::from_node_parts(
+            meta.dim,
+            meta.distance,
+            meta.m,
+            meta.ef_construction,
+            meta.quantization,
+            entry_point,
+            max_layer,
+            nodes,
+        );
+        index.validate()?;
+        Ok(index)
+    }
+
+    fn from_legacy(legacy: LegacyVectorHnswIndexBlobV1) -> Self {
+        Self::from_node_parts(
+            legacy.dim,
+            legacy.distance,
+            legacy.m,
+            legacy.ef_construction,
+            legacy.quantization,
+            legacy.entry_point,
+            legacy.max_layer,
+            legacy
+                .nodes
+                .into_iter()
+                .map(|node| (node.id, node.doc_version, node.vector, node.layers))
+                .collect(),
+        )
+    }
+
+    fn from_node_parts(
+        dim: u32,
+        distance: VectorDistance,
+        m: u32,
+        ef_construction: u32,
+        quantization: VectorQuantization,
+        entry_point: u32,
+        max_layer: u32,
+        nodes: Vec<(String, u64, HnswSnapshotVector, Vec<Vec<u32>>)>,
+    ) -> Self {
+        let mut ids = Vec::with_capacity(nodes.len());
+        let mut doc_versions = Vec::with_capacity(nodes.len());
+        let mut vectors = Vec::with_capacity(nodes.len());
+        let mut node_layer_offsets = Vec::with_capacity(nodes.len() + 1);
+        let mut layer_neighbor_offsets = Vec::new();
+        let mut neighbors = Vec::new();
+        node_layer_offsets.push(0);
+        layer_neighbor_offsets.push(0);
+        for (id, doc_version, vector, layers) in nodes {
+            ids.push(id);
+            doc_versions.push(doc_version);
+            vectors.push(vector);
+            for layer in layers {
+                neighbors.extend(layer);
+                layer_neighbor_offsets.push(neighbors.len() as u32);
+            }
+            node_layer_offsets.push((layer_neighbor_offsets.len() - 1) as u32);
+        }
+        Self {
+            dim,
+            distance,
+            m,
+            ef_construction,
+            quantization,
+            entry_point,
+            max_layer,
+            ids,
+            doc_versions,
+            vectors,
+            node_layer_offsets,
+            layer_neighbor_offsets,
+            neighbors,
+        }
+    }
+
+    fn node_count(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn node_layer_count(&self, node: usize) -> usize {
+        self.node_layer_offsets
+            .get(node..=node.saturating_add(1))
+            .filter(|offsets| offsets.len() == 2)
+            .map_or(0, |offsets| offsets[1].saturating_sub(offsets[0]) as usize)
+    }
+
+    fn node_layer(&self, node: usize, layer: usize) -> &[u32] {
+        let Some(first_layer) = self.node_layer_offsets.get(node).copied() else {
+            return &[];
+        };
+        if layer >= self.node_layer_count(node) {
+            return &[];
+        }
+        let layer = first_layer as usize + layer;
+        let Some(offsets) = self.layer_neighbor_offsets.get(layer..=layer + 1) else {
+            return &[];
+        };
+        self.neighbors
+            .get(offsets[0] as usize..offsets[1] as usize)
+            .unwrap_or_default()
+    }
+
     fn validate(&self) -> Result<(), Error> {
         let payload_dim = self.dim as usize + usize::from(self.distance == VectorDistance::Ip);
         if self.dim == 0
@@ -605,38 +743,53 @@ impl VectorHnswIndexBlob {
             || self.m > 256
             || self.ef_construction < self.m
             || self.ef_construction as usize > MAX_VECTOR_HNSW_EF
-            || self.nodes.is_empty()
-            || self.nodes.len() > MAX_VECTOR_INITIAL_CAP
-            || self.entry_point as usize >= self.nodes.len()
+            || self.ids.is_empty()
+            || self.ids.len() > MAX_VECTOR_INITIAL_CAP
+            || self.ids.len() != self.doc_versions.len()
+            || self.ids.len() != self.vectors.len()
+            || self.node_layer_offsets.len() != self.ids.len().saturating_add(1)
+            || self.node_layer_offsets.first().copied() != Some(0)
+            || self.layer_neighbor_offsets.first().copied() != Some(0)
+            || self.node_layer_offsets.last().copied().map(|offset| offset as usize)
+                != Some(self.layer_neighbor_offsets.len().saturating_sub(1))
+            || self.layer_neighbor_offsets.last().copied().map(|offset| offset as usize)
+                != Some(self.neighbors.len())
+            || !self.node_layer_offsets.windows(2).all(|offsets| offsets[0] <= offsets[1])
+            || !self
+                .layer_neighbor_offsets
+                .windows(2)
+                .all(|offsets| offsets[0] <= offsets[1])
+            || self.entry_point as usize >= self.ids.len()
             || self.max_layer as usize >= DEFAULT_HNSW_MAX_LAYER
-            || self.max_layer as usize
-                >= self.nodes[self.entry_point as usize].layers.len()
+            || self.max_layer as usize >= self.node_layer_count(self.entry_point as usize)
         {
             return Err(Error::msg("ERR invalid persisted HNSW index"));
         }
-        let mut ids = HashSet::with_capacity(self.nodes.len());
+        let mut ids = HashSet::with_capacity(self.ids.len());
         let mut observed_max_layer = 0usize;
-        for (node_id, node) in self.nodes.iter().enumerate() {
-            if node.layers.is_empty()
-                || node.layers.len() > DEFAULT_HNSW_MAX_LAYER
-                || node.id.is_empty()
-                || node.doc_version == 0
-                || !ids.insert(node.id.as_str())
+        for node_id in 0..self.ids.len() {
+            let layer_count = self.node_layer_count(node_id);
+            if layer_count == 0
+                || layer_count > DEFAULT_HNSW_MAX_LAYER
+                || self.ids[node_id].is_empty()
+                || self.doc_versions[node_id] == 0
+                || !ids.insert(self.ids[node_id].as_str())
             {
                 return Err(Error::msg("ERR invalid persisted HNSW topology"));
             }
-            observed_max_layer = observed_max_layer.max(node.layers.len() - 1);
-            for layer in &node.layers {
+            observed_max_layer = observed_max_layer.max(layer_count - 1);
+            for layer_index in 0..layer_count {
+                let layer = self.node_layer(node_id, layer_index);
                 let mut neighbors = HashSet::with_capacity(layer.len());
                 if layer.iter().any(|neighbor| {
-                    *neighbor as usize >= self.nodes.len()
+                    *neighbor as usize >= self.ids.len()
                         || *neighbor as usize == node_id
                         || !neighbors.insert(*neighbor)
                 }) {
                     return Err(Error::msg("ERR invalid persisted HNSW topology"));
                 }
             }
-            let valid_payload = match (&node.vector, self.quantization) {
+            let valid_payload = match (&self.vectors[node_id], self.quantization) {
                 (HnswSnapshotVector::F32(values), VectorQuantization::F32) => {
                     values.len() == payload_dim && values.iter().all(|value| value.is_finite())
                 }
@@ -667,39 +820,47 @@ impl VectorHnswIndexBlob {
         node: u32,
         query: &HnswSnapshotVector,
     ) -> Result<f32, Error> {
-        let node = self
-            .nodes
+        let vector = self
+            .vectors
             .get(node as usize)
             .ok_or_else(|| Error::msg("ERR invalid persisted HNSW node"))?;
-        hnsw_payload_distance(self.distance, query, &node.vector)
+        hnsw_payload_distance(self.distance, query, vector)
     }
 
     fn links(
         &self,
         id: &str,
-        current_versions: &HashMap<String, u64>,
+        current_versions: &DashMap<String, u64>,
     ) -> Option<Vec<Vec<(String, f32)>>> {
-        let origin = self.nodes.iter().position(|node| {
-            node.id == id
-                && current_versions.get(id).copied() == Some(node.doc_version)
+        let origin = self.ids.iter().enumerate().position(|(node, node_id)| {
+            node_id == id
+                && current_versions
+                    .get(id)
+                    .is_some_and(|version| *version == self.doc_versions[node])
         })?;
-        let origin_vector = &self.nodes[origin].vector;
-        let mut layers = self.nodes[origin]
-            .layers
-            .iter()
-            .map(|neighbors| {
+        let origin_vector = &self.vectors[origin];
+        let mut layers = (0..self.node_layer_count(origin))
+            .map(|layer| {
+                let neighbors = self.node_layer(origin, layer);
                 neighbors
                     .iter()
                     .filter_map(|neighbor| {
-                        let neighbor = self.nodes.get(*neighbor as usize)?;
-                        if current_versions.get(&neighbor.id).copied()
-                            != Some(neighbor.doc_version)
+                        let neighbor = *neighbor as usize;
+                        let neighbor_id = self.ids.get(neighbor)?;
+                        let doc_version = *self.doc_versions.get(neighbor)?;
+                        if current_versions
+                            .get(neighbor_id)
+                            .is_none_or(|version| *version != doc_version)
                         {
                             return None;
                         }
                         Some((
-                            neighbor.id.clone(),
-                            hnsw_payload_distance(self.distance, origin_vector, &neighbor.vector)
+                            neighbor_id.clone(),
+                            hnsw_payload_distance(
+                                self.distance,
+                                origin_vector,
+                                self.vectors.get(neighbor)?,
+                            )
                                 .ok()?,
                         ))
                     })
@@ -712,34 +873,49 @@ impl VectorHnswIndexBlob {
         Some(layers)
     }
 
+    #[cfg(test)]
     fn search(
         &self,
         query: &[f32],
         limit: usize,
         ef: usize,
         allow_doc_ids: Option<&HashSet<String>>,
-        current_versions: &HashMap<String, u64>,
+        current_versions: &DashMap<String, u64>,
     ) -> Result<Vec<VectorCandidate>, Error> {
-        self.validate()?;
         validate_vector(query, self.dim as usize)?;
         validate_vector_for_distance(query, self.distance)?;
+        let query_payload = hnsw_query_payload(self.distance, query, self.quantization);
+        self.search_prepared(
+            query,
+            &query_payload,
+            limit,
+            ef,
+            allow_doc_ids,
+            current_versions,
+        )
+    }
+
+    fn search_prepared(
+        &self,
+        query: &[f32],
+        query_payload: &HnswSnapshotVector,
+        limit: usize,
+        ef: usize,
+        allow_doc_ids: Option<&HashSet<String>>,
+        current_versions: &DashMap<String, u64>,
+    ) -> Result<Vec<VectorCandidate>, Error> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let query_payload = hnsw_query_payload(self.distance, query, self.quantization);
         let mut current = self.entry_point;
-        let mut current_distance = self.node_distance(current, &query_payload)?;
+        let mut current_distance = self.node_distance(current, query_payload)?;
 
         for layer in (1..=self.max_layer as usize).rev() {
             loop {
                 let mut improved = false;
-                let neighbors = self.nodes[current as usize]
-                    .layers
-                    .get(layer)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
+                let neighbors = self.node_layer(current as usize, layer);
                 for &neighbor in neighbors {
-                    let distance = self.node_distance(neighbor, &query_payload)?;
+                    let distance = self.node_distance(neighbor, query_payload)?;
                     if distance < current_distance {
                         current = neighbor;
                         current_distance = distance;
@@ -752,7 +928,7 @@ impl VectorHnswIndexBlob {
             }
         }
 
-        let ef = ef.max(limit).min(self.nodes.len()).max(1);
+        let ef = ef.max(limit).min(self.node_count()).max(1);
         let start = HnswSearchQueueItem {
             node: current,
             distance: current_distance,
@@ -761,7 +937,7 @@ impl VectorHnswIndexBlob {
         candidates.push(std::cmp::Reverse(start));
         let mut nearest = BinaryHeap::new();
         nearest.push(start);
-        let mut visited = HashSet::with_capacity(ef.saturating_mul(2).min(self.nodes.len()));
+        let mut visited = HashSet::with_capacity(ef.saturating_mul(2).min(self.node_count()));
         visited.insert(current);
 
         while let Some(std::cmp::Reverse(candidate)) = candidates.pop() {
@@ -772,16 +948,12 @@ impl VectorHnswIndexBlob {
             {
                 break;
             }
-            let neighbors = self.nodes[candidate.node as usize]
-                .layers
-                .first()
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+            let neighbors = self.node_layer(candidate.node as usize, 0);
             for &neighbor in neighbors {
                 if !visited.insert(neighbor) {
                     continue;
                 }
-                let distance = self.node_distance(neighbor, &query_payload)?;
+                let distance = self.node_distance(neighbor, query_payload)?;
                 let item = HnswSearchQueueItem {
                     node: neighbor,
                     distance,
@@ -808,17 +980,27 @@ impl VectorHnswIndexBlob {
         });
         let mut output = Vec::with_capacity(limit.min(nearest.len()));
         for item in nearest {
-            let node = &self.nodes[item.node as usize];
-            if allow_doc_ids.is_some_and(|allowed| !allowed.contains(&node.id)) {
+            let node = item.node as usize;
+            let id = &self.ids[node];
+            let doc_version = self.doc_versions[node];
+            if allow_doc_ids.is_some_and(|allowed| !allowed.contains(id)) {
                 continue;
             }
-            if current_versions.get(&node.id).copied() != Some(node.doc_version) {
+            if current_versions
+                .get(id)
+                .is_none_or(|version| *version != doc_version)
+            {
                 continue;
             }
             output.push(VectorCandidate {
-                id: node.id.clone(),
-                doc_version: node.doc_version,
-                distance: item.distance,
+                id: id.clone(),
+                doc_version,
+                distance: hnsw_candidate_distance(
+                    self.distance,
+                    query,
+                    &self.vectors[node],
+                    item.distance,
+                )?,
             });
             if output.len() >= limit {
                 break;
@@ -885,6 +1067,7 @@ impl HnswBackend {
         }
     }
 
+    #[cfg(test)]
     fn insert(&self, vector: &[f32], origin_id: usize) {
         match self {
             HnswBackend::F32L2(index) => index.insert((vector, origin_id)),
@@ -897,6 +1080,83 @@ impl HnswBackend {
         }
     }
 
+    fn insert_payloads(&self, payloads: &[HnswSnapshotVector]) {
+        const PARALLEL_BUILD_THRESHOLD: usize = 256;
+        macro_rules! insert_f32 {
+            ($index:expr) => {{
+                let vectors = payloads
+                    .iter()
+                    .filter_map(|payload| match payload {
+                        HnswSnapshotVector::F32(values) => Some(values.as_slice()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if vectors.len() >= PARALLEL_BUILD_THRESHOLD {
+                    let refs = vectors
+                        .iter()
+                        .enumerate()
+                        .map(|(origin_id, vector)| (*vector, origin_id))
+                        .collect::<Vec<_>>();
+                    $index.parallel_insert_slice(&refs);
+                } else {
+                    for (origin_id, vector) in vectors.into_iter().enumerate() {
+                        $index.insert((vector, origin_id));
+                    }
+                }
+            }};
+        }
+        match self {
+            HnswBackend::F32L2(index) => insert_f32!(index),
+            HnswBackend::F32Cosine(index) => insert_f32!(index),
+            HnswBackend::F32Ip(index) => insert_f32!(index),
+            HnswBackend::Q8(index) => {
+                let encoded = payloads
+                    .iter()
+                    .filter_map(|payload| match payload {
+                        HnswSnapshotVector::Q8 { scale, values } => {
+                            Some(q8_snapshot_bytes(*scale, values))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if encoded.len() >= PARALLEL_BUILD_THRESHOLD {
+                    let refs = encoded
+                        .iter()
+                        .enumerate()
+                        .map(|(origin_id, vector)| (vector.as_slice(), origin_id))
+                        .collect::<Vec<_>>();
+                    index.parallel_insert_slice(&refs);
+                } else {
+                    for (origin_id, vector) in encoded.iter().enumerate() {
+                        index.insert((vector.as_slice(), origin_id));
+                    }
+                }
+            }
+            HnswBackend::Binary(index) => {
+                let vectors = payloads
+                    .iter()
+                    .filter_map(|payload| match payload {
+                        HnswSnapshotVector::Binary { bits, .. } => Some(bits.as_slice()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if vectors.len() >= PARALLEL_BUILD_THRESHOLD {
+                    let refs = vectors
+                        .iter()
+                        .enumerate()
+                        .map(|(origin_id, vector)| (*vector, origin_id))
+                        .collect::<Vec<_>>();
+                    index.parallel_insert_slice(&refs);
+                } else {
+                    for (origin_id, vector) in vectors.into_iter().enumerate() {
+                        index.insert((vector, origin_id));
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn search(
         &self,
         query: &[f32],

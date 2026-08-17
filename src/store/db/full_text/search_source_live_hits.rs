@@ -1,5 +1,19 @@
 use super::*;
 impl Db {
+    pub(super) fn fulltext_filter_fields_from_source(
+        &self,
+        meta: &FullTextIndexMeta,
+        key: &str,
+    ) -> Result<Option<Vec<(String, String)>>, Error> {
+        match meta.source_type {
+            FullTextSourceType::Hash => {
+                let fields = self.hash_get_all(key)?;
+                Ok((!fields.is_empty()).then_some(fields))
+            }
+            FullTextSourceType::Json => self.fulltext_json_fields(key, meta),
+        }
+    }
+
     pub(super) fn fulltext_live_hits_from_source(
         &self,
         meta: &FullTextIndexMeta,
@@ -75,6 +89,36 @@ impl Db {
         options: &FullTextSearchOptions,
         limits: FullTextSearchLimits,
     ) -> Result<Vec<FullTextLiveHit>, Error> {
+        if let Some(keys) = options.in_keys.as_ref() {
+            let mut live = Vec::new();
+            let mut live_bytes = 0usize;
+            for key in keys {
+                if fulltext_search_timeout_reached(
+                    limits.timeout.at,
+                    limits.timeout.fail_on_timeout,
+                )? {
+                    return Ok(live);
+                }
+                let Some(hit) =
+                    self.fulltext_live_hit_from_source(meta, options, key.clone(), 1.0)?
+                else {
+                    continue;
+                };
+                if fulltext_index_filter_matches(meta, &hit.fields)?
+                    && fulltext_eval_ast_against_fields(ast, &hit.fields, meta, options)?
+                {
+                    if live.len() >= limits.result_cap {
+                        return Err(Error::msg("ERR fulltext result limit exceeded"));
+                    }
+                    live_bytes = live_bytes.saturating_add(estimate_fulltext_live_hit_bytes(&hit));
+                    if live_bytes > limits.reader_budget {
+                        return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
+                    }
+                    live.push(hit);
+                }
+            }
+            return Ok(live);
+        }
         let mut live = Vec::new();
         let mut live_bytes = 0usize;
         let mut cursor = None;
@@ -157,10 +201,9 @@ impl Db {
                 if !fulltext_fields_match_geo_filters(&filter_fields, &options.geo_filters)? {
                     return Ok(None);
                 }
-                let sort_key = options
-                    .sort_by
-                    .as_ref()
-                    .and_then(|sort_by| fulltext_field_value(&filter_fields, &sort_by.field));
+                let sort_key = options.sort_by.as_ref().and_then(|sort_by| {
+                    fulltext_sort_field_value(&filter_fields, meta, &sort_by.field)
+                });
                 let document_score = fulltext_document_score(meta, &filter_fields);
                 let payload = fulltext_document_payload(meta, &filter_fields);
                 let fields =
@@ -193,7 +236,7 @@ impl Db {
         let sort_key = options
             .sort_by
             .as_ref()
-            .and_then(|sort_by| fulltext_field_value(&fields, &sort_by.field));
+            .and_then(|sort_by| fulltext_sort_field_value(&fields, meta, &sort_by.field));
         let document_score = fulltext_document_score(meta, &fields);
         let payload = fulltext_document_payload(meta, &fields);
         Ok(Some(FullTextLiveHit {

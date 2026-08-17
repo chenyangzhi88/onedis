@@ -29,6 +29,99 @@ impl FullTextRuntime {
         Ok(result.hits)
     }
 
+    pub(super) fn search_sorted(
+        &self,
+        query_text: &str,
+        options: &FullTextSearchOptions,
+        fetch_limit: usize,
+        deadline: FullTextSearchDeadline,
+    ) -> Result<FullTextSearchHits, Error> {
+        let sort_by = options
+            .sort_by
+            .as_ref()
+            .ok_or_else(|| Error::msg("ERR missing SORTBY"))?;
+        let (field, kind) = self
+            .sortable_fields
+            .get(&sort_by.field)
+            .ok_or_else(|| Error::msg("ERR SORTBY field is not SORTABLE"))?;
+        let searcher = self.reader.searcher();
+        let query_text = substitute_fulltext_params(query_text, &options.params)?;
+        let query = self.with_live_documents_query(self.build_query(&query_text, options)?);
+        if Instant::now() >= deadline.at {
+            if deadline.fail_on_timeout {
+                return Err(Error::msg("Timeout limit was reached"));
+            }
+            return Ok(FullTextSearchHits {
+                total: 0,
+                hits: Vec::new(),
+                timed_out: true,
+            });
+        }
+        let order = if sort_by.asc { Order::Asc } else { Order::Desc };
+        let field_name = self.index.schema().get_field_name(*field).to_string();
+        let (addresses, total) = match kind {
+            FullTextFieldKind::Numeric => {
+                let (top, total) = searcher.search(
+                    query.as_ref(),
+                    &(
+                        TopDocs::with_limit(fetch_limit).order_by((
+                            (SortByStaticFastValue::<f64>::for_field(&field_name), order),
+                            (SortByString::for_field(FULLTEXT_KEY_FIELD), Order::Asc),
+                        )),
+                        Count,
+                    ),
+                )?;
+                (
+                    top.into_iter()
+                        .map(|(_, address)| address)
+                        .collect::<Vec<_>>(),
+                    total,
+                )
+            }
+            FullTextFieldKind::Text | FullTextFieldKind::Tag => {
+                let (top, total) = searcher.search(
+                    query.as_ref(),
+                    &(
+                        TopDocs::with_limit(fetch_limit).order_by((
+                            (SortByString::for_field(&field_name), order),
+                            (SortByString::for_field(FULLTEXT_KEY_FIELD), Order::Asc),
+                        )),
+                        Count,
+                    ),
+                )?;
+                (
+                    top.into_iter()
+                        .map(|(_, address)| address)
+                        .collect::<Vec<_>>(),
+                    total,
+                )
+            }
+            _ => return Err(Error::msg("ERR SORTBY field is not SORTABLE")),
+        };
+        let timed_out = Instant::now() >= deadline.at;
+        if timed_out && deadline.fail_on_timeout {
+            return Err(Error::msg("Timeout limit was reached"));
+        }
+        let mut hits = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let doc: TantivyDocument = searcher.doc(address)?;
+            if let Some(key) = doc
+                .get_first(self.key_field)
+                .and_then(|value| value.as_str())
+            {
+                hits.push(FullTextSearchHit {
+                    key: key.to_string(),
+                    score: 1.0,
+                });
+            }
+        }
+        Ok(FullTextSearchHits {
+            total,
+            hits,
+            timed_out,
+        })
+    }
+
     pub(super) fn search_query(
         &self,
         query: Box<dyn Query>,
@@ -36,6 +129,7 @@ impl FullTextRuntime {
         fetch_limit: Option<usize>,
         deadline: FullTextSearchDeadline,
     ) -> Result<FullTextSearchHits, Error> {
+        let query = self.with_live_documents_query(query);
         let fetch_limit = fetch_limit.unwrap_or(usize::MAX);
         let result = searcher.search(
             query.as_ref(),
@@ -68,6 +162,36 @@ impl FullTextRuntime {
             hits,
             timed_out: result.timed_out,
         })
+    }
+
+    fn with_live_documents_query(&self, query: Box<dyn Query>) -> Box<dyn Query> {
+        // Source TTL is indexed with every published document. Applying the
+        // current clock as part of the Tantivy query keeps both `total` and
+        // the selected page free of expired documents, without materializing
+        // every candidate in the source store.
+        let live_query = Box::new(BooleanQuery::new(vec![
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.expires_at_field, 0),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Should,
+                Box::new(RangeQuery::new(
+                    Bound::Excluded(Term::from_field_u64(
+                        self.expires_at_field,
+                        current_fulltext_millis(),
+                    )),
+                    Bound::Unbounded,
+                )) as Box<dyn Query>,
+            ),
+        ]));
+        Box::new(BooleanQuery::new(vec![
+            (Occur::Must, query),
+            (Occur::Must, live_query),
+        ]))
     }
 }
 

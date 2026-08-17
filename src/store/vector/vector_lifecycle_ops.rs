@@ -63,6 +63,12 @@ impl Db {
             index,
             version,
         )?;
+        batch.delete(&vector_version_checkpoint_key(
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+        ))?;
         meta.next_segment_id = 1;
         meta.snapshot_doc_version = 0;
         put_vector_marker_to_batch(
@@ -88,21 +94,27 @@ impl Db {
             &batch,
         )?;
 
-        self.vector_runtimes.reset(
-            self.db_index,
-            index,
-            version,
-            VectorRuntimeConfig::from(&meta),
-        );
-        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
-        let docs = self
-            .store
-            .scan_prefix_raw(&prefix)
-            .into_iter()
-            .map(|(_, raw)| decode_record::<VectorDocRecord>(&raw))
-            .collect::<Result<Vec<_>, Error>>()?;
-        self.vector_runtimes
-            .reconcile_docs(self.db_index, index, version, docs, 0)?;
+        if meta.algorithm == VectorIndexAlgorithm::Hnsw {
+            self.vector_runtimes.reset(
+                self.db_index,
+                index,
+                version,
+                VectorRuntimeConfig::from(&meta),
+            );
+            let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
+            let docs = self
+                .store
+                .scan_prefix_raw(&prefix)
+                .into_iter()
+                .map(|(_, raw)| decode_record::<VectorDocRecord>(&raw))
+                .collect::<Result<Vec<_>, Error>>()?;
+            self.vector_runtimes
+                .reconcile_docs(self.db_index, index, version, docs, 0)?;
+            if meta.doc_count > 0 {
+                self.vector_runtimes
+                    .mark_dirty(self.db_index, index, version);
+            }
+        }
         Ok(())
     }
 
@@ -117,21 +129,7 @@ impl Db {
         source: &VectorSegmentBlob,
         meta: &VectorIndexMeta,
     ) -> Result<VectorHnswIndexBlob, Error> {
-        if source.entries.is_empty() {
-            return Err(Error::msg("ERR cannot index an empty vector segment"));
-        }
-        let mut graph = HnswGraph::new(
-            meta.dim as usize,
-            meta.distance,
-            meta.m as usize,
-            meta.ef_construction as usize,
-            source.entries.len(),
-            meta.quantization,
-        );
-        for doc in &source.entries {
-            graph.upsert(doc.id.clone(), doc.doc_version, doc.vector.clone())?;
-        }
-        graph.to_persisted_index()
+        VectorHnswIndexBlob::build(source, meta)
     }
 
     fn flush_vector_memtable_locked(
@@ -641,6 +639,52 @@ impl Db {
             .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
         let (_, version, mut meta, expected_marker, expected_meta) =
             self.read_vector_meta_observed(index)?;
+        if meta.algorithm == VectorIndexAlgorithm::Flat {
+            let doc_prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
+            let mut live_count = 0u64;
+            let mut tombstone_keys = Vec::new();
+            for (key, raw) in self.store.scan_prefix_raw(&doc_prefix) {
+                if decode_record::<VectorDocRecord>(&raw)?.deleted {
+                    tombstone_keys.push(key);
+                } else {
+                    live_count = live_count.saturating_add(1);
+                }
+            }
+            let mut batch = WriteBatch::new();
+            delete_vector_segments_to_batch(
+                &mut batch,
+                self.key_layout,
+                self.db_index,
+                index,
+                version,
+            )?;
+            batch.delete(&vector_version_checkpoint_key(
+                self.key_layout,
+                self.db_index,
+                index,
+                version,
+            ))?;
+            for key in tombstone_keys {
+                batch.delete(&key)?;
+            }
+            meta.doc_count = live_count;
+            meta.next_segment_id = 1;
+            meta.snapshot_doc_version = 0;
+            batch.put(
+                &vector_meta_key(self.key_layout, self.db_index, index, version),
+                &encode_record(&meta)?,
+            )?;
+            self.commit_vector_batch_if_marker_unchanged(
+                index,
+                meta.internal,
+                version,
+                &expected_marker,
+                &expected_meta,
+                &batch,
+            )?;
+            self.vector_runtimes.remove(self.db_index, index, version);
+            return Ok(());
+        }
         self.ensure_vector_runtime_unlocked(index, version, &meta)?;
 
         // Per-document records are the source of truth.  This is an explicit
@@ -758,6 +802,21 @@ impl Db {
         meta.next_segment_id = next_segment_id;
         meta.snapshot_doc_version = max_doc_version;
         batch.put(
+            &vector_version_checkpoint_key(
+                self.key_layout,
+                self.db_index,
+                index,
+                version,
+            ),
+            &encode_record(&VectorVersionCheckpoint {
+                through_doc_version: max_doc_version,
+                current_versions: live_docs
+                    .iter()
+                    .map(|doc| (doc.id.clone(), doc.doc_version))
+                    .collect(),
+            })?,
+        )?;
+        batch.put(
             &vector_meta_key(self.key_layout, self.db_index, index, version),
             &encode_record(&meta)?,
         )?;
@@ -805,16 +864,22 @@ impl Db {
     }
 
     pub(crate) fn vector_maintenance_tick(&self) -> Result<(), Error> {
-        let indexes = self.vector_runtimes.indexes_for_db(self.db_index);
+        let indexes = self
+            .vector_runtimes
+            .take_dirty_indexes_for_db(self.db_index);
         for (index, expected_version) in indexes {
             let result = (|| -> Result<(), Error> {
                 // Advance an already-published source before flushing the
                 // current memtable.  This keeps source/index publication as
                 // two observable crash-safe stages.  HNSW construction and
                 // merge rebuilding run outside the collection write lock.
-                self.build_one_vector_segment_index(&index, expected_version)?;
-                self.flush_vector_memtable(&index, expected_version, false)?;
-                self.merge_one_vector_segment_group(&index, expected_version)?;
+                let built = self.build_one_vector_segment_index(&index, expected_version)?;
+                let flushed = self.flush_vector_memtable(&index, expected_version, false)?;
+                let merged = self.merge_one_vector_segment_group(&index, expected_version)?;
+                if built || flushed || merged {
+                    self.vector_runtimes
+                        .mark_dirty(self.db_index, &index, expected_version);
+                }
                 Ok(())
             })();
             if let Err(err) = result {

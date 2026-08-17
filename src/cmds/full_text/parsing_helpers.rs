@@ -265,6 +265,9 @@ fn default_fulltext_search_options() -> FullTextSearchOptions {
         timeout_ms: None,
         slop: None,
         inorder: false,
+        phonetic: None,
+        verbatim: false,
+        no_stopwords: false,
         language: None,
         payload: None,
         scorer: FullTextScorer::Bm25Std,
@@ -274,6 +277,9 @@ fn default_fulltext_search_options() -> FullTextSearchOptions {
         params: HashMap::new(),
         dialect: 2,
         dialect_explicit: false,
+        vector_ef_runtime: None,
+        vector_filter_ef: None,
+        vector_epsilon: 0.0,
     }
 }
 

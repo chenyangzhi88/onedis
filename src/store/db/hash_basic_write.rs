@@ -68,11 +68,13 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         if meta.is_none() {
-            batch.put(&self.mk(key), &encode_hash_meta(0, version));
+            (batch.put(&self.mk(key), &encode_hash_meta(0, version)))
+                .expect("write batch append invariant violated");
         }
-        batch.put(&field_key, value);
+        (batch.put(&field_key, value)).expect("write batch append invariant violated");
         if meta.is_some() {
-            batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+            (batch.delete(&hash_field_expire_key(self.db_index, key, version, field)))
+                .expect("write batch append invariant violated");
         }
 
         if batch.count() > 0 {
@@ -123,23 +125,26 @@ impl Db {
         };
         let mut batch = WriteBatch::new();
         if meta.is_none() {
-            batch.put(&self.mk(key), &encode_hash_meta(0, version));
+            (batch.put(&self.mk(key), &encode_hash_meta(0, version)))
+                .expect("write batch append invariant violated");
         }
 
         let mut added = 0usize;
         let mut seen_in_batch = HashSet::new();
         for (field, value) in fields {
             if !seen_in_batch.insert(field.clone()) {
-                batch.put(&hash_field_key(self.db_index, key, version, field), value);
+                (batch.put(&hash_field_key(self.db_index, key, version, field), value))
+                    .expect("write batch append invariant violated");
                 continue;
             }
             let field_key = hash_field_key(self.db_index, key, version, field);
             if meta.is_none() || self.hash_live_field_value(key, version, field).is_none() {
                 added += 1;
             }
-            batch.put(&field_key, value);
+            (batch.put(&field_key, value)).expect("write batch append invariant violated");
             if meta.is_some() {
-                batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+                (batch.delete(&hash_field_expire_key(self.db_index, key, version, field)))
+                    .expect("write batch append invariant violated");
             }
         }
 
@@ -362,17 +367,20 @@ impl Db {
                 .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
         }
         if meta.is_none() {
-            batch.put(&key_bytes, &encode_hash_meta(0, version));
+            (batch.put(&key_bytes, &encode_hash_meta(0, version)))
+                .expect("write batch append invariant violated");
         }
         for slot in 0..field_count {
             let unchanged = live[slot]
                 && !has_expire_marker[slot]
                 && existing[slot].as_deref() == Some(final_values[slot]);
             if !unchanged {
-                batch.put(&field_keys[slot], final_values[slot]);
+                (batch.put(&field_keys[slot], final_values[slot]))
+                    .expect("write batch append invariant violated");
             }
             if has_expire_marker[slot] {
-                batch.delete(&read_keys[field_count + slot]);
+                (batch.delete(&read_keys[field_count + slot]))
+                    .expect("write batch append invariant violated");
             }
         }
 
@@ -417,8 +425,9 @@ impl Db {
             }
             let field_key = hash_field_key(self.db_index, key, version, field);
             if existing_field_keys.contains(&field_key) {
-                batch.delete(&field_key);
-                batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+                (batch.delete(&field_key)).expect("write batch append invariant violated");
+                (batch.delete(&hash_field_expire_key(self.db_index, key, version, field)))
+                    .expect("write batch append invariant violated");
                 deleted += 1;
             }
         }
@@ -545,13 +554,14 @@ impl Db {
                 .and_then(decode_u64_be)
                 .is_some_and(|expire_ms| expire_ms > 0 && now >= expire_ms);
             if value.is_some() && !expired {
-                batch.delete(&field_key);
-                batch.delete(&hash_field_expire_key(
+                (batch.delete(&field_key)).expect("write batch append invariant violated");
+                (batch.delete(&hash_field_expire_key(
                     self.db_index,
                     key,
                     meta.version,
                     field,
-                ));
+                )))
+                .expect("write batch append invariant violated");
                 deleted_by_position[index] = true;
                 deleted += 1;
             }

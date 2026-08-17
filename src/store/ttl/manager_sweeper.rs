@@ -58,12 +58,12 @@ impl TtlManager {
 
         let planned_result = match observed.value() {
             None => {
-                batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
+                (batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key))).expect("write batch append invariant violated");
                 ExpireResult::NotFound
             }
             Some(raw) => {
                 let Some(header) = decode_meta_header(raw) else {
-                    batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
+                    (batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key))).expect("write batch append invariant violated");
                     return self
                         .commit_expire_plan_async(
                             &store,
@@ -74,7 +74,7 @@ impl TtlManager {
                         .await;
                 };
                 if header.expire_ms != entry.expire_ms {
-                    batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
+                    (batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key))).expect("write batch append invariant violated");
                     ExpireResult::Stale
                 } else {
                     expired_header = Some(header);
@@ -91,8 +91,8 @@ impl TtlManager {
                         return ExpireResult::Stale;
                     }
 
-                    batch.delete(&meta_key);
-                    batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key));
+                    (batch.delete(&meta_key)).expect("write batch append invariant violated");
+                    (batch.delete(&ttl_index_key(entry.expire_ms, entry.db_index, &entry.key))).expect("write batch append invariant violated");
                     ExpireResult::Deleted
                 }
             }

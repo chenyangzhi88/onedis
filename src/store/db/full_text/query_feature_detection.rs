@@ -17,6 +17,7 @@ pub(super) fn contains_fulltext_vector_query(ast: &FullTextQueryAst) -> bool {
         | FullTextQueryAst::Fuzzy(_)
         | FullTextQueryAst::Tag { .. }
         | FullTextQueryAst::Numeric { .. }
+        | FullTextQueryAst::Missing { .. }
         | FullTextQueryAst::Geo { .. }
         | FullTextQueryAst::GeoShape { .. } => false,
     }
@@ -40,6 +41,49 @@ pub(super) fn contains_fulltext_geo_query(ast: &FullTextQueryAst) -> bool {
         | FullTextQueryAst::Fuzzy(_)
         | FullTextQueryAst::Tag { .. }
         | FullTextQueryAst::Numeric { .. }
+        | FullTextQueryAst::Missing { .. }
+        | FullTextQueryAst::VectorKnn { .. }
+        | FullTextQueryAst::VectorRange { .. } => false,
+    }
+}
+
+pub(super) fn fulltext_query_requires_source_validation(
+    ast: &FullTextQueryAst,
+    options: &FullTextSearchOptions,
+) -> bool {
+    if options.inorder || options.slop.is_some() {
+        return true;
+    }
+    match ast {
+        FullTextQueryAst::Attributed {
+            expr,
+            slop,
+            inorder,
+            ..
+        } => {
+            slop.is_some()
+                || inorder.is_some()
+                || fulltext_query_requires_source_validation(expr, options)
+        }
+        FullTextQueryAst::Field { expr, .. }
+        | FullTextQueryAst::Not(expr)
+        | FullTextQueryAst::Optional(expr) => {
+            fulltext_query_requires_source_validation(expr, options)
+        }
+        FullTextQueryAst::And(children) | FullTextQueryAst::Or(children) => children
+            .iter()
+            .any(|child| fulltext_query_requires_source_validation(child, options)),
+        FullTextQueryAst::All
+        | FullTextQueryAst::Text(_)
+        | FullTextQueryAst::Phrase(_)
+        | FullTextQueryAst::Prefix(_)
+        | FullTextQueryAst::Wildcard(_)
+        | FullTextQueryAst::Fuzzy(_)
+        | FullTextQueryAst::Tag { .. }
+        | FullTextQueryAst::Numeric { .. }
+        | FullTextQueryAst::Missing { .. }
+        | FullTextQueryAst::Geo { .. }
+        | FullTextQueryAst::GeoShape { .. }
         | FullTextQueryAst::VectorKnn { .. }
         | FullTextQueryAst::VectorRange { .. } => false,
     }

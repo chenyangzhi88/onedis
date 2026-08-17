@@ -138,8 +138,8 @@ impl Db {
 
             let observed_field = self.store.get_raw_observed(&field_key);
             let mut batch = WriteBatch::new();
-            batch.delete(&field_key);
-            batch.delete(&expire_key);
+            (batch.delete(&field_key)).expect("write batch append invariant violated");
+            (batch.delete(&expire_key)).expect("write batch append invariant violated");
             match self.compare_and_write_batch_if_not_empty(
                 &[
                     CompareCondition::from_observed(&observed_expire),
@@ -177,8 +177,8 @@ impl Db {
 
             let observed_field = self.store.get_raw_observed_async(&field_key).await;
             let mut batch = WriteBatch::new();
-            batch.delete(&field_key);
-            batch.delete(&expire_key);
+            (batch.delete(&field_key)).expect("write batch append invariant violated");
+            (batch.delete(&expire_key)).expect("write batch append invariant violated");
             match self
                 .compare_and_write_batch_if_not_empty_async(
                     &[
@@ -208,20 +208,6 @@ impl Db {
         }
         self.store
             .get_raw(&hash_field_key(self.db_index, key, version, field))
-    }
-
-    pub(in crate::store::db) async fn hash_live_field_value_async(
-        &self,
-        key: &str,
-        version: u64,
-        field: &str,
-    ) -> Option<Vec<u8>> {
-        if !self.hash_field_is_live_async(key, version, field).await {
-            return None;
-        }
-        self.store
-            .get_raw_async(&hash_field_key(self.db_index, key, version, field))
-            .await
     }
 
     pub(in crate::store::db) async fn hash_entries_raw_async(

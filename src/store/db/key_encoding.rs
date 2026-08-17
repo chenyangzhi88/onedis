@@ -362,66 +362,78 @@ pub(in crate::store::db) fn delete_sub_keys_to_batch_bytes(
 ) {
     match type_tag {
         TYPE_HASH => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &HASH_FIELD_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &HASH_FIELD_NAMESPACE, key, version),
-            );
-            batch.delete_range(
+            ))
+            .expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &HASH_FIELD_EXPIRE_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &HASH_FIELD_EXPIRE_NAMESPACE, key, version),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         TYPE_SET => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &SET_MEMBER_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &SET_MEMBER_NAMESPACE, key, version),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         TYPE_SORTED_SET => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &ZSET_MEMBER_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &ZSET_MEMBER_NAMESPACE, key, version),
-            );
-            batch.delete_range(
+            ))
+            .expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &ZSET_RANK_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &ZSET_RANK_NAMESPACE, key, version),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         TYPE_LIST => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &LIST_ITEM_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &LIST_ITEM_NAMESPACE, key, version),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         TYPE_STREAM => {
-            batch.delete_range(
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &STREAM_ENTRY_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &STREAM_ENTRY_NAMESPACE, key, version),
-            );
-            batch.delete_range(
+            ))
+            .expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &STREAM_GROUP_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &STREAM_GROUP_NAMESPACE, key, version),
-            );
-            batch.delete_range(
+            ))
+            .expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &STREAM_PEL_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &STREAM_PEL_NAMESPACE, key, version),
-            );
-            batch.delete_range(
+            ))
+            .expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &STREAM_CONSUMER_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &STREAM_CONSUMER_NAMESPACE, key, version),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         TYPE_JSON => {
-            batch.delete(&sub_key_range_start_bytes(
+            (batch.delete(&sub_key_range_start_bytes(
                 db_index,
                 &JSON_NODE_NAMESPACE,
                 key,
                 version,
-            ));
-            batch.delete_range(
+            )))
+            .expect("write batch append invariant violated");
+            (batch.delete_range(
                 &sub_key_range_start_bytes(db_index, &JSON_NODE_NAMESPACE, key, version),
                 &sub_key_range_end_bytes(db_index, &JSON_NODE_NAMESPACE, key, version),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         TYPE_VECTOR => {
             for ns in [
@@ -432,10 +444,11 @@ pub(in crate::store::db) fn delete_sub_keys_to_batch_bytes(
                 &VECTOR_SEGMENT_NAMESPACE,
                 &VECTOR_GRAPH_NAMESPACE,
             ] {
-                batch.delete_range(
+                (batch.delete_range(
                     &sub_key_range_start_bytes(db_index, ns, key, version),
                     &sub_key_range_end_bytes(db_index, ns, key, version),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
         }
         _ => {}

@@ -89,6 +89,22 @@ pub(super) fn fulltext_geometry_contains(
     fulltext_geometry_within(query, value)
 }
 
+pub(super) fn fulltext_geometry_bounds(
+    geometry: &FullTextGeometry,
+) -> Option<(f64, f64, f64, f64)> {
+    let points: &[(f64, f64)] = match geometry {
+        FullTextGeometry::Point(point) => std::slice::from_ref(point),
+        FullTextGeometry::Polygon(points) => points,
+    };
+    let first = *points.first()?;
+    Some(points.iter().skip(1).fold(
+        (first.0, first.0, first.1, first.1),
+        |(min_x, max_x, min_y, max_y), (x, y)| {
+            (min_x.min(*x), max_x.max(*x), min_y.min(*y), max_y.max(*y))
+        },
+    ))
+}
+
 pub(super) fn fulltext_point_in_polygon(point: (f64, f64), polygon: &[(f64, f64)]) -> bool {
     let (x, y) = point;
     let mut inside = false;

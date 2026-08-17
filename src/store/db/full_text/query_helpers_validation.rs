@@ -1,19 +1,66 @@
 use super::*;
+pub(super) fn parse_query_attributes(
+    raw: &str,
+) -> Result<(Option<f32>, Option<u32>, Option<bool>, Option<bool>), Error> {
+    let mut weight = None;
+    let mut slop = None;
+    let mut inorder = None;
+    let mut phonetic = None;
+    for attribute in raw
+        .split(';')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let (name, value) = attribute
+            .split_once(':')
+            .or_else(|| attribute.split_once('='))
+            .ok_or_else(|| Error::msg("ERR invalid query attribute"))?;
+        let name = name.trim().trim_start_matches('$').to_ascii_lowercase();
+        let value = value.trim();
+        match name.as_str() {
+            "weight" => {
+                let parsed = value
+                    .parse::<f32>()
+                    .map_err(|_| Error::msg("ERR invalid query attribute"))?;
+                if !parsed.is_finite() || parsed <= 0.0 {
+                    return Err(Error::msg("ERR invalid query attribute"));
+                }
+                weight = Some(parsed);
+            }
+            "slop" => {
+                slop = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| Error::msg("ERR invalid query attribute"))?,
+                );
+            }
+            "inorder" => inorder = Some(parse_query_attribute_bool(value)?),
+            "phonetic" => phonetic = Some(parse_query_attribute_bool(value)?),
+            _ => return Err(Error::msg("ERR unsupported query attribute")),
+        }
+    }
+    Ok((weight, slop, inorder, phonetic))
+}
+
+fn parse_query_attribute_bool(raw: &str) -> Result<bool, Error> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(Error::msg("ERR invalid query attribute")),
+    }
+}
+
+#[cfg(test)]
 pub(super) fn parse_query_attribute_weight(raw: &str) -> Result<Option<f32>, Error> {
     let Some(offset) = raw.find("$weight") else {
         return Ok(None);
     };
-    let rest = raw[offset + "$weight".len()..]
+    let value = raw[offset + "$weight".len()..]
         .trim_start_matches(|ch: char| ch.is_ascii_whitespace() || ch == ':' || ch == '=')
-        .trim_start();
-    let token = rest
         .split(|ch: char| ch.is_ascii_whitespace() || ch == ';' || ch == '}')
         .next()
         .unwrap_or_default();
-    if token.is_empty() {
-        return Ok(None);
-    }
-    let weight = token
+    let weight = value
         .parse::<f32>()
         .map_err(|_| Error::msg("ERR invalid query attribute"))?;
     if weight.is_finite() && weight > 0.0 {
@@ -131,6 +178,27 @@ pub(super) fn search_bound_to_tantivy(
             Bound::Excluded(Term::from_field_f64(field, value))
         }
     }
+}
+
+pub(super) fn fulltext_f64_range_query(field: Field, min: f64, max: f64) -> Box<dyn Query> {
+    Box::new(RangeQuery::new(
+        Bound::Included(Term::from_field_f64(field, min)),
+        Bound::Included(Term::from_field_f64(field, max)),
+    ))
+}
+
+pub(super) fn fulltext_f64_lower_query(field: Field, min: f64) -> Box<dyn Query> {
+    Box::new(RangeQuery::new(
+        Bound::Included(Term::from_field_f64(field, min)),
+        Bound::Unbounded,
+    ))
+}
+
+pub(super) fn fulltext_f64_upper_query(field: Field, max: f64) -> Box<dyn Query> {
+    Box::new(RangeQuery::new(
+        Bound::Unbounded,
+        Bound::Included(Term::from_field_f64(field, max)),
+    ))
 }
 
 pub(super) fn fulltext_wildcard_to_regex(pattern: &str) -> String {

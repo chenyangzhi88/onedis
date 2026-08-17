@@ -97,6 +97,40 @@ fn vector_segment_index_key(
     key
 }
 
+fn vector_version_mutation_prefix(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    index: &str,
+    version: u64,
+) -> Vec<u8> {
+    let mut key = vector_prefix(layout, db_index, &VECTOR_GRAPH_NAMESPACE, index, version);
+    key.push(b'v');
+    key
+}
+
+fn vector_version_mutation_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    index: &str,
+    version: u64,
+    doc_version: u64,
+) -> Vec<u8> {
+    let mut key = vector_version_mutation_prefix(layout, db_index, index, version);
+    key.extend_from_slice(&doc_version.to_be_bytes());
+    key
+}
+
+fn vector_version_checkpoint_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    index: &str,
+    version: u64,
+) -> Vec<u8> {
+    let mut key = vector_prefix(layout, db_index, &VECTOR_META_NAMESPACE, index, version);
+    key.extend_from_slice(b"versions");
+    key
+}
+
 fn vector_tag_key(
     layout: KeyEncodingLayout,
     db_index: u16,

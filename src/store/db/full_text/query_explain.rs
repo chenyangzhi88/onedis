@@ -42,6 +42,9 @@ pub(super) fn fulltext_explain_ast_into(
             relation,
             shape,
         } => lines.push(format!("{indent}GEOSHAPE @{field} [{relation} {shape}]")),
+        FullTextQueryAst::Missing { field } => {
+            lines.push(format!("{indent}MISSING @{field}"));
+        }
         FullTextQueryAst::VectorKnn {
             filter,
             k,
@@ -84,12 +87,26 @@ pub(super) fn fulltext_explain_ast_into(
             lines.push(format!("{indent}OPTIONAL"));
             fulltext_explain_ast_into(child, depth + 1, lines);
         }
-        FullTextQueryAst::Attributed { expr, weight } => {
+        FullTextQueryAst::Attributed {
+            expr,
+            weight,
+            slop,
+            inorder,
+            phonetic,
+        } => {
             lines.push(format!(
-                "{indent}ATTRIBUTES weight={}",
+                "{indent}ATTRIBUTES weight={} slop={} inorder={} phonetic={}",
                 weight
                     .map(|value| value.to_string())
-                    .unwrap_or_else(|| "1".to_string())
+                    .unwrap_or_else(|| "1".to_string()),
+                slop.map(|value| value.to_string())
+                    .unwrap_or_else(|| "default".to_string()),
+                inorder
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "default".to_string()),
+                phonetic
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "default".to_string())
             ));
             fulltext_explain_ast_into(expr, depth + 1, lines);
         }

@@ -112,7 +112,8 @@ impl Db {
             self.ttl_manager
                 .remove_known_to_batch(batch, header.expire_ms, self.db_index, key);
         }
-        batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
+        (batch.put(&key_bytes, &encode_raw_string(value, expire_ms)))
+            .expect("write batch append invariant violated");
         if expire_ms > 0 {
             self.ttl_manager
                 .add_to_batch(batch, expire_ms, self.db_index, key);
@@ -154,7 +155,8 @@ impl Db {
             self.ttl_manager
                 .remove_known_to_batch(batch, header.expire_ms, self.db_index, key);
         }
-        batch.put(&key_bytes, &encode_raw_string(value, expire_ms));
+        (batch.put(&key_bytes, &encode_raw_string(value, expire_ms)))
+            .expect("write batch append invariant violated");
         if expire_ms > 0
             && let Ok(key) = std::str::from_utf8(key)
         {
@@ -236,65 +238,75 @@ impl Db {
     ) {
         match value {
             Structure::String(value) => {
-                batch.put(
+                (batch.put(
                     &main_key(db_index, key),
                     &encode_raw_string(value.as_bytes(), expire_ms),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
             Structure::Hash(hash) => {
-                batch.put(
+                (batch.put(
                     &main_key(db_index, key),
                     &encode_hash_meta(expire_ms, version),
-                );
+                ))
+                .expect("write batch append invariant violated");
 
                 for (field, value) in hash {
-                    batch.put(
+                    (batch.put(
                         &hash_field_key(db_index, key, version, field),
                         value.as_bytes(),
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             Structure::SortedSet(set) => {
-                batch.put(
+                (batch.put(
                     &main_key(db_index, key),
                     &encode_zset_meta(expire_ms, version),
-                );
+                ))
+                .expect("write batch append invariant violated");
 
                 for (member, score) in set {
-                    batch.put(
+                    (batch.put(
                         &zset_member_key(db_index, key, version, member),
                         &score.to_be_bytes(),
-                    );
-                    batch.put(
+                    ))
+                    .expect("write batch append invariant violated");
+                    (batch.put(
                         &zset_rank_key(db_index, key, version, *score, member),
                         INDEX_MARKER_VALUE,
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             Structure::Set(set) => {
-                batch.put(
+                (batch.put(
                     &main_key(db_index, key),
                     &encode_set_meta(expire_ms, version, set.len()),
-                );
+                ))
+                .expect("write batch append invariant violated");
 
                 for member in set {
-                    batch.put(
+                    (batch.put(
                         &set_member_key(db_index, key, version, member),
                         INDEX_MARKER_VALUE,
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             Structure::List(list) => {
-                batch.put(
+                (batch.put(
                     &main_key(db_index, key),
                     &encode_list_meta(expire_ms, version, 0, list.len() as i64),
-                );
+                ))
+                .expect("write batch append invariant violated");
 
                 for (index, value) in list.iter().enumerate() {
-                    batch.put(
+                    (batch.put(
                         &list_item_key(db_index, key, version, index as i64),
                         value.as_bytes(),
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             Structure::Stream(entries) => {
@@ -308,7 +320,7 @@ impl Db {
                         last_id = id;
                     }
                 }
-                batch.put(
+                (batch.put(
                     &main_key(db_index, key),
                     &encode_stream_meta(StreamMeta {
                         expire_ms,
@@ -317,17 +329,20 @@ impl Db {
                         length: encoded_entries.len() as u64,
                         entries_added: encoded_entries.len() as u64,
                     }),
-                );
+                ))
+                .expect("write batch append invariant violated");
                 for (id, fields) in encoded_entries {
-                    batch.put(
+                    (batch.put(
                         &stream_entry_key(db_index, key, version, id),
                         &encode_stream_entry(&fields),
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             _ => {
                 let encoded = encode_entry(value, expire_ms, version);
-                batch.put(&main_key(db_index, key), &encoded);
+                (batch.put(&main_key(db_index, key), &encoded))
+                    .expect("write batch append invariant violated");
             }
         }
     }

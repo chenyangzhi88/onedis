@@ -4,14 +4,16 @@ impl FullTextRuntime {
         &mut self,
         key: &str,
         fields: &[(String, String)],
+        expires_at_ms: u64,
     ) -> Result<usize, Error> {
-        self.upsert_fields(key, fields)
+        self.upsert_fields(key, fields, expires_at_ms)
     }
 
     pub(super) fn upsert_fields(
         &mut self,
         key: &str,
         fields: &[(String, String)],
+        expires_at_ms: u64,
     ) -> Result<usize, Error> {
         self.writer
             .delete_term(Term::from_field_text(self.key_field, key));
@@ -29,8 +31,70 @@ impl FullTextRuntime {
             .unwrap_or_else(|| self.default_language.clone());
         let mut doc = TantivyDocument::default();
         doc.add_text(self.key_field, key);
+        doc.add_u64(self.expires_at_field, expires_at_ms);
+        let present_names = fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<HashSet<_>>();
+        let mut marked_presence = HashSet::new();
+        for name in &present_names {
+            if let Some(marker) = self.presence_fields.get(*name)
+                && marked_presence.insert(*marker)
+            {
+                doc.add_u64(*marker, 1);
+            }
+        }
+        let mut marked_empty = HashSet::new();
+        let mut marked_sort_fields = HashSet::new();
+        for (name, value) in fields {
+            if value.is_empty()
+                && let Some(marker) = self.empty_fields.get(name)
+                && marked_empty.insert(*marker)
+            {
+                doc.add_u64(*marker, 1);
+            }
+        }
+        for (name, value) in fields {
+            if let Some((lon_field, lat_field)) = self.geo_fields.get(name)
+                && let Ok((lon, lat)) = parse_fulltext_geo_value(value)
+            {
+                doc.add_f64(*lon_field, lon);
+                doc.add_f64(*lat_field, lat);
+            }
+            if let Some(bounds_fields) = self.geoshape_fields.get(name)
+                && let Ok(geometry) = parse_fulltext_wkt(value)
+                && let Some((min_x, max_x, min_y, max_y)) = fulltext_geometry_bounds(&geometry)
+            {
+                doc.add_f64(bounds_fields[0], min_x);
+                doc.add_f64(bounds_fields[1], max_x);
+                doc.add_f64(bounds_fields[2], min_y);
+                doc.add_f64(bounds_fields[3], max_y);
+            }
+            if let Some((sort_field, kind)) = self.sortable_fields.get(name)
+                && marked_sort_fields.insert(*sort_field)
+            {
+                // JSON paths can produce multiple values. RediSearch exposes the first
+                // value as the sort key, so the FAST field must not collect the rest.
+                match kind {
+                    FullTextFieldKind::Numeric => {
+                        if let Ok(value) = value.parse::<f64>()
+                            && value.is_finite()
+                        {
+                            doc.add_f64(*sort_field, value);
+                        }
+                    }
+                    FullTextFieldKind::Text | FullTextFieldKind::Tag => {
+                        doc.add_text(*sort_field, value);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut indexed_bytes = key.len();
         for (field_name, value) in fields {
+            if value.is_empty() {
+                continue;
+            }
             let Some((field, kind)) = self.source_fields.get(field_name) else {
                 continue;
             };

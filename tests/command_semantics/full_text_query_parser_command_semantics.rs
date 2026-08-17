@@ -227,6 +227,83 @@ fn ft_search_query_parser_tag_numeric_params_and_dialect() {
 }
 
 #[test]
+fn ft_search_executes_indexempty_and_indexmissing_markers() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "markers",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "marker:",
+            "SCHEMA",
+            "title",
+            "TEXT",
+            "INDEXEMPTY",
+            "INDEXMISSING",
+        ],
+    );
+    apply(&db, &["HSET", "marker:empty", "title", ""]);
+    apply(&db, &["HSET", "marker:missing", "other", "present"]);
+    apply(&db, &["HSET", "marker:value", "title", "ordinary"]);
+
+    assert_search_ids(
+        &db,
+        &["FT.SEARCH", "markers", "@title:\"\""],
+        &["marker:empty"],
+    );
+    assert_search_ids(
+        &db,
+        &["FT.SEARCH", "markers", "ismissing(@title)"],
+        &["marker:missing"],
+    );
+}
+
+#[test]
+fn ft_search_executes_local_slop_and_inorder_query_attributes() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "phrases",
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "phrase:",
+            "SCHEMA",
+            "title",
+            "TEXT",
+        ],
+    );
+    apply(&db, &["HSET", "phrase:ordered", "title", "quick red fox"]);
+    apply(&db, &["HSET", "phrase:reversed", "title", "fox red quick"]);
+
+    assert_search_ids(
+        &db,
+        &[
+            "FT.SEARCH",
+            "phrases",
+            "\"quick fox\"=>{$slop:1;$inorder:true}",
+        ],
+        &["phrase:ordered"],
+    );
+    assert_search_ids(
+        &db,
+        &[
+            "FT.SEARCH",
+            "phrases",
+            "\"quick fox\"=>{$slop:3;$inorder:false}",
+        ],
+        &["phrase:ordered", "phrase:reversed"],
+    );
+}
+
+#[test]
 fn ft_search_query_parser_rejects_bad_syntax_and_unimplemented_plans() {
     let (_dir, db) = seed_query_db();
 
@@ -250,7 +327,7 @@ fn ft_search_query_parser_rejects_bad_syntax_and_unimplemented_plans() {
             "2",
         ],
     );
-    assert!(err.to_string().contains("vector dimension mismatch"));
+    assert!(err.to_string().contains("invalid vector blob"));
 
     assert_search_ids(&db, &["FT.SEARCH", "idx", "@location:[0 0 1 km]"], &[]);
 }

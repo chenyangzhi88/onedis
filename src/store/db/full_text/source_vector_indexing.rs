@@ -1,4 +1,6 @@
 use super::*;
+
+pub(super) type FullTextVectorMutationBatches = HashMap<String, Vec<(String, Option<Vec<f32>>)>>;
 impl Db {
     pub(super) fn fulltext_request_refresh_for_source(
         &self,
@@ -144,6 +146,14 @@ impl Db {
         Ok(Some(self.fulltext_json_fields_from_root(&root, meta)?))
     }
 
+    pub(super) fn fulltext_source_expire_ms(&self, key: &str) -> u64 {
+        self.store
+            .get_raw(&self.mk(key))
+            .as_deref()
+            .and_then(decode_meta_header)
+            .map_or(0, |header| header.expire_ms)
+    }
+
     pub(super) fn fulltext_json_root(&self, key: &str) -> Result<Option<serde_json::Value>, Error> {
         self.expire_if_needed(key);
         if self.store.get_raw(&self.mk(key)).is_none() {
@@ -164,7 +174,7 @@ impl Db {
     ) -> Result<Vec<(String, String)>, Error> {
         let mut fields = Vec::new();
         for field in &meta.schema {
-            if field.options.noindex {
+            if field.options.noindex && !field.options.index_missing {
                 continue;
             }
             let values = fulltext_json_values_from_root(root, &field.name)?;
@@ -272,9 +282,20 @@ impl Db {
         {
             let internal =
                 fulltext_vector_index_name(index, meta.generation, field.attribute_name());
-            match self.vector_create(&internal, fulltext_vector_create_options(field)?) {
+            let flat = field
+                .options
+                .vector
+                .as_ref()
+                .is_some_and(|options| options.algorithm == FullTextVectorAlgorithm::Flat);
+            match self.vector_create_internal(
+                &internal,
+                fulltext_vector_create_options(field)?,
+                flat,
+            ) {
                 Ok(()) => {}
-                Err(err) if err.to_string() == "ERR vector index already exists" => {}
+                Err(err) if err.to_string() == "ERR vector index already exists" => {
+                    self.vector_set_internal_algorithm(&internal, flat)?;
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -295,24 +316,29 @@ impl Db {
         }
     }
 
-    pub(super) fn fulltext_upsert_vectors(
+    pub(super) fn fulltext_collect_vector_mutations(
         &self,
         index: &str,
         meta: &FullTextIndexMeta,
         key: &str,
-        fields: &[(String, String)],
         json_root: Option<&serde_json::Value>,
+        batches: &mut FullTextVectorMutationBatches,
     ) -> Result<(), Error> {
+        let hash_fields = matches!(meta.source_type, FullTextSourceType::Hash)
+            .then(|| self.hash_get_all_bytes(key))
+            .transpose()?;
         for field in meta
             .schema
             .iter()
             .filter(|field| matches!(field.kind, FullTextFieldKind::Vector))
         {
             let vector = match meta.source_type {
-                FullTextSourceType::Hash => fields
+                FullTextSourceType::Hash => hash_fields
+                    .as_ref()
+                    .expect("HASH fields loaded above")
                     .iter()
                     .find(|(name, _)| name == &field.name || name == field.attribute_name())
-                    .map(|(_, value)| parse_fulltext_vector_text(value))
+                    .map(|(_, value)| parse_fulltext_vector_value(value, field))
                     .transpose()?,
                 FullTextSourceType::Json => json_root
                     .map(|root| fulltext_json_values_from_root(root, &field.name))
@@ -325,34 +351,58 @@ impl Db {
             };
             let internal =
                 fulltext_vector_index_name(index, meta.generation, field.attribute_name());
-            if let Some(vector) = vector {
-                self.vector_add(&internal, key, vector, None)?;
-            } else {
-                let ids = [key.to_string()];
-                self.vector_del(&internal, &ids)?;
-            }
+            batches
+                .entry(internal)
+                .or_default()
+                .push((key.to_string(), vector));
         }
         Ok(())
     }
 
-    pub(super) fn fulltext_delete_vectors(
+    pub(super) fn fulltext_apply_vector_mutations(
+        &self,
+        batches: FullTextVectorMutationBatches,
+    ) -> Result<(), Error> {
+        for (index, mutations) in batches {
+            self.vector_apply_internal_batch(&index, mutations)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn fulltext_collect_vector_deletions(
         &self,
         index: &str,
         meta: &FullTextIndexMeta,
         key: &str,
-    ) -> Result<(), Error> {
-        let ids = [key.to_string()];
+        batches: &mut FullTextVectorMutationBatches,
+    ) {
         for field in meta
             .schema
             .iter()
             .filter(|field| matches!(field.kind, FullTextFieldKind::Vector))
         {
-            self.vector_del(
-                &fulltext_vector_index_name(index, meta.generation, field.attribute_name()),
-                &ids,
-            )?;
+            batches
+                .entry(fulltext_vector_index_name(
+                    index,
+                    meta.generation,
+                    field.attribute_name(),
+                ))
+                .or_default()
+                .push((key.to_string(), None));
         }
-        Ok(())
+    }
+
+    pub(super) fn fulltext_upsert_vectors(
+        &self,
+        index: &str,
+        meta: &FullTextIndexMeta,
+        key: &str,
+        _fields: &[(String, String)],
+        json_root: Option<&serde_json::Value>,
+    ) -> Result<(), Error> {
+        let mut batches = FullTextVectorMutationBatches::new();
+        self.fulltext_collect_vector_mutations(index, meta, key, json_root, &mut batches)?;
+        self.fulltext_apply_vector_mutations(batches)
     }
 }
 

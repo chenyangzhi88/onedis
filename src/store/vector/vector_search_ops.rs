@@ -16,7 +16,7 @@ impl Db {
         index: &str,
         query: &[f32],
         options: VectorSearchOptions,
-        external_allow_doc_ids: Option<HashSet<String>>,
+        external_allow_doc_ids: Option<Arc<HashSet<String>>>,
         query_is_projected: bool,
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let (_, version, meta) = self.read_vector_meta(index)?;
@@ -50,26 +50,32 @@ impl Db {
             .map(parse_filter)
             .transpose()?
             .unwrap_or_default();
-        let indexed_allow_doc_ids = self.indexed_filter_doc_ids(index, version, &meta, &filters)?;
-        let allow_doc_ids = match (indexed_allow_doc_ids, external_allow_doc_ids) {
-            (Some(indexed), Some(external)) => {
-                Some(indexed.intersection(&external).cloned().collect())
-            }
-            (Some(indexed), None) => Some(indexed),
-            (None, Some(external)) => Some(external),
-            (None, None) => None,
-        };
-        self.ensure_vector_runtime(index, version, &meta)?;
+        let mut indexed_allow_doc_ids =
+            self.indexed_filter_doc_ids(index, version, &meta, &filters)?;
+        if let (Some(indexed), Some(external)) =
+            (indexed_allow_doc_ids.as_mut(), external_allow_doc_ids.as_ref())
+        {
+            indexed.retain(|id| external.contains(id));
+        }
+        let allow_doc_ids = indexed_allow_doc_ids
+            .as_ref()
+            .or_else(|| external_allow_doc_ids.as_deref());
         let context = VectorSearchContext {
             index,
             version,
             meta: &meta,
             query,
+            query_norm_squared: vector_norm_squared(query),
             options: &options,
             filters: &filters,
-            allow_doc_ids: allow_doc_ids.as_ref(),
+            allow_doc_ids,
         };
-        let use_exact = options.exact || self.vector_should_use_exact(&context)?;
+        let use_exact = if options.exact || meta.algorithm == VectorIndexAlgorithm::Flat {
+            true
+        } else {
+            self.ensure_vector_runtime(index, version, &meta)?;
+            self.vector_should_use_exact(&context)?
+        };
         global_metrics()
             .record_vector_search_plan(use_exact, !filters.is_empty() || allow_doc_ids.is_some());
         let results = if use_exact {
@@ -121,7 +127,7 @@ impl Db {
         index: &str,
         query: &[f32],
         options: VectorSearchOptions,
-        allow_doc_ids: HashSet<String>,
+        allow_doc_ids: Arc<HashSet<String>>,
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let started = Instant::now();
         let result = self.vector_search_inner(index, query, options, Some(allow_doc_ids), false);

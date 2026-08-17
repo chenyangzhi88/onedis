@@ -2,6 +2,7 @@
 pub struct VectorRuntimeRegistry {
     indexes: DashMap<VectorRuntimeKey, Arc<RwLock<VectorRuntime>>>,
     write_locks: DashMap<VectorWriteLockKey, Arc<Mutex<()>>>,
+    dirty_indexes: DashMap<VectorRuntimeKey, ()>,
     active_runtimes: AtomicUsize,
 }
 
@@ -83,12 +84,31 @@ impl VectorRuntimeRegistry {
             .map(|entry| entry.value().clone())
     }
 
+    fn take_dirty_indexes_for_db(&self, db_index: u16) -> Vec<(String, u64)> {
+        let keys = self
+            .dirty_indexes
+            .iter()
+            .filter(|entry| entry.key().db_index == db_index)
+            .map(|entry| (entry.key().index.clone(), entry.key().version))
+            .collect::<Vec<_>>();
+        for (index, version) in &keys {
+            self.dirty_indexes
+                .remove(&Self::key(db_index, index, *version));
+        }
+        keys
+    }
+
     fn indexes_for_db(&self, db_index: u16) -> Vec<(String, u64)> {
         self.indexes
             .iter()
             .filter(|entry| entry.key().db_index == db_index)
             .map(|entry| (entry.key().index.clone(), entry.key().version))
             .collect()
+    }
+
+    fn mark_dirty(&self, db_index: u16, index: &str, version: u64) {
+        self.dirty_indexes
+            .insert(Self::key(db_index, index, version), ());
     }
 
     fn upsert(
@@ -119,7 +139,9 @@ impl VectorRuntimeRegistry {
         runtime
             .write()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
-            .upsert_with_attrs(entry.id, entry.doc_version, entry.vector, entry.attrs_json)
+            .upsert_with_attrs(entry.id, entry.doc_version, entry.vector, entry.attrs_json)?;
+        self.mark_dirty(db_index, index, version);
+        Ok(())
     }
 
     fn mark_deleted(
@@ -133,7 +155,30 @@ impl VectorRuntimeRegistry {
             && let Ok(mut runtime) = runtime.write()
         {
             runtime.mark_deleted(doc);
+            drop(runtime);
+            self.mark_dirty(db_index, index, version);
         }
+    }
+
+    fn apply_docs(
+        &self,
+        db_index: u16,
+        index: &str,
+        version: u64,
+        docs: Vec<VectorDocRecord>,
+    ) -> Result<(), Error> {
+        let runtime = self
+            .get(db_index, index, version)
+            .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
+        let mut runtime = runtime
+            .write()
+            .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?;
+        for doc in docs {
+            runtime.apply_doc(doc);
+        }
+        drop(runtime);
+        self.mark_dirty(db_index, index, version);
+        Ok(())
     }
 
     fn set_attrs(
@@ -177,6 +222,8 @@ impl VectorRuntimeRegistry {
         {
             self.active_runtimes.fetch_sub(1, AtomicOrdering::AcqRel);
         }
+        self.dirty_indexes
+            .remove(&Self::key(db_index, index, version));
         self.cleanup_write_lock_if_idle(db_index, index);
     }
 
@@ -190,6 +237,11 @@ impl VectorRuntimeRegistry {
                 removed += 1;
             }
             keep
+        });
+        self.dirty_indexes.retain(|key, _| {
+            key.db_index != db_index
+                || key.index != index
+                || version.is_some_and(|version| key.version == version)
         });
         if removed != 0 {
             // Keep the count conservative until every removed runtime is no longer visible.
@@ -236,6 +288,8 @@ impl VectorRuntimeRegistry {
                 .fetch_sub(removed, AtomicOrdering::AcqRel);
         }
         self.write_locks
+            .retain(|key, _| key.db_index != db_index);
+        self.dirty_indexes
             .retain(|key, _| key.db_index != db_index);
     }
 }

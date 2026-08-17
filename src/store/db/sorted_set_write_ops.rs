@@ -185,20 +185,23 @@ impl Db {
                     unreachable!("dirty member belongs to a valid sorted set")
                 };
                 if let Some(old_score) = initial_scores[pair_position] {
-                    batch.delete(&zset_rank_key(
+                    (batch.delete(&zset_rank_key(
                         self.db_index,
                         key,
                         version,
                         old_score,
                         member,
-                    ));
+                    )))
+                    .expect("write batch append invariant violated");
                 }
                 let score = scores[pair_position].expect("dirty ZADD member has a score");
-                batch.put(member_key, &score.to_be_bytes());
-                batch.put(
+                (batch.put(member_key, &score.to_be_bytes()))
+                    .expect("write batch append invariant violated");
+                (batch.put(
                     &zset_rank_key(self.db_index, key, version, score, member),
                     INDEX_MARKER_VALUE,
-                );
+                ))
+                .expect("write batch append invariant violated");
                 conditions.push(member_observations[pair_position].condition());
                 dirty_keys.insert(*key_position);
             }
@@ -221,7 +224,8 @@ impl Db {
                             key,
                         );
                     }
-                    batch.put(&meta_keys[key_position], &encode_zset_meta(0, version));
+                    (batch.put(&meta_keys[key_position], &encode_zset_meta(0, version)))
+                        .expect("write batch append invariant violated");
                     conditions.push(meta_observations[key_position].condition());
                 }
             }
@@ -540,20 +544,23 @@ impl Db {
                     unreachable!("dirty member belongs to a valid sorted set")
                 };
                 if let Some(old_score) = initial_scores[pair_position] {
-                    batch.delete(&zset_rank_key(
+                    (batch.delete(&zset_rank_key(
                         self.db_index,
                         key,
                         version,
                         old_score,
                         member,
-                    ));
+                    )))
+                    .expect("write batch append invariant violated");
                 }
                 let score = scores[pair_position].expect("successful increment has a score");
-                batch.put(member_key, &score.to_be_bytes());
-                batch.put(
+                (batch.put(member_key, &score.to_be_bytes()))
+                    .expect("write batch append invariant violated");
+                (batch.put(
                     &zset_rank_key(self.db_index, key, version, score, member),
                     INDEX_MARKER_VALUE,
-                );
+                ))
+                .expect("write batch append invariant violated");
                 conditions.push(member_observations[pair_position].condition());
                 dirty_keys.insert(*key_position);
             }
@@ -576,7 +583,8 @@ impl Db {
                             key,
                         );
                     }
-                    batch.put(&meta_keys[key_position], &encode_zset_meta(0, version));
+                    (batch.put(&meta_keys[key_position], &encode_zset_meta(0, version)))
+                        .expect("write batch append invariant violated");
                     conditions.push(meta_observations[key_position].condition());
                 }
             }
@@ -617,7 +625,8 @@ impl Db {
         let mut seen_members = std::collections::HashSet::new();
 
         if exists.is_none() {
-            batch.put(&self.mk(key), &encode_zset_meta(0, version));
+            (batch.put(&self.mk(key), &encode_zset_meta(0, version)))
+                .expect("write batch append invariant violated");
         }
 
         for (score, member) in members.iter().rev() {
@@ -634,19 +643,22 @@ impl Db {
                 added += 1;
             }
             if let Some(old_score) = previous_score {
-                batch.delete(&zset_rank_key(
+                (batch.delete(&zset_rank_key(
                     self.db_index,
                     key,
                     version,
                     old_score,
                     member,
-                ));
+                )))
+                .expect("write batch append invariant violated");
             }
-            batch.put(&member_key, &score.to_be_bytes());
-            batch.put(
+            (batch.put(&member_key, &score.to_be_bytes()))
+                .expect("write batch append invariant violated");
+            (batch.put(
                 &zset_rank_key(self.db_index, key, version, *score, member),
                 INDEX_MARKER_VALUE,
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         if batch.count() > 0 {
@@ -712,25 +724,29 @@ impl Db {
             if previous_score != Some(score) {
                 outcome.changed += 1;
                 if let Some(old_score) = previous_score {
-                    batch.delete(&zset_rank_key(
+                    (batch.delete(&zset_rank_key(
                         self.db_index,
                         key,
                         version,
                         old_score,
                         member,
-                    ));
+                    )))
+                    .expect("write batch append invariant violated");
                 }
-                batch.put(&member_key, &score.to_be_bytes());
-                batch.put(
+                (batch.put(&member_key, &score.to_be_bytes()))
+                    .expect("write batch append invariant violated");
+                (batch.put(
                     &zset_rank_key(self.db_index, key, version, score, member),
                     INDEX_MARKER_VALUE,
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
         }
 
         if outcome.changed > 0 {
             if exists.is_none() {
-                batch.put(&self.mk(key), &encode_zset_meta(0, version));
+                (batch.put(&self.mk(key), &encode_zset_meta(0, version)))
+                    .expect("write batch append invariant violated");
             }
             self.write_batch_if_not_empty(&batch);
             self.changes.fetch_add(1, Ordering::Relaxed);
@@ -874,19 +890,22 @@ impl Db {
                 conditions.push(observed_member.condition());
             }
             if let Some(old_score) = previous_score {
-                batch.delete(&zset_rank_key(
+                (batch.delete(&zset_rank_key(
                     self.db_index,
                     key,
                     version,
                     old_score,
                     member,
-                ));
+                )))
+                .expect("write batch append invariant violated");
             }
-            batch.put(member_key, &score.to_be_bytes());
-            batch.put(
+            (batch.put(member_key, &score.to_be_bytes()))
+                .expect("write batch append invariant violated");
+            (batch.put(
                 &zset_rank_key(self.db_index, key, version, score, member),
                 INDEX_MARKER_VALUE,
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         if outcome.changed == 0 {
@@ -897,7 +916,8 @@ impl Db {
                 .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
         }
         if exists.is_none() {
-            batch.put(&key_bytes, &encode_zset_meta(0, version));
+            (batch.put(&key_bytes, &encode_zset_meta(0, version)))
+                .expect("write batch append invariant violated");
             conditions.push(
                 observed_meta
                     .expect("missing or expired metadata was observed")
@@ -929,7 +949,8 @@ impl Db {
         let mut seen_members = std::collections::HashSet::new();
 
         if exists.is_none() {
-            batch.put(&self.mk(key), &encode_zset_meta(0, version));
+            (batch.put(&self.mk(key), &encode_zset_meta(0, version)))
+                .expect("write batch append invariant violated");
         }
 
         for (score, member) in members.iter().rev() {
@@ -947,19 +968,22 @@ impl Db {
                 added += 1;
             }
             if let Some(old_score) = previous_score {
-                batch.delete(&zset_rank_key(
+                (batch.delete(&zset_rank_key(
                     self.db_index,
                     key,
                     version,
                     old_score,
                     member,
-                ));
+                )))
+                .expect("write batch append invariant violated");
             }
-            batch.put(&member_key, &score.to_be_bytes());
-            batch.put(
+            (batch.put(&member_key, &score.to_be_bytes()))
+                .expect("write batch append invariant violated");
+            (batch.put(
                 &zset_rank_key(self.db_index, key, version, *score, member),
                 INDEX_MARKER_VALUE,
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         if batch.count() > 0 {
@@ -992,8 +1016,9 @@ impl Db {
                 continue;
             };
 
-            batch.delete(&member_key);
-            batch.delete(&zset_rank_key(self.db_index, key, version, score, member));
+            (batch.delete(&member_key)).expect("write batch append invariant violated");
+            (batch.delete(&zset_rank_key(self.db_index, key, version, score, member)))
+                .expect("write batch append invariant violated");
             removed += 1;
         }
 
@@ -1053,8 +1078,9 @@ impl Db {
                 continue;
             };
 
-            batch.delete(&member_key);
-            batch.delete(&zset_rank_key(self.db_index, key, version, score, member));
+            (batch.delete(&member_key)).expect("write batch append invariant violated");
+            (batch.delete(&zset_rank_key(self.db_index, key, version, score, member)))
+                .expect("write batch append invariant violated");
             removed += 1;
         }
 

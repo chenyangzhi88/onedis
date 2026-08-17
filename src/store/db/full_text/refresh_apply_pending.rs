@@ -14,6 +14,7 @@ impl Db {
         let mut indexed_docs = 0usize;
         let mut indexed_bytes = 0usize;
         let mut checkpoint_state = None;
+        let mut vector_batches = FullTextVectorMutationBatches::new();
 
         {
             let mut runtime = runtime
@@ -80,15 +81,24 @@ impl Db {
                             let fields = self.hash_get_all(&record.key)?;
                             if fields.is_empty() || !fulltext_index_filter_matches(meta, &fields)? {
                                 runtime.delete_hash(&record.key);
-                                self.fulltext_delete_vectors(index, meta, &record.key)?;
-                            } else {
-                                indexed_bytes += runtime.upsert_hash(&record.key, &fields)?;
-                                self.fulltext_upsert_vectors(
+                                self.fulltext_collect_vector_deletions(
                                     index,
                                     meta,
                                     &record.key,
+                                    &mut vector_batches,
+                                );
+                            } else {
+                                indexed_bytes += runtime.upsert_hash(
+                                    &record.key,
                                     &fields,
+                                    self.fulltext_source_expire_ms(&record.key),
+                                )?;
+                                self.fulltext_collect_vector_mutations(
+                                    index,
+                                    meta,
+                                    &record.key,
                                     None,
+                                    &mut vector_batches,
                                 )?;
                             }
                         }
@@ -101,26 +111,45 @@ impl Db {
                             if let Some(root) = self.fulltext_json_root(&record.key)? {
                                 let fields = self.fulltext_json_fields_from_root(&root, meta)?;
                                 if fulltext_index_filter_matches(meta, &fields)? {
-                                    indexed_bytes += runtime.upsert_fields(&record.key, &fields)?;
-                                    self.fulltext_upsert_vectors(
+                                    indexed_bytes += runtime.upsert_fields(
+                                        &record.key,
+                                        &fields,
+                                        self.fulltext_source_expire_ms(&record.key),
+                                    )?;
+                                    self.fulltext_collect_vector_mutations(
                                         index,
                                         meta,
                                         &record.key,
-                                        &fields,
                                         Some(&root),
+                                        &mut vector_batches,
                                     )?;
                                 } else {
                                     runtime.delete_hash(&record.key);
-                                    self.fulltext_delete_vectors(index, meta, &record.key)?;
+                                    self.fulltext_collect_vector_deletions(
+                                        index,
+                                        meta,
+                                        &record.key,
+                                        &mut vector_batches,
+                                    );
                                 }
                             } else {
                                 runtime.delete_hash(&record.key);
-                                self.fulltext_delete_vectors(index, meta, &record.key)?;
+                                self.fulltext_collect_vector_deletions(
+                                    index,
+                                    meta,
+                                    &record.key,
+                                    &mut vector_batches,
+                                );
                             }
                         }
                         FullTextMutationKind::DeleteKey => {
                             runtime.delete_hash(&record.key);
-                            self.fulltext_delete_vectors(index, meta, &record.key)?;
+                            self.fulltext_collect_vector_deletions(
+                                index,
+                                meta,
+                                &record.key,
+                                &mut vector_batches,
+                            );
                         }
                     }
                     changed = true;
@@ -135,6 +164,7 @@ impl Db {
                 }
             }
 
+            self.fulltext_apply_vector_mutations(std::mem::take(&mut vector_batches))?;
             if changed {
                 let published_seq = runtime.published_outbox_seq;
                 runtime.publish_through(published_seq)?;

@@ -173,7 +173,8 @@ impl Db {
                     }
                     let patched = patch_meta_expire_ms(raw, 0)
                         .ok_or_else(|| Error::msg("ERR invalid string metadata"))?;
-                    batch.put(&key_bytes, &patched);
+                    (batch.put(&key_bytes, &patched))
+                        .expect("write batch append invariant violated");
                     self.ttl_manager.remove_known_to_batch(
                         &mut batch,
                         header.expire_ms,
@@ -188,7 +189,8 @@ impl Db {
                         let expire_ms = now_ms().saturating_add(ttl_ms);
                         let patched = patch_meta_expire_ms(raw, expire_ms)
                             .ok_or_else(|| Error::msg("ERR invalid string metadata"))?;
-                        batch.put(&key_bytes, &patched);
+                        (batch.put(&key_bytes, &patched))
+                            .expect("write batch append invariant violated");
                         if header.expire_ms != expire_ms {
                             self.ttl_manager.remove_known_to_batch(
                                 &mut batch,
@@ -207,7 +209,8 @@ impl Db {
                     } else {
                         let patched = patch_meta_expire_ms(raw, expire_ms)
                             .ok_or_else(|| Error::msg("ERR invalid string metadata"))?;
-                        batch.put(&key_bytes, &patched);
+                        (batch.put(&key_bytes, &patched))
+                            .expect("write batch append invariant violated");
                         if header.expire_ms != expire_ms {
                             self.ttl_manager.remove_known_to_batch(
                                 &mut batch,

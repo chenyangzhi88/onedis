@@ -20,16 +20,16 @@ impl Db {
             return Ok(true);
         }
 
-        let Some(allow_doc_ids) = context.allow_doc_ids else {
-            return Ok(false);
-        };
         let exact_threshold = context
             .options
             .k
             .saturating_mul(4)
             .max(64)
             .min(vector_exact_scan_limit());
-        Ok(allow_doc_ids.len() <= exact_threshold)
+        // For small candidate populations an exact scan is both bounded and
+        // deterministic. It also avoids losing the true nearest neighbour to
+        // random HNSW topology before FP32 reranking gets a chance to run.
+        Ok(candidate_count <= exact_threshold)
     }
 
     fn vector_approximate_results(
@@ -45,10 +45,11 @@ impl Db {
             .vector_runtimes
             .get(self.db_index, context.index, context.version)
             .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
-        let live_count = runtime
+        let search_snapshot = runtime
             .read()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
-            .len();
+            .search_snapshot();
+        let live_count = search_snapshot.current_versions.len();
         if live_count == 0 || context.options.k == 0 {
             return Ok(Vec::new());
         }
@@ -105,14 +106,30 @@ impl Db {
             .max(context.options.k);
 
         loop {
-            let candidates = runtime
-                .read()
-                .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
-                .search(context.query, candidate_limit, ef, context.allow_doc_ids)?;
+            let candidates = search_snapshot.search(
+                context.query,
+                candidate_limit,
+                ef,
+                context.allow_doc_ids,
+            )?;
             global_metrics().record_vector_ann_round(candidates.len());
             let mut results = self.vector_results_from_runtime_candidates(context, candidates)?;
             sort_and_limit_results(&mut results, context.options.k);
-            if results.len() >= context.options.k || candidate_limit >= candidate_cap {
+            if results.len() >= context.options.k {
+                return Ok(results);
+            }
+            if candidate_limit >= candidate_cap {
+                // A persisted HNSW graph can legitimately yield fewer than K nodes
+                // (for example, when random level assignment leaves a small component).
+                // Preserve COUNT semantics with a bounded exact fallback instead of
+                // returning a short page even though enough live documents exist.
+                let exact_candidate_count = context
+                    .allow_doc_ids
+                    .map(HashSet::len)
+                    .unwrap_or(context.meta.doc_count as usize);
+                if exact_candidate_count <= vector_exact_scan_limit() {
+                    return self.vector_exact_results(context);
+                }
                 return Ok(results);
             }
             candidate_limit = candidate_limit
@@ -133,6 +150,21 @@ impl Db {
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let mut results =
             TopKVectorResults::new(context.options.k, vector_search_memory_budget_bytes())?;
+        if context.meta.quantization == VectorQuantization::F32
+            && context.filters.is_empty()
+            && context.options.with_attrs.is_empty()
+            && !context.options.with_attrs_json
+        {
+            for candidate in candidates {
+                results.push(VectorSearchResult {
+                    id: candidate.id,
+                    score: candidate.distance,
+                    attrs: Vec::new(),
+                    attrs_json: None,
+                })?;
+            }
+            return Ok(results.into_sorted());
+        }
         let keys = candidates
             .iter()
             .map(|candidate| {
@@ -158,6 +190,7 @@ impl Db {
                 &doc,
                 context.meta,
                 context.query,
+                context.query_norm_squared,
                 None,
                 &context.options.with_attrs,
                 context.options.with_attrs_json,
@@ -211,6 +244,7 @@ impl Db {
                         &doc,
                         context.meta,
                         context.query,
+                        context.query_norm_squared,
                         None,
                         &context.options.with_attrs,
                         context.options.with_attrs_json,
@@ -237,6 +271,7 @@ impl Db {
                         &doc,
                         context.meta,
                         context.query,
+                        context.query_norm_squared,
                         None,
                         &context.options.with_attrs,
                         context.options.with_attrs_json,
@@ -317,7 +352,15 @@ impl Db {
                 }
             };
             allow = Some(match allow {
-                Some(existing) => existing.intersection(&doc_ids).cloned().collect(),
+                Some(mut existing) if existing.len() <= doc_ids.len() => {
+                    existing.retain(|id| doc_ids.contains(id));
+                    existing
+                }
+                Some(existing) => {
+                    let mut doc_ids = doc_ids;
+                    doc_ids.retain(|id| existing.contains(id));
+                    doc_ids
+                }
                 None => doc_ids,
             });
         }

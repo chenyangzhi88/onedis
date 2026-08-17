@@ -59,25 +59,27 @@ impl Db {
                 continue;
             }
             if delete_immediately {
-                batch.delete(&field_key);
-                batch.delete(&expire_key);
+                (batch.delete(&field_key)).expect("write batch append invariant violated");
+                (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 deleted_fields.insert(field.clone());
                 staged.insert(field.clone(), (false, 0));
                 result.push(2);
                 continue;
             }
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
-            );
-            batch.put(&expire_key, &expire_ms.to_be_bytes());
+            ))
+            .expect("write batch append invariant violated");
+            (batch.put(&expire_key, &expire_ms.to_be_bytes()))
+                .expect("write batch append invariant violated");
             staged.insert(field.clone(), (true, expire_ms));
             result.push(1);
         }
         if batch.count() > 0 {
             let delete_hash = live_field_count > 0 && deleted_fields.len() == live_field_count;
             if delete_hash {
-                batch.delete(&self.mk(key));
+                (batch.delete(&self.mk(key))).expect("write batch append invariant violated");
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, version, TYPE_HASH);
                 if hash_expire_ms > 0 {
                     self.ttl_manager.remove_known_to_batch(
@@ -188,25 +190,27 @@ impl Db {
                 continue;
             }
             if delete_immediately {
-                batch.delete(&field_key);
-                batch.delete(&expire_key);
+                (batch.delete(&field_key)).expect("write batch append invariant violated");
+                (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 deleted_fields.insert(field.clone());
                 staged.insert(field.clone(), (false, 0));
                 result.push(2);
                 continue;
             }
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
-            );
-            batch.put(&expire_key, &expire_ms.to_be_bytes());
+            ))
+            .expect("write batch append invariant violated");
+            (batch.put(&expire_key, &expire_ms.to_be_bytes()))
+                .expect("write batch append invariant violated");
             staged.insert(field.clone(), (true, expire_ms));
             result.push(1);
         }
         if batch.count() > 0 {
             let delete_hash = live_field_count > 0 && deleted_fields.len() == live_field_count;
             if delete_hash {
-                batch.delete(&self.mk(key));
+                (batch.delete(&self.mk(key))).expect("write batch append invariant violated");
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, version, TYPE_HASH);
                 if hash_expire_ms > 0 {
                     self.ttl_manager.remove_known_to_batch(
@@ -256,7 +260,7 @@ impl Db {
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
             if has_ttl {
-                batch.delete(&expire_key);
+                (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 staged.insert(field.clone(), (true, false));
                 result.push(1);
             } else {
@@ -330,7 +334,7 @@ impl Db {
             }
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
             if has_ttl {
-                batch.delete(&expire_key);
+                (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 staged.insert(field.clone(), (true, false));
                 result.push(1);
             } else {

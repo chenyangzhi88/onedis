@@ -10,6 +10,7 @@ struct VectorSearchContext<'a> {
     version: u64,
     meta: &'a VectorIndexMeta,
     query: &'a [f32],
+    query_norm_squared: f64,
     options: &'a VectorSearchOptions,
     filters: &'a [FilterPredicate],
     allow_doc_ids: Option<&'a HashSet<String>>,

@@ -75,10 +75,11 @@ impl Db {
                 meta.last_id = id;
                 meta.length += 1;
                 meta.entries_added += 1;
-                batch.put(
+                (batch.put(
                     &stream_entry_key(self.db_index, key, meta.version, id),
                     &encode_stream_entry_refs(fields),
-                );
+                ))
+                .expect("write batch append invariant violated");
                 dirty[position] = true;
                 changed += 1;
                 Ok(id)
@@ -90,7 +91,8 @@ impl Db {
             if dirty[position]
                 && let Ok(Some(meta)) = states[position]
             {
-                batch.put(&self.mk(key), &encode_stream_meta(meta));
+                (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                    .expect("write batch append invariant violated");
             }
         }
         if changed > 0 {
@@ -154,11 +156,13 @@ impl Db {
         meta.entries_added += 1;
 
         let mut batch = WriteBatch::new();
-        batch.put(
+        (batch.put(
             &stream_entry_key(self.db_index, key, meta.version, id),
             &encode_stream_entry(fields),
-        );
-        batch.put(&self.mk(key), &encode_stream_meta(meta));
+        ))
+        .expect("write batch append invariant violated");
+        (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(id)
@@ -217,11 +221,13 @@ impl Db {
         meta.entries_added += 1;
 
         let mut batch = WriteBatch::new();
-        batch.put(
+        (batch.put(
             &stream_entry_key(self.db_index, key, meta.version, id),
             &encode_stream_entry(fields),
-        );
-        batch.put(&self.mk(key), &encode_stream_meta(meta));
+        ))
+        .expect("write batch append invariant violated");
+        (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(id)

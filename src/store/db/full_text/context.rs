@@ -5,7 +5,7 @@ pub(super) use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::Bound,
     sync::{
-        Arc, Mutex, OnceLock, RwLock,
+        Arc, Mutex, OnceLock, RwLock, Weak,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -18,13 +18,17 @@ pub(super) use anyhow::Error;
 pub(super) use bincode::{Decode, Encode};
 pub(super) use common::types::status::Status;
 pub(super) use common::types::write_batch::WriteBatch;
-pub(super) use dashmap::DashMap;
+pub(super) use dashmap::{DashMap, mapref::entry::Entry};
 pub(super) use jieba_rs::Jieba;
+pub(super) use levenshtein_automata::{
+    DFA, Distance as LevenshteinDistance, LevenshteinAutomatonBuilder, SINK_STATE,
+};
 pub(super) use rust_stemmers::{Algorithm as StemmerAlgorithm, Stemmer};
+pub(super) use tantivy::collector::sort_key::{SortByStaticFastValue, SortByString};
 pub(super) use tantivy::{
-    DocAddress, DocId, DocSet, Index, IndexReader, IndexWriter, Score, SegmentOrdinal,
+    DocAddress, DocId, DocSet, Index, IndexReader, IndexWriter, Order, Score, SegmentOrdinal,
     SegmentReader, TERMINATED, Term,
-    collector::{Collector, Count, SegmentCollector},
+    collector::{Collector, Count, SegmentCollector, TopDocs},
     indexer::LogMergePolicy,
     query::{
         AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, FuzzyTermQuery, Occur,
@@ -32,10 +36,11 @@ pub(super) use tantivy::{
         TermQuery, Weight,
     },
     schema::{
-        Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TantivyDocument,
+        FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TantivyDocument,
         TextFieldIndexing, TextOptions, Value,
     },
 };
+pub(super) use tantivy_fst::{Automaton, Regex as FstRegex};
 pub(super) use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) use super::super::full_text_directory::KvTantivyDirectory;
@@ -50,6 +55,11 @@ pub(super) use crate::store::kv_store::CompareCondition;
 pub(super) use crate::store::ttl::{TYPE_HASH, TYPE_JSON, decode_meta_header};
 
 pub(super) const FULLTEXT_KEY_FIELD: &str = "__key";
+pub(super) const FULLTEXT_EXPIRES_AT_FIELD: &str = "__expires_at";
+pub(super) const FULLTEXT_PRESENCE_FIELD_PREFIX: &str = "__presence_";
+pub(super) const FULLTEXT_EMPTY_FIELD_PREFIX: &str = "__empty_";
+pub(super) const FULLTEXT_GEO_FIELD_PREFIX: &str = "__geo_";
+pub(super) const FULLTEXT_GEOSHAPE_FIELD_PREFIX: &str = "__geoshape_";
 pub(super) const FULLTEXT_WRITER_HEAP_BYTES: usize = 50_000_000;
 pub(super) const DEFAULT_REFRESH_INTERVAL_MS: u64 = 100;
 pub(super) const DEFAULT_REFRESH_MAX_DOCS: usize = 1024;

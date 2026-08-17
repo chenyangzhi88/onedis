@@ -51,7 +51,7 @@ impl TtlManager {
         if expire_ms == 0 {
             return;
         }
-        batch.delete(&ttl_index_key(expire_ms, db_index, key));
+        (batch.delete(&ttl_index_key(expire_ms, db_index, key))).expect("write batch append invariant violated");
     }
 
     pub fn remove_db_to_batch(&self, batch: &mut WriteBatch, db_index: u16) {
@@ -59,7 +59,7 @@ impl TtlManager {
             .store_for_db(db_index)
             .scan_prefix_raw(&ttl_db_prefix(db_index))
         {
-            batch.delete(&key);
+            (batch.delete(&key)).expect("write batch append invariant violated");
         }
     }
 
@@ -69,7 +69,7 @@ impl TtlManager {
             .scan_prefix_raw_async(&ttl_db_prefix(db_index))
             .await
         {
-            batch.delete(&key);
+            (batch.delete(&key)).expect("write batch append invariant violated");
         }
     }
 

@@ -3,8 +3,9 @@ use super::*;
 pub struct FullTextRuntimeRegistry {
     pub(super) indexes: DashMap<FullTextRuntimeKey, Arc<RwLock<FullTextRuntime>>>,
     pub(super) outbox_mutations_since_compaction: DashMap<FullTextRuntimeKey, usize>,
-    pub(super) lifecycle_locks: DashMap<FullTextRuntimeKey, Arc<RwLock<()>>>,
-    pub(super) refresh_locks: DashMap<FullTextRuntimeKey, Arc<Mutex<()>>>,
+    pub(super) lifecycle_locks: DashMap<FullTextRuntimeKey, Weak<RwLock<()>>>,
+    pub(super) refresh_locks: DashMap<FullTextRuntimeKey, Weak<Mutex<()>>>,
+    pub(super) lock_prune_ticks: AtomicU64,
     pub(super) source_routes: DashMap<u16, Arc<Vec<FullTextSourceRoute>>>,
     pub(super) outbox_pending: DashMap<FullTextRuntimeKey, u64>,
 }

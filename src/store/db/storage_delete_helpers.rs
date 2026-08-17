@@ -65,7 +65,7 @@ impl Db {
             for position in positions {
                 let header = live_headers[position].expect("removed key has live metadata");
                 let key = keys[position];
-                batch.delete(&raw_keys[position]);
+                (batch.delete(&raw_keys[position])).expect("write batch append invariant violated");
                 self.ttl_manager.remove_known_to_batch(
                     &mut batch,
                     header.expire_ms,
@@ -155,7 +155,7 @@ impl Db {
                     continue;
                 };
                 let key = keys[position];
-                batch.delete(&raw_keys[position]);
+                (batch.delete(&raw_keys[position])).expect("write batch append invariant violated");
                 self.ttl_manager.remove_known_to_batch(
                     &mut batch,
                     header.expire_ms,
@@ -221,7 +221,7 @@ impl Db {
         key: &str,
         expire_ms: u64,
     ) {
-        batch.delete(&self.mk(key));
+        (batch.delete(&self.mk(key))).expect("write batch append invariant violated");
         self.ttl_manager
             .remove_known_to_batch(batch, expire_ms, self.db_index, key);
     }
@@ -235,7 +235,7 @@ impl Db {
         let raw = self.store.get_raw(&key_bytes)?;
 
         let mut batch = WriteBatch::new();
-        batch.delete(&key_bytes);
+        (batch.delete(&key_bytes)).expect("write batch append invariant violated");
         if let Some(header) = decode_meta_header(&raw) {
             self.ttl_manager.remove_known_to_batch(
                 &mut batch,
@@ -360,7 +360,7 @@ impl Db {
             };
 
             let mut batch = WriteBatch::new();
-            batch.delete(&key_bytes);
+            (batch.delete(&key_bytes)).expect("write batch append invariant violated");
             self.ttl_manager.remove_known_to_batch(
                 &mut batch,
                 header.expire_ms,
@@ -429,7 +429,7 @@ impl Db {
             return false;
         };
         let mut batch = WriteBatch::new();
-        batch.delete(&key_bytes);
+        (batch.delete(&key_bytes)).expect("write batch append invariant violated");
         if let Some(header) = decode_meta_header(&raw) {
             self.ttl_manager.remove_known_to_batch(
                 &mut batch,
@@ -492,7 +492,7 @@ impl Db {
                 return false;
             };
             let mut batch = WriteBatch::new();
-            batch.delete(&key_bytes);
+            (batch.delete(&key_bytes)).expect("write batch append invariant violated");
             self.ttl_manager.remove_known_to_batch(
                 &mut batch,
                 header.expire_ms,

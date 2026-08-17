@@ -99,6 +99,7 @@ fn meta(distance: VectorDistance) -> VectorIndexMeta {
         max_segment_docs: 128,
         quantization: VectorQuantization::F32,
         internal: false,
+        algorithm: VectorIndexAlgorithm::Hnsw,
     }
 }
 
@@ -226,6 +227,7 @@ fn vector_doc_result_window_reduce_and_binary_helpers_cover_edges() {
         &doc,
         &meta,
         &[1.0, 2.0],
+        5.0,
         None,
         &["brand".to_string()],
         true,
@@ -248,6 +250,7 @@ fn vector_doc_result_window_reduce_and_binary_helpers_cover_edges() {
             &doc,
             &meta,
             &[1.0, 2.0],
+            5.0,
             None,
             &[],
             false,
@@ -351,8 +354,8 @@ fn hnsw_graph_persisted_topology_and_registry_paths_cover_edges() {
 
     let persisted = graph.to_persisted_index().unwrap();
     persisted.validate().unwrap();
-    assert_eq!(persisted.nodes.len(), 1);
-    let current_versions = HashMap::from([("a".to_string(), 3)]);
+    assert_eq!(persisted.node_count(), 1);
+    let current_versions = DashMap::from_iter([("a".to_string(), 3)]);
     assert_eq!(
         persisted
             .search(&[0.5, 0.5], 1, 8, None, &current_versions)
@@ -363,6 +366,24 @@ fn hnsw_graph_persisted_topology_and_registry_paths_cover_edges() {
     let mut invalid = persisted.clone();
     invalid.entry_point = u32::MAX;
     assert!(invalid.validate().is_err());
+    let legacy = LegacyVectorHnswIndexBlobV1 {
+        dim: 2,
+        distance: VectorDistance::L2,
+        m: 4,
+        ef_construction: 8,
+        quantization: VectorQuantization::F32,
+        entry_point: 0,
+        max_layer: 0,
+        nodes: vec![LegacyVectorHnswIndexNodeV1 {
+            id: "legacy".to_string(),
+            doc_version: 1,
+            vector: HnswSnapshotVector::F32(vec![0.0, 0.0]),
+            layers: vec![Vec::new()],
+        }],
+    };
+    let decoded_legacy = decode_vector_hnsw_index(&encode_record(&legacy).unwrap()).unwrap();
+    decoded_legacy.validate().unwrap();
+    assert_eq!(decoded_legacy.ids, vec!["legacy"]);
 
     let mut runtime =
         VectorRuntime::new(2, VectorDistance::L2, 4, 8, 2, 10, VectorQuantization::F32);
@@ -692,7 +713,7 @@ fn vector_lsm_merges_four_indexed_segments_and_reloads_topology() {
     )
     .unwrap();
     assert_eq!(source.entries.len(), 8);
-    assert_eq!(topology.nodes.len(), 8);
+    assert_eq!(topology.node_count(), 8);
     topology.validate().unwrap();
 
     let meta_key = vector_meta_key(db.key_layout, 0, "idx", version);
@@ -1034,4 +1055,112 @@ fn indexed_filters_use_bounded_ordered_ranges() {
         ids.sort();
         assert_eq!(ids, expected, "filter: {filter}");
     }
+}
+
+#[test]
+fn ip_candidates_are_comparable_across_segments_with_different_norms() {
+    let db = integration_test_db("onedis-vector-ip-segments", KeyEncodingLayout::TableLocalV2);
+    let mut options = create_options("IP", Some(32));
+    options.ef_runtime = Some(64);
+    db.vector_create("idx", options).unwrap();
+
+    for segment in 0..3 {
+        for offset in 0..32 {
+            let value = match segment {
+                0 => 1.0 - offset as f32 * 0.001,
+                1 => 1_000.0 - offset as f32,
+                _ => 10.0 - offset as f32 * 0.01,
+            };
+            db.vector_add(
+                "idx",
+                &format!("segment-{segment}-{offset}"),
+                vec![value, 0.0],
+                None,
+            )
+            .unwrap();
+        }
+        db.vector_maintenance_tick().unwrap();
+        db.vector_maintenance_tick().unwrap();
+    }
+
+    let mut options = search_options(1);
+    options.ef = Some(64);
+    let results = db.vector_search("idx", &[1.0, 0.0], options).unwrap();
+    assert_eq!(results[0].id, "segment-1-0");
+}
+
+#[test]
+fn flat_internal_indexes_never_publish_hnsw_segments() {
+    let db = integration_test_db("onedis-vector-flat", KeyEncodingLayout::TableLocalV2);
+    let index = "__onedis_fulltext_vector__:1:3:idx:3:vec";
+    db.vector_create_internal(index, create_options("L2", Some(2)), true)
+        .unwrap();
+    db.vector_add(index, "a", vec![0.0, 0.0], None)
+        .unwrap();
+    db.vector_add(index, "b", vec![1.0, 0.0], None)
+        .unwrap();
+    db.vector_maintenance_tick().unwrap();
+
+    let (_, version, meta) = db.read_vector_meta(index).unwrap();
+    assert_eq!(meta.algorithm, VectorIndexAlgorithm::Flat);
+    assert!(db.vector_runtimes.get(0, index, version).is_none());
+    assert!(
+        db.store
+            .scan_prefix_raw(&vector_segment_prefix(db.key_layout, 0, index, version))
+            .is_empty()
+    );
+    assert_eq!(
+        db.vector_search(index, &[0.0, 0.0], search_options(1))
+            .unwrap()[0]
+            .id,
+        "a"
+    );
+}
+
+#[test]
+fn version_checkpoint_replays_only_the_unflushed_tail() {
+    let db = integration_test_db(
+        "onedis-vector-version-checkpoint",
+        KeyEncodingLayout::TableLocalV2,
+    );
+    db.vector_create("idx", create_options("L2", Some(2)))
+        .unwrap();
+    db.vector_add("idx", "a", vec![0.0, 0.0], None)
+        .unwrap();
+    db.vector_add("idx", "b", vec![1.0, 0.0], None)
+        .unwrap();
+    db.vector_maintenance_tick().unwrap();
+    db.vector_maintenance_tick().unwrap();
+    db.vector_compact("idx").unwrap();
+    db.vector_add("idx", "c", vec![2.0, 0.0], None)
+        .unwrap();
+
+    let (_, version, meta) = db.read_vector_meta("idx").unwrap();
+    db.vector_runtimes.remove(0, "idx", version);
+    let (versions, tail) = db
+        .load_vector_version_state("idx", version, &meta)
+        .unwrap();
+    assert_eq!(versions.len(), 3);
+    assert_eq!(versions.get("c"), Some(&3));
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].id, "c");
+}
+
+#[test]
+fn parallel_immutable_builder_emits_a_valid_packed_graph() {
+    let source = VectorSegmentBlob {
+        entries: (0..300)
+            .map(|index| VectorSegmentEntry {
+                id: format!("doc-{index}"),
+                doc_version: index as u64 + 1,
+                vector: vec![index as f32, 1.0],
+            })
+            .collect(),
+    };
+    let index = VectorHnswIndexBlob::build(&source, &meta(VectorDistance::L2)).unwrap();
+    index.validate().unwrap();
+    assert_eq!(index.node_count(), 300);
+    assert_eq!(index.node_layer_offsets.len(), 301);
+    assert!(index.layer_neighbor_offsets.len() > 300);
+    assert!(!index.neighbors.is_empty());
 }

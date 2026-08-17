@@ -9,13 +9,21 @@ impl FullTextRuntime {
         config: &FullTextRuntimeConfig,
     ) -> Result<Self, Error> {
         let mut builder = Schema::builder();
-        let key_field = builder.add_text_field(FULLTEXT_KEY_FIELD, STRING | STORED);
+        // The key is also a FAST field so bounded SORTBY collection can use it as the
+        // deterministic secondary key across segments.
+        let key_field = builder.add_text_field(FULLTEXT_KEY_FIELD, STRING | STORED | FAST);
+        let expires_at_field = builder.add_u64_field(FULLTEXT_EXPIRES_AT_FIELD, INDEXED);
         let mut text_fields = Vec::new();
         let mut text_variant_fields = HashMap::new();
         let mut text_field_settings = HashMap::new();
         let mut tag_field_settings = HashMap::new();
         let mut source_fields = HashMap::new();
         let mut query_fields = HashMap::new();
+        let mut presence_fields = HashMap::new();
+        let mut empty_fields = HashMap::new();
+        let mut geo_fields = HashMap::new();
+        let mut geoshape_fields = HashMap::new();
+        let mut sortable_fields = HashMap::new();
         let default_language = normalize_fulltext_language(
             meta.index_options.language.as_deref().unwrap_or("english"),
         )?;
@@ -27,7 +35,74 @@ impl FullTextRuntime {
             .into_iter()
             .map(|word| word.to_lowercase())
             .collect::<HashSet<_>>();
-        for field in &meta.schema {
+        for (schema_offset, field) in meta.schema.iter().enumerate() {
+            if field.options.index_missing {
+                let marker = builder.add_u64_field(
+                    &format!("{FULLTEXT_PRESENCE_FIELD_PREFIX}{schema_offset}"),
+                    INDEXED,
+                );
+                presence_fields.insert(field.name.clone(), marker);
+                presence_fields.insert(field.attribute_name().to_string(), marker);
+            }
+            if field.options.index_empty {
+                let marker = builder.add_u64_field(
+                    &format!("{FULLTEXT_EMPTY_FIELD_PREFIX}{schema_offset}"),
+                    INDEXED,
+                );
+                empty_fields.insert(field.name.clone(), marker);
+                empty_fields.insert(field.attribute_name().to_string(), marker);
+            }
+            if matches!(field.kind, FullTextFieldKind::Geo) && !field.options.noindex {
+                let lon = builder.add_f64_field(
+                    &format!("{FULLTEXT_GEO_FIELD_PREFIX}{schema_offset}_lon"),
+                    INDEXED,
+                );
+                let lat = builder.add_f64_field(
+                    &format!("{FULLTEXT_GEO_FIELD_PREFIX}{schema_offset}_lat"),
+                    INDEXED,
+                );
+                geo_fields.insert(field.name.clone(), (lon, lat));
+                geo_fields.insert(field.attribute_name().to_string(), (lon, lat));
+            }
+            if matches!(field.kind, FullTextFieldKind::GeoShape) && !field.options.noindex {
+                let bounds = [
+                    builder.add_f64_field(
+                        &format!("{FULLTEXT_GEOSHAPE_FIELD_PREFIX}{schema_offset}_min_x"),
+                        INDEXED,
+                    ),
+                    builder.add_f64_field(
+                        &format!("{FULLTEXT_GEOSHAPE_FIELD_PREFIX}{schema_offset}_max_x"),
+                        INDEXED,
+                    ),
+                    builder.add_f64_field(
+                        &format!("{FULLTEXT_GEOSHAPE_FIELD_PREFIX}{schema_offset}_min_y"),
+                        INDEXED,
+                    ),
+                    builder.add_f64_field(
+                        &format!("{FULLTEXT_GEOSHAPE_FIELD_PREFIX}{schema_offset}_max_y"),
+                        INDEXED,
+                    ),
+                ];
+                geoshape_fields.insert(field.name.clone(), bounds);
+                geoshape_fields.insert(field.attribute_name().to_string(), bounds);
+            }
+            if field.options.sortable && !field.options.noindex {
+                let sort_field = match field.kind {
+                    FullTextFieldKind::Numeric => {
+                        builder.add_f64_field(&format!("__sort_{schema_offset}"), FAST)
+                    }
+                    FullTextFieldKind::Text | FullTextFieldKind::Tag => builder.add_text_field(
+                        &format!("__sort_{schema_offset}"),
+                        TextOptions::default().set_fast(None),
+                    ),
+                    _ => {
+                        return Err(Error::msg("ERR unsupported SORTABLE fulltext field type"));
+                    }
+                };
+                sortable_fields.insert(field.name.clone(), (sort_field, field.kind));
+                sortable_fields
+                    .insert(field.attribute_name().to_string(), (sort_field, field.kind));
+            }
             if field.options.noindex {
                 continue;
             }
@@ -130,6 +205,7 @@ impl FullTextRuntime {
                 FullTextIndexState::Backfilling | FullTextIndexState::Rebuilding
             ),
             key_field,
+            expires_at_field,
             text_fields,
             text_variant_fields,
             text_field_settings,
@@ -137,6 +213,11 @@ impl FullTextRuntime {
             synonyms,
             source_fields,
             query_fields,
+            presence_fields,
+            empty_fields,
+            geo_fields,
+            geoshape_fields,
+            sortable_fields,
             default_language,
             language_field: meta.index_options.language_field.clone(),
             no_fields: meta.index_options.no_fields,

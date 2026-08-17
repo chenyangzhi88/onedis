@@ -20,6 +20,14 @@ impl FtSearch {
                     options.no_content = true;
                     idx += 1;
                 }
+                "VERBATIM" => {
+                    options.verbatim = true;
+                    idx += 1;
+                }
+                "NOSTOPWORDS" => {
+                    options.no_stopwords = true;
+                    idx += 1;
+                }
                 "WITHSCORES" => {
                     options.with_scores = true;
                     idx += 1;
@@ -259,6 +267,8 @@ impl FtHybrid {
         let mut search = default_fulltext_search_options();
         search.no_content = true;
         search.with_scores = true;
+        search.vector_ef_runtime = Some(10);
+        search.vector_epsilon = 0.01;
         let mut search_score_alias = None;
         let mut vector_score_alias = None;
         let mut combined_score_alias = None;
@@ -308,6 +318,7 @@ impl FtHybrid {
             Knn(usize),
             Range(f64),
         }
+        let mut shard_k_ratio = 1.0f64;
         let vector_clause = match upper_arg(&frame, idx)
             .unwrap_or_else(|_| String::new())
             .as_str()
@@ -327,7 +338,15 @@ impl FtHybrid {
                             idx += 2;
                         }
                         "EF_RUNTIME" => {
-                            parse_usize_arg(&frame, idx + 1, "ERR invalid EF_RUNTIME")?;
+                            let ef = parse_usize_arg(
+                                &frame,
+                                idx + 1,
+                                "ERR invalid EF_RUNTIME",
+                            )?;
+                            if ef == 0 {
+                                return Err(Error::msg("ERR invalid EF_RUNTIME"));
+                            }
+                            search.vector_ef_runtime = Some(ef);
                             idx += 2;
                         }
                         "SHARD_K_RATIO" => {
@@ -336,6 +355,7 @@ impl FtHybrid {
                             if !ratio.is_finite() || ratio <= 0.0 {
                                 return Err(Error::msg("ERR invalid SHARD_K_RATIO"));
                             }
+                            shard_k_ratio = ratio;
                             idx += 2;
                         }
                         "YIELD_SCORE_AS" | "YIELD_DISTANCE_AS" => {
@@ -381,6 +401,7 @@ impl FtHybrid {
                             if !value.is_finite() || value < 0.0 {
                                 return Err(Error::msg("ERR invalid EPSILON"));
                             }
+                            search.vector_epsilon = value as f32;
                             idx += 2;
                         }
                         "YIELD_SCORE_AS" | "YIELD_DISTANCE_AS" => {
@@ -420,7 +441,8 @@ impl FtHybrid {
                         filter = expression;
                         if idx < frame.arg_len() && upper_arg(&frame, idx)? == "POLICY" {
                             match upper_arg(&frame, idx + 1)?.as_str() {
-                                "ADHOC_BF" | "BATCHES" => {}
+                                "ADHOC_BF" => search.vector_filter_ef = None,
+                                "BATCHES" => search.vector_filter_ef = Some(100),
                                 _ => return Err(Error::msg("ERR invalid hybrid FILTER policy")),
                             }
                             idx += 2;
@@ -433,6 +455,7 @@ impl FtHybrid {
                                 if batch_size == 0 {
                                     return Err(Error::msg("ERR invalid BATCH_SIZE"));
                                 }
+                                search.vector_filter_ef = Some(batch_size);
                                 idx += 2;
                             }
                         }
@@ -635,11 +658,8 @@ impl FtHybrid {
                     idx += 1;
                 }
                 "FORMAT" => {
-                    match upper_arg(&frame, idx + 1)?.as_str() {
-                        "STRING" | "EXPAND" => {}
-                        _ => return Err(Error::msg("ERR invalid FORMAT")),
-                    }
-                    idx += 2;
+                    let _ = arg(&frame, idx + 1, "ERR invalid FORMAT")?;
+                    return Err(Error::msg("ERR unsupported hybrid FORMAT"));
                 }
                 _ => return Err(Error::msg("ERR syntax error")),
             }
@@ -648,9 +668,13 @@ impl FtHybrid {
             return Err(Error::msg("ERR missing vector parameter"));
         }
         let vector_query = match vector_clause {
-            VectorClause::Knn(k) => format!(
-                "({filter})=>[KNN {k} @{vector_field} ${vector_param}]"
-            ),
+            VectorClause::Knn(k) => {
+                let candidate_k = ((k as f64) * shard_k_ratio).ceil() as usize;
+                format!(
+                    "({filter})=>[KNN {} @{vector_field} ${vector_param}]",
+                    candidate_k.max(k)
+                )
+            }
             VectorClause::Range(radius) => {
                 format!("({filter}) @{vector_field}:[VECTOR_RANGE {radius} ${vector_param}]")
             }

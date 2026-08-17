@@ -98,19 +98,21 @@ impl Db {
                 continue;
             };
             for id in ids {
-                batch.delete(&stream_entry_key(
+                (batch.delete(&stream_entry_key(
                     self.db_index,
                     keys[position],
                     meta.version,
                     *id,
-                ));
+                )))
+                .expect("write batch append invariant violated");
             }
             if deleted_per_key[position] > 0 {
                 let mut updated = meta;
                 updated.length = updated
                     .length
                     .saturating_sub(deleted_per_key[position] as u64);
-                batch.put(&self.mk(keys[position]), &encode_stream_meta(updated));
+                (batch.put(&self.mk(keys[position]), &encode_stream_meta(updated)))
+                    .expect("write batch append invariant violated");
             }
         }
         self.write_existing_version_batch_if_not_empty_async(&batch)
@@ -132,13 +134,14 @@ impl Db {
             }
             let entry_key = stream_entry_key(self.db_index, key, meta.version, *id);
             if self.store.get_raw(&entry_key).is_some() {
-                batch.delete(&entry_key);
+                (batch.delete(&entry_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
         }
         if deleted > 0 {
             meta.length = meta.length.saturating_sub(deleted as u64);
-            batch.put(&self.mk(key), &encode_stream_meta(meta));
+            (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                .expect("write batch append invariant violated");
             self.write_batch_if_not_empty(&batch);
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -173,13 +176,14 @@ impl Db {
         let existing = self.store.multi_get_raw_async(&entry_keys).await;
         for (entry_key, old_raw) in entry_keys.into_iter().zip(existing) {
             if old_raw.is_some() {
-                batch.delete(&entry_key);
+                (batch.delete(&entry_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
         }
         if deleted > 0 {
             meta.length = meta.length.saturating_sub(deleted as u64);
-            batch.put(&self.mk(key), &encode_stream_meta(meta));
+            (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                .expect("write batch append invariant violated");
             self.write_batch_if_not_empty_async(&batch).await;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -192,7 +196,8 @@ impl Db {
             .ok_or_else(|| Error::msg("ERR no such key"))?;
         meta.last_id = id;
         let mut batch = WriteBatch::new();
-        batch.put(&self.mk(key), &encode_stream_meta(meta));
+        (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -206,7 +211,8 @@ impl Db {
             .ok_or_else(|| Error::msg("ERR no such key"))?;
         meta.last_id = id;
         let mut batch = WriteBatch::new();
-        batch.put(&self.mk(key), &encode_stream_meta(meta));
+        (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -234,20 +240,21 @@ impl Db {
             let exists = self.store.get_raw(&entry_key).is_some();
             statuses.push(if exists { 1 } else { -1 });
             if exists && seen_entry_ids.insert(*id) {
-                batch.delete(&entry_key);
+                (batch.delete(&entry_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
 
             if seen_pending_ids.insert(*id) {
                 let pending_key = stream_pel_key(self.db_index, key, meta.version, group, *id);
                 if self.store.get_raw(&pending_key).is_some() {
-                    batch.delete(&pending_key);
+                    (batch.delete(&pending_key)).expect("write batch append invariant violated");
                 }
             }
         }
         if deleted > 0 {
             meta.length = meta.length.saturating_sub(deleted as u64);
-            batch.put(&self.mk(key), &encode_stream_meta(meta));
+            (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                .expect("write batch append invariant violated");
         }
         if batch.count() > 0 {
             self.write_batch_if_not_empty(&batch);
@@ -297,17 +304,18 @@ impl Db {
             let exists = entry_value.is_some();
             statuses.push(if exists { 1 } else { -1 });
             if exists && seen_entry_ids.insert(*id) {
-                batch.delete(&entry_key);
+                (batch.delete(&entry_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
 
             if seen_pending_ids.insert(*id) && pending_value.is_some() {
-                batch.delete(&pending_key);
+                (batch.delete(&pending_key)).expect("write batch append invariant violated");
             }
         }
         if deleted > 0 {
             meta.length = meta.length.saturating_sub(deleted as u64);
-            batch.put(&self.mk(key), &encode_stream_meta(meta));
+            (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                .expect("write batch append invariant violated");
         }
         if batch.count() > 0 {
             self.write_batch_if_not_empty_async(&batch).await;
@@ -333,13 +341,14 @@ impl Db {
             let exists = self.store.get_raw(&entry_key).is_some();
             statuses.push(if exists { 1 } else { -1 });
             if exists && seen_ids.insert(*id) {
-                batch.delete(&entry_key);
+                (batch.delete(&entry_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
         }
         if deleted > 0 {
             meta.length = meta.length.saturating_sub(deleted as u64);
-            batch.put(&self.mk(key), &encode_stream_meta(meta));
+            (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                .expect("write batch append invariant violated");
             self.write_batch_if_not_empty(&batch);
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -368,13 +377,14 @@ impl Db {
             let exists = value.is_some();
             statuses.push(if exists { 1 } else { -1 });
             if exists && seen_ids.insert(*id) {
-                batch.delete(&entry_key);
+                (batch.delete(&entry_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
         }
         if deleted > 0 {
             meta.length = meta.length.saturating_sub(deleted as u64);
-            batch.put(&self.mk(key), &encode_stream_meta(meta));
+            (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                .expect("write batch append invariant violated");
             self.write_batch_if_not_empty_async(&batch).await;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }

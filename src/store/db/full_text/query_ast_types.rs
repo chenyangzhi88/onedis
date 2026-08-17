@@ -27,6 +27,9 @@ pub(super) enum FullTextQueryAst {
         relation: String,
         shape: String,
     },
+    Missing {
+        field: String,
+    },
     VectorRange {
         field: String,
         radius: f64,
@@ -49,6 +52,9 @@ pub(super) enum FullTextQueryAst {
     Attributed {
         expr: Box<FullTextQueryAst>,
         weight: Option<f32>,
+        slop: Option<u32>,
+        inorder: Option<bool>,
+        phonetic: Option<bool>,
     },
 }
 

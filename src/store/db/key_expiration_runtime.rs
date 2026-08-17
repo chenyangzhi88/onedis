@@ -8,7 +8,7 @@ impl Db {
         key_bytes: &[u8],
         header: MetaHeader,
     ) -> Result<(), Error> {
-        batch.delete(key_bytes);
+        (batch.delete(key_bytes)).expect("write batch append invariant violated");
         self.ttl_manager
             .remove_known_to_batch(batch, header.expire_ms, self.db_index, key);
         match header.type_tag {

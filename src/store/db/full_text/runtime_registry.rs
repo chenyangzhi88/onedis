@@ -12,6 +12,22 @@ impl FullTextRuntimeRegistry {
             .insert(Self::key(db_index, index), Arc::new(RwLock::new(runtime)));
     }
 
+    pub(super) fn get_or_try_insert(
+        &self,
+        db_index: u16,
+        index: &str,
+        create: impl FnOnce() -> Result<FullTextRuntime, Error>,
+    ) -> Result<Arc<RwLock<FullTextRuntime>>, Error> {
+        match self.indexes.entry(Self::key(db_index, index)) {
+            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                let runtime = Arc::new(RwLock::new(create()?));
+                entry.insert(runtime.clone());
+                Ok(runtime)
+            }
+        }
+    }
+
     pub(super) fn get(&self, db_index: u16, index: &str) -> Option<Arc<RwLock<FullTextRuntime>>> {
         self.indexes
             .get(&Self::key(db_index, index))
@@ -22,6 +38,7 @@ impl FullTextRuntimeRegistry {
         let key = Self::key(db_index, index);
         self.indexes.remove(&key);
         self.outbox_mutations_since_compaction.remove(&key);
+        self.outbox_pending.remove(&key);
     }
 
     pub(crate) fn remove_db(&self, db_index: u16) {
@@ -37,17 +54,59 @@ impl FullTextRuntimeRegistry {
     }
 
     pub(super) fn lifecycle_lock(&self, db_index: u16, index: &str) -> Arc<RwLock<()>> {
-        self.lifecycle_locks
-            .entry(Self::key(db_index, index))
-            .or_insert_with(|| Arc::new(RwLock::new(())))
-            .clone()
+        self.prune_dead_locks();
+        match self.lifecycle_locks.entry(Self::key(db_index, index)) {
+            Entry::Occupied(mut entry) => {
+                if let Some(lock) = entry.get().upgrade() {
+                    lock
+                } else {
+                    let lock = Arc::new(RwLock::new(()));
+                    entry.insert(Arc::downgrade(&lock));
+                    lock
+                }
+            }
+            Entry::Vacant(entry) => {
+                let lock = Arc::new(RwLock::new(()));
+                entry.insert(Arc::downgrade(&lock));
+                lock
+            }
+        }
     }
 
     pub(super) fn refresh_lock(&self, db_index: u16, index: &str) -> Arc<Mutex<()>> {
-        self.refresh_locks
-            .entry(Self::key(db_index, index))
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        self.prune_dead_locks();
+        match self.refresh_locks.entry(Self::key(db_index, index)) {
+            Entry::Occupied(mut entry) => {
+                if let Some(lock) = entry.get().upgrade() {
+                    lock
+                } else {
+                    let lock = Arc::new(Mutex::new(()));
+                    entry.insert(Arc::downgrade(&lock));
+                    lock
+                }
+            }
+            Entry::Vacant(entry) => {
+                let lock = Arc::new(Mutex::new(()));
+                entry.insert(Arc::downgrade(&lock));
+                lock
+            }
+        }
+    }
+
+    fn prune_dead_locks(&self) {
+        const PRUNE_THRESHOLD: usize = 64;
+        const PRUNE_INTERVAL: u64 = 64;
+        if self.lifecycle_locks.len() + self.refresh_locks.len() < PRUNE_THRESHOLD
+            || !self
+                .lock_prune_ticks
+                .fetch_add(1, AtomicOrdering::Relaxed)
+                .is_multiple_of(PRUNE_INTERVAL)
+        {
+            return;
+        }
+        self.lifecycle_locks
+            .retain(|_, lock| lock.strong_count() > 0);
+        self.refresh_locks.retain(|_, lock| lock.strong_count() > 0);
     }
 
     pub(super) fn invalidate_source_routes(&self, db_index: u16) {

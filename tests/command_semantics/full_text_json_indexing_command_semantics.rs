@@ -126,6 +126,10 @@ fn seed_json_index() -> (TempDir, Db) {
             "AS",
             "price",
             "NUMERIC",
+            "$.locations[*]",
+            "AS",
+            "location",
+            "GEO",
             "$.variants[*].title",
             "AS",
             "variant",
@@ -138,7 +142,7 @@ fn seed_json_index() -> (TempDir, Db) {
             "JSON.SET",
             "prod:1",
             "$",
-            r#"{"name":"linen shirt","tags":["summer","sale"],"prices":[12,19],"variants":[{"title":"red cotton"},{"title":"blue linen"}]}"#,
+            r#"{"name":"linen shirt","tags":["summer","sale"],"prices":[12,19],"locations":["0,0","10,10"],"variants":[{"title":"red cotton"},{"title":"blue linen"}]}"#,
         ],
     );
     (dir, db)
@@ -152,6 +156,67 @@ fn ft_search_json_indexing_indexes_json_arrays_and_nested_values() {
     assert_search_ids(&db, &["FT.SEARCH", "jidx", "@tags:{sale}"], &["prod:1"]);
     assert_search_ids(&db, &["FT.SEARCH", "jidx", "@price:[18 20]"], &["prod:1"]);
     assert_search_ids(&db, &["FT.SEARCH", "jidx", "@price:[20 30]"], &[]);
+    assert_search_ids(
+        &db,
+        &["FT.SEARCH", "jidx", "*", "FILTER", "price", "18", "20"],
+        &["prod:1"],
+    );
+    assert_search_ids(
+        &db,
+        &[
+            "FT.SEARCH",
+            "jidx",
+            "*",
+            "GEOFILTER",
+            "location",
+            "10",
+            "10",
+            "1",
+            "km",
+        ],
+        &["prod:1"],
+    );
+}
+
+#[test]
+fn ft_search_json_sort_uses_the_first_multi_value() {
+    let (_dir, db) = make_db();
+    apply(
+        &db,
+        &[
+            "FT.CREATE",
+            "sorted-json",
+            "ON",
+            "JSON",
+            "PREFIX",
+            "1",
+            "sorted:",
+            "SCHEMA",
+            "$.prices[*]",
+            "AS",
+            "price",
+            "NUMERIC",
+            "SORTABLE",
+        ],
+    );
+    apply(&db, &["JSON.SET", "sorted:a", "$", r#"{"prices":[19,12]}"#]);
+    apply(&db, &["JSON.SET", "sorted:b", "$", r#"{"prices":[15]}"#]);
+
+    assert_search_ids(
+        &db,
+        &[
+            "FT.SEARCH",
+            "sorted-json",
+            "*",
+            "SORTBY",
+            "price",
+            "ASC",
+            "LIMIT",
+            "0",
+            "2",
+        ],
+        &["sorted:b", "sorted:a"],
+    );
 }
 
 #[test]

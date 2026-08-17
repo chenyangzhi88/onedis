@@ -91,9 +91,13 @@ impl<'a> FullTextQueryParser<'a> {
                 expr = self.parse_vector_knn(expr)?;
             } else if self.peek_char() == Some('{') {
                 let attrs = self.read_balanced('{', '}')?;
+                let (weight, slop, inorder, phonetic) = parse_query_attributes(&attrs)?;
                 expr = FullTextQueryAst::Attributed {
                     expr: Box::new(expr),
-                    weight: parse_query_attribute_weight(&attrs)?,
+                    weight,
+                    slop,
+                    inorder,
+                    phonetic,
                 };
             } else {
                 return Err(Error::msg("ERR syntax error"));
@@ -104,6 +108,12 @@ impl<'a> FullTextQueryParser<'a> {
 
     pub(super) fn parse_primary(&mut self) -> Result<FullTextQueryAst, Error> {
         self.skip_ws();
+        if self.input[self.idx..]
+            .get(..10)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ismissing("))
+        {
+            return self.parse_missing();
+        }
         match self.peek_char() {
             Some('*') => {
                 self.advance_char();
@@ -124,6 +134,26 @@ impl<'a> FullTextQueryParser<'a> {
             Some(')') | Some('|') | None => Err(Error::msg("ERR syntax error")),
             _ => self.parse_word(),
         }
+    }
+
+    fn parse_missing(&mut self) -> Result<FullTextQueryAst, Error> {
+        self.idx += "ismissing(".len();
+        self.skip_ws();
+        self.expect_char('@')?;
+        let start = self.idx;
+        while self
+            .peek_char()
+            .is_some_and(|ch| ch != ')' && !ch.is_ascii_whitespace())
+        {
+            self.advance_char();
+        }
+        if self.idx == start {
+            return Err(Error::msg("ERR syntax error"));
+        }
+        let field = self.input[start..self.idx].to_string();
+        self.skip_ws();
+        self.expect_char(')')?;
+        Ok(FullTextQueryAst::Missing { field })
     }
 
     pub(super) fn parse_field_modifier(&mut self) -> Result<FullTextQueryAst, Error> {
@@ -155,7 +185,11 @@ impl<'a> FullTextQueryParser<'a> {
                 let raw = self.read_balanced('{', '}')?;
                 Ok(FullTextQueryAst::Tag {
                     field: fields[0].clone(),
-                    values: split_tag_values(&raw),
+                    values: if raw.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        split_tag_values(&raw)
+                    },
                 })
             }
             Some('[') => self.parse_field_bracket(fields[0].clone()),

@@ -114,13 +114,14 @@ impl Db {
                     .ok()
                     .and_then(|state| state.version)
                     .expect("removed zset entry has a version");
-                batch.delete(&rank_key);
-                batch.delete(&zset_member_key(
+                (batch.delete(&rank_key)).expect("write batch append invariant violated");
+                (batch.delete(&zset_member_key(
                     self.db_index,
                     keys[position],
                     version,
                     &member,
-                ));
+                )))
+                .expect("write batch append invariant violated");
                 dirty_positions.insert(position);
             }
             for &position in &dirty_positions {
@@ -264,8 +265,9 @@ impl Db {
             let Some(member) = self.decode_rank_member(key, version, &rank_key) else {
                 continue;
             };
-            batch.delete(&rank_key);
-            batch.delete(&zset_member_key(self.db_index, key, version, &member));
+            (batch.delete(&rank_key)).expect("write batch append invariant violated");
+            (batch.delete(&zset_member_key(self.db_index, key, version, &member)))
+                .expect("write batch append invariant violated");
             entries.push((member, score));
         }
         if entries.is_empty() {

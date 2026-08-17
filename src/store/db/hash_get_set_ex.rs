@@ -304,8 +304,10 @@ impl Db {
                 .collect::<HashSet<_>>();
             let delete_hash = deleted_names.len() == existing_fields.len();
             for (field, _) in fields {
-                batch.delete(&hash_field_key(self.db_index, key, version, field));
-                batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+                (batch.delete(&hash_field_key(self.db_index, key, version, field)))
+                    .expect("write batch append invariant violated");
+                (batch.delete(&hash_field_expire_key(self.db_index, key, version, field)))
+                    .expect("write batch append invariant violated");
             }
             if delete_hash {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, hash_expire_ms);
@@ -322,29 +324,33 @@ impl Db {
 
         if let Some((hash_expire_ms, _)) = meta {
             if field_ttl_requested {
-                batch.put(
+                (batch.put(
                     &self.mk(key),
                     &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_hash_meta_with_field_ttl_flag(0, version, field_ttl_requested),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         for (field, value) in fields {
-            batch.put(&hash_field_key(self.db_index, key, version, field), value);
+            (batch.put(&hash_field_key(self.db_index, key, version, field), value))
+                .expect("write batch append invariant violated");
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
             match expiration {
                 Some(ResolvedHashExpiration::At(expire_ms)) => {
-                    batch.put(&expire_key, &expire_ms.to_be_bytes());
+                    (batch.put(&expire_key, &expire_ms.to_be_bytes()))
+                        .expect("write batch append invariant violated");
                 }
                 Some(ResolvedHashExpiration::Persist) => {
-                    batch.delete(&expire_key);
+                    (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 }
                 None if !keep_ttl => {
-                    batch.delete(&expire_key);
+                    (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 }
                 None => {}
             }
@@ -461,8 +467,10 @@ impl Db {
                 .collect::<HashSet<_>>();
             let delete_hash = deleted_names.len() == existing_fields.len();
             for (field, _) in fields {
-                batch.delete(&hash_field_key(self.db_index, key, version, field));
-                batch.delete(&hash_field_expire_key(self.db_index, key, version, field));
+                (batch.delete(&hash_field_key(self.db_index, key, version, field)))
+                    .expect("write batch append invariant violated");
+                (batch.delete(&hash_field_expire_key(self.db_index, key, version, field)))
+                    .expect("write batch append invariant violated");
             }
             if delete_hash {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, hash_expire_ms);
@@ -479,29 +487,33 @@ impl Db {
 
         if let Some((hash_expire_ms, _)) = meta {
             if field_ttl_requested {
-                batch.put(
+                (batch.put(
                     &self.mk(key),
                     &encode_hash_meta_with_field_ttl_flag(hash_expire_ms, version, true),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(key),
                 &encode_hash_meta_with_field_ttl_flag(0, version, field_ttl_requested),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
         for (field, value) in fields {
-            batch.put(&hash_field_key(self.db_index, key, version, field), value);
+            (batch.put(&hash_field_key(self.db_index, key, version, field), value))
+                .expect("write batch append invariant violated");
             let expire_key = hash_field_expire_key(self.db_index, key, version, field);
             match expiration {
                 Some(ResolvedHashExpiration::At(expire_ms)) => {
-                    batch.put(&expire_key, &expire_ms.to_be_bytes());
+                    (batch.put(&expire_key, &expire_ms.to_be_bytes()))
+                        .expect("write batch append invariant violated");
                 }
                 Some(ResolvedHashExpiration::Persist) => {
-                    batch.delete(&expire_key);
+                    (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 }
                 None if !keep_ttl => {
-                    batch.delete(&expire_key);
+                    (batch.delete(&expire_key)).expect("write batch append invariant violated");
                 }
                 None => {}
             }

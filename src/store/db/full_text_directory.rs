@@ -264,8 +264,9 @@ impl KvTantivyDirectory {
 
     /// Removes a writer lock left behind by an unclean process exit.
     ///
-    /// The caller must hold the index lifecycle write lock and must have confirmed that no
-    /// in-process runtime owns an `IndexWriter` for this storage generation.
+    /// The caller must hold either the index lifecycle write lock or the registry's exclusive
+    /// vacant-entry reservation, and must have confirmed that no in-process runtime owns an
+    /// `IndexWriter` for this storage generation.
     pub(crate) fn remove_stale_writer_lock(&self) -> io::Result<bool> {
         let path = INDEX_WRITER_LOCK.filepath.as_path();
         if self.manifest(path).is_none() {

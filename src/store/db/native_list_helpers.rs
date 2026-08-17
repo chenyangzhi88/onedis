@@ -22,7 +22,7 @@ impl Db {
                 && now_ms() >= header.expire_ms
             {
                 let mut batch = WriteBatch::new();
-                batch.delete(&key_bytes);
+                (batch.delete(&key_bytes)).expect("write batch append invariant violated");
                 delete_sub_keys_to_batch(
                     &mut batch,
                     self.db_index,
@@ -95,7 +95,7 @@ impl Db {
                 && now_ms() >= header.expire_ms
             {
                 let mut batch = WriteBatch::new();
-                batch.delete(&key_bytes);
+                (batch.delete(&key_bytes)).expect("write batch append invariant violated");
                 delete_sub_keys_to_batch(
                     &mut batch,
                     self.db_index,
@@ -461,34 +461,5 @@ impl Db {
                 .into_iter()
                 .map(|(_, value)| value),
         );
-    }
-
-    pub(in crate::store::db) async fn append_list_range_raw_values_visit_async(
-        &self,
-        key: &str,
-        version: u64,
-        storage_start: i64,
-        storage_end: i64,
-        limit: usize,
-        visitor: &mut (dyn FnMut(&[u8]) -> bool + Send),
-    ) -> usize {
-        if storage_start > storage_end || limit == 0 {
-            return 0;
-        }
-
-        let lower_bound = list_item_key(self.db_index, key, version, storage_start);
-        let upper_bound = if storage_end < -1 {
-            Some(list_item_key(self.db_index, key, version, storage_end + 1))
-        } else if storage_end < 0 {
-            prefix_exclusive_upper_bound(&list_item_prefix(self.db_index, key, version))
-        } else if storage_end == i64::MAX {
-            return 0;
-        } else {
-            Some(list_item_key(self.db_index, key, version, storage_end + 1))
-        };
-
-        self.store
-            .scan_range_raw_visit_async(&lower_bound, upper_bound, limit, |_, value| visitor(value))
-            .await
     }
 }

@@ -52,15 +52,17 @@ impl Db {
         let mut batch = WriteBatch::new();
         for value in values {
             meta.head -= 1;
-            batch.put(
+            (batch.put(
                 &list_item_key(self.db_index, key, meta.version, meta.head),
                 value,
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
-        batch.put(
+        (batch.put(
             &self.mk(key),
             &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-        );
+        ))
+        .expect("write batch append invariant violated");
         let len = (meta.tail - meta.head) as usize;
         if batch.count() > 0 {
             self.write_batch_if_not_empty(&batch);
@@ -120,16 +122,18 @@ impl Db {
         };
         let mut batch = WriteBatch::new();
         for value in values {
-            batch.put(
+            (batch.put(
                 &list_item_key(self.db_index, key, meta.version, meta.tail),
                 value,
-            );
+            ))
+            .expect("write batch append invariant violated");
             meta.tail += 1;
         }
-        batch.put(
+        (batch.put(
             &self.mk(key),
             &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-        );
+        ))
+        .expect("write batch append invariant violated");
         let len = (meta.tail - meta.head) as usize;
         if batch.count() > 0 {
             self.write_batch_if_not_empty(&batch);
@@ -304,15 +308,17 @@ impl Db {
             for value in values {
                 if *left {
                     meta.head -= 1;
-                    batch.put(
+                    (batch.put(
                         &list_item_key(self.db_index, key, meta.version, meta.head),
                         value,
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 } else {
-                    batch.put(
+                    (batch.put(
                         &list_item_key(self.db_index, key, meta.version, meta.tail),
                         value,
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                     meta.tail += 1;
                 }
             }
@@ -330,10 +336,11 @@ impl Db {
                 dirty: true,
             } = state
             {
-                batch.put(
+                (batch.put(
                     &self.mk(keys[position]),
                     &encode_list_meta(meta.expire_ms, meta.version, meta.head, meta.tail),
-                );
+                ))
+                .expect("write batch append invariant violated");
                 has_new_version |= !initially_exists;
             }
         }

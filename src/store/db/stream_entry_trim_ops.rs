@@ -17,11 +17,12 @@ impl Db {
         );
         let mut batch = WriteBatch::new();
         for (entry_key, _) in &entries {
-            batch.delete(entry_key);
+            (batch.delete(entry_key)).expect("write batch append invariant violated");
         }
         let deleted = entries.len();
         meta.length = meta.length.saturating_sub(deleted as u64);
-        batch.put(&self.mk(key), &encode_stream_meta(meta));
+        (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(deleted)
@@ -51,11 +52,12 @@ impl Db {
             .await;
         let mut batch = WriteBatch::new();
         for (entry_key, _) in &entries {
-            batch.delete(entry_key);
+            (batch.delete(entry_key)).expect("write batch append invariant violated");
         }
         let deleted = entries.len();
         meta.length = meta.length.saturating_sub(deleted as u64);
-        batch.put(&self.mk(key), &encode_stream_meta(meta));
+        (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(deleted)

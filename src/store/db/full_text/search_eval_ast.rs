@@ -7,7 +7,16 @@ pub(super) fn fulltext_eval_ast_against_fields(
 ) -> Result<bool, Error> {
     match ast {
         FullTextQueryAst::All => Ok(true),
-        FullTextQueryAst::Text(term) => Ok(fulltext_any_text_field_matches(term, fields, meta)),
+        FullTextQueryAst::Text(term) => {
+            Ok(fulltext_any_text_field_matches(term, fields, meta, options))
+        }
+        FullTextQueryAst::Phrase(phrase) if phrase.is_empty() => {
+            Ok(fields.iter().any(|(field, value)| {
+                value.is_empty()
+                    && fulltext_schema_field(meta, field)
+                        .is_some_and(|schema| schema.options.index_empty)
+            }))
+        }
         FullTextQueryAst::Phrase(phrase) => Ok(fields
             .iter()
             .filter(|(field, _)| {
@@ -53,9 +62,6 @@ pub(super) fn fulltext_eval_ast_against_fields(
             }))
         }
         FullTextQueryAst::Tag { field, values } => {
-            let Some(value) = fulltext_field_value(fields, field) else {
-                return Ok(false);
-            };
             let Some(schema) = fulltext_schema_field(meta, field) else {
                 return Ok(false);
             };
@@ -65,26 +71,30 @@ pub(super) fn fulltext_eval_ast_against_fields(
                 .as_deref()
                 .and_then(|separator| separator.chars().next())
                 .unwrap_or(',');
-            let actual =
-                fulltext_split_indexed_tags(&value, separator, schema.options.case_sensitive);
-            Ok(values.iter().any(|expected| {
-                let expected = if schema.options.case_sensitive {
-                    expected.clone()
-                } else {
-                    expected.to_lowercase()
-                };
-                actual.iter().any(|actual| actual == &expected)
+            if values.len() == 1 && values[0].is_empty() {
+                return Ok(schema.options.index_empty
+                    && fulltext_field_values(fields, field).any(str::is_empty));
+            }
+            Ok(fulltext_field_values(fields, field).any(|value| {
+                let actual =
+                    fulltext_split_indexed_tags(value, separator, schema.options.case_sensitive);
+                values.iter().any(|expected| {
+                    let expected = if schema.options.case_sensitive {
+                        expected.clone()
+                    } else {
+                        expected.to_lowercase()
+                    };
+                    actual.iter().any(|actual| actual == &expected)
+                })
             }))
         }
-        FullTextQueryAst::Numeric { field, min, max } => {
-            let Some(value) =
-                fulltext_field_value(fields, field).and_then(|value| value.parse::<f64>().ok())
-            else {
-                return Ok(false);
-            };
-            Ok(fulltext_numeric_bound_allows(value, *min, true)
-                && fulltext_numeric_bound_allows(value, *max, false))
-        }
+        FullTextQueryAst::Numeric { field, min, max } => Ok(fulltext_field_values(fields, field)
+            .any(|value| {
+                value.parse::<f64>().ok().is_some_and(|value| {
+                    fulltext_numeric_bound_allows(value, *min, true)
+                        && fulltext_numeric_bound_allows(value, *max, false)
+                })
+            })),
         FullTextQueryAst::Geo {
             field,
             lon,
@@ -92,20 +102,33 @@ pub(super) fn fulltext_eval_ast_against_fields(
             radius,
             unit,
         } => {
-            let Some(value) = fulltext_field_value(fields, field) else {
-                return Ok(false);
-            };
-            fulltext_geo_value_within(&value, *lon, *lat, *radius, unit)
+            for value in fulltext_field_values(fields, field) {
+                if fulltext_geo_value_within(value, *lon, *lat, *radius, unit)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
         FullTextQueryAst::GeoShape {
             field,
             relation,
             shape,
         } => {
-            let Some(value) = fulltext_field_value(fields, field) else {
-                return Ok(false);
+            for value in fulltext_field_values(fields, field) {
+                if fulltext_geoshape_relation_matches(value, relation, shape)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        FullTextQueryAst::Missing { field } => {
+            let Some(schema) = fulltext_schema_field(meta, field) else {
+                return Err(Error::msg("ERR invalid field"));
             };
-            fulltext_geoshape_relation_matches(&value, relation, shape)
+            if !schema.options.index_missing {
+                return Err(Error::msg("ERR field does not have INDEXMISSING"));
+            }
+            Ok(fulltext_field_values(fields, field).next().is_none())
         }
         FullTextQueryAst::Field {
             fields: scope,
@@ -138,8 +161,24 @@ pub(super) fn fulltext_eval_ast_against_fields(
             child, fields, meta, options,
         )?),
         FullTextQueryAst::Optional(_) => Ok(true),
-        FullTextQueryAst::Attributed { expr, .. } => {
-            fulltext_eval_ast_against_fields(expr, fields, meta, options)
+        FullTextQueryAst::Attributed {
+            expr,
+            slop,
+            inorder,
+            phonetic,
+            ..
+        } => {
+            let mut attributed_options = options.clone();
+            if let Some(slop) = slop {
+                attributed_options.slop = Some(*slop);
+            }
+            if let Some(inorder) = inorder {
+                attributed_options.inorder = *inorder;
+            }
+            if let Some(phonetic) = phonetic {
+                attributed_options.phonetic = Some(*phonetic);
+            }
+            fulltext_eval_ast_against_fields(expr, fields, meta, &attributed_options)
         }
         FullTextQueryAst::VectorRange { .. } | FullTextQueryAst::VectorKnn { .. } => Ok(false),
     }
@@ -278,6 +317,7 @@ pub(super) fn fulltext_any_text_field_matches(
     term: &str,
     fields: &[(String, String)],
     meta: &FullTextIndexMeta,
+    options: &FullTextSearchOptions,
 ) -> bool {
     fields.iter().any(|(field, value)| {
         let Some(schema) = fulltext_schema_field(meta, field) else {
@@ -287,8 +327,10 @@ pub(super) fn fulltext_any_text_field_matches(
             return false;
         }
         let settings = FullTextTextFieldSettings {
-            nostem: schema.options.nostem,
-            phonetic: schema.options.phonetic.is_some(),
+            nostem: options.verbatim || schema.options.nostem,
+            phonetic: options
+                .phonetic
+                .unwrap_or_else(|| schema.options.phonetic.is_some()),
             with_suffix_trie: schema.options.with_suffix_trie,
             stopwords: meta
                 .index_options
@@ -298,13 +340,20 @@ pub(super) fn fulltext_any_text_field_matches(
                 .into_iter()
                 .map(|word| word.to_lowercase())
                 .collect(),
-            language: meta
-                .index_options
+            language: options
                 .language
                 .clone()
+                .or_else(|| meta.index_options.language.clone())
                 .unwrap_or_else(|| "english".to_string()),
             weight: schema.options.weight.unwrap_or(1.0),
         };
+        let mut settings = settings;
+        if options.verbatim {
+            settings.phonetic = false;
+        }
+        if options.no_stopwords {
+            settings.stopwords.clear();
+        }
         let materialized = fulltext_materialize_text(value, &settings);
         let variants = fulltext_query_term_variants(term, Some(&settings), &HashMap::new());
         variants.iter().any(|variant| {

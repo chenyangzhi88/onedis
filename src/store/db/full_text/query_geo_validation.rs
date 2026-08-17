@@ -76,6 +76,7 @@ pub(super) fn fulltext_validate_geo_query_ast(
         | FullTextQueryAst::Fuzzy(_)
         | FullTextQueryAst::Tag { .. }
         | FullTextQueryAst::Numeric { .. }
+        | FullTextQueryAst::Missing { .. }
         | FullTextQueryAst::VectorKnn { .. }
         | FullTextQueryAst::VectorRange { .. } => Ok(()),
     }

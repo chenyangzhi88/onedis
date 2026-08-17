@@ -128,13 +128,15 @@ impl Db {
             for &position in &dirty_positions {
                 let (key, state) = states[position].as_ref().expect("dirty set state is valid");
                 for member in state.members.difference(&state.initial_members) {
-                    batch.put(
+                    (batch.put(
                         &set_member_key(self.db_index, key, state.version, member),
                         INDEX_MARKER_VALUE,
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
                 for member in state.initial_members.difference(&state.members) {
-                    batch.delete(&set_member_key(self.db_index, key, state.version, member));
+                    (batch.delete(&set_member_key(self.db_index, key, state.version, member)))
+                        .expect("write batch append invariant violated");
                 }
                 let added = state.members.difference(&state.initial_members).count();
                 let removed = state.initial_members.difference(&state.members).count();
@@ -154,10 +156,11 @@ impl Db {
                         );
                     }
                 } else {
-                    batch.put(
+                    (batch.put(
                         &self.mk(key),
                         &encode_set_meta(state.expire_ms, state.version, final_len),
-                    );
+                    ))
+                    .expect("write batch append invariant violated");
                 }
             }
             let conditions = dirty_positions
@@ -205,7 +208,8 @@ impl Db {
             }
             let member_key = set_member_key(self.db_index, key, version, member);
             if !self.store.contains_key(&member_key) {
-                batch.put(&member_key, INDEX_MARKER_VALUE);
+                (batch.put(&member_key, INDEX_MARKER_VALUE))
+                    .expect("write batch append invariant violated");
                 added += 1;
             }
         }
@@ -213,7 +217,8 @@ impl Db {
         if added > 0 || meta.is_none() {
             let expire_ms = meta.map_or(0, |meta| meta.expire_ms);
             let len = meta.map_or(0, |meta| meta.len).saturating_add(added);
-            batch.put(&self.mk(key), &encode_set_meta(expire_ms, version, len));
+            (batch.put(&self.mk(key), &encode_set_meta(expire_ms, version, len)))
+                .expect("write batch append invariant violated");
         }
 
         if batch.count() > 0 {
@@ -285,13 +290,15 @@ impl Db {
                 if old_raw.is_some() {
                     continue;
                 }
-                batch.put(&member_key, INDEX_MARKER_VALUE);
+                (batch.put(&member_key, INDEX_MARKER_VALUE))
+                    .expect("write batch append invariant violated");
                 added += 1;
             }
         } else {
             for member in unique_members {
                 let member_key = set_member_key(self.db_index, key, version, member);
-                batch.put(&member_key, INDEX_MARKER_VALUE);
+                (batch.put(&member_key, INDEX_MARKER_VALUE))
+                    .expect("write batch append invariant violated");
                 added += 1;
             }
         }
@@ -299,7 +306,8 @@ impl Db {
         if added > 0 || meta.is_none() {
             let expire_ms = meta.map_or(0, |meta| meta.expire_ms);
             let len = meta.map_or(0, |meta| meta.len).saturating_add(added);
-            batch.put(&key_bytes, &encode_set_meta(expire_ms, version, len));
+            (batch.put(&key_bytes, &encode_set_meta(expire_ms, version, len)))
+                .expect("write batch append invariant violated");
         }
 
         if batch.count() > 0 {
@@ -338,7 +346,7 @@ impl Db {
         let existing = self.store.multi_get_raw(&member_keys);
         for (member_key, old_raw) in member_keys.into_iter().zip(existing) {
             if old_raw.is_some() {
-                batch.delete(&member_key);
+                (batch.delete(&member_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
         }
@@ -349,10 +357,11 @@ impl Db {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_SET);
             } else {
-                batch.put(
+                (batch.put(
                     &self.mk(key),
                     &encode_set_meta(meta.expire_ms, meta.version, len),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
         }
 
@@ -384,7 +393,7 @@ impl Db {
         let existing = self.store.multi_get_raw_async(&member_keys).await;
         for (member_key, old_raw) in member_keys.into_iter().zip(existing) {
             if old_raw.is_some() {
-                batch.delete(&member_key);
+                (batch.delete(&member_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
         }
@@ -395,10 +404,11 @@ impl Db {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
                 delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_SET);
             } else {
-                batch.put(
+                (batch.put(
                     &self.mk(key),
                     &encode_set_meta(meta.expire_ms, meta.version, len),
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
         }
 
@@ -422,11 +432,11 @@ impl Db {
             return Ok(false);
         }
         let mut batch = WriteBatch::new();
-        batch.delete(&source_member_key);
+        (batch.delete(&source_member_key)).expect("write batch append invariant violated");
 
         let source_len = source_meta.len.saturating_sub(1);
         if source_len == 0 {
-            batch.delete(&self.mk(source));
+            (batch.delete(&self.mk(source))).expect("write batch append invariant violated");
             delete_sub_keys_to_batch(
                 &mut batch,
                 self.db_index,
@@ -443,10 +453,11 @@ impl Db {
                 );
             }
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(source),
                 &encode_set_meta(source_meta.expire_ms, source_meta.version, source_len),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         let destination_version = destination_meta
@@ -456,15 +467,17 @@ impl Db {
             set_member_key(self.db_index, destination, destination_version, member);
         if !self.store.contains_key(&destination_member_key) {
             let destination_len = destination_meta.map_or(0, |meta| meta.len);
-            batch.put(&destination_member_key, INDEX_MARKER_VALUE);
-            batch.put(
+            (batch.put(&destination_member_key, INDEX_MARKER_VALUE))
+                .expect("write batch append invariant violated");
+            (batch.put(
                 &self.mk(destination),
                 &encode_set_meta(
                     destination_meta.map_or(0, |meta| meta.expire_ms),
                     destination_version,
                     destination_len.saturating_add(1),
                 ),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         self.write_batch_if_not_empty(&batch);
@@ -515,11 +528,11 @@ impl Db {
             return Ok(false);
         }
         let mut batch = WriteBatch::new();
-        batch.delete(&source_member_key);
+        (batch.delete(&source_member_key)).expect("write batch append invariant violated");
 
         let source_len = source_meta.len.saturating_sub(1);
         if source_len == 0 {
-            batch.delete(&self.mk(source));
+            (batch.delete(&self.mk(source))).expect("write batch append invariant violated");
             delete_sub_keys_to_batch(
                 &mut batch,
                 self.db_index,
@@ -536,10 +549,11 @@ impl Db {
                 );
             }
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(source),
                 &encode_set_meta(source_meta.expire_ms, source_meta.version, source_len),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         let destination_version = match destination_meta {
@@ -550,15 +564,17 @@ impl Db {
             set_member_key(self.db_index, destination, destination_version, member);
         if !self.store.contains_key_async(&destination_member_key).await {
             let destination_len = destination_meta.map_or(0, |meta| meta.len);
-            batch.put(&destination_member_key, INDEX_MARKER_VALUE);
-            batch.put(
+            (batch.put(&destination_member_key, INDEX_MARKER_VALUE))
+                .expect("write batch append invariant violated");
+            (batch.put(
                 &self.mk(destination),
                 &encode_set_meta(
                     destination_meta.map_or(0, |meta| meta.expire_ms),
                     destination_version,
                     destination_len.saturating_add(1),
                 ),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         self.write_batch_if_not_empty_async(&batch).await;

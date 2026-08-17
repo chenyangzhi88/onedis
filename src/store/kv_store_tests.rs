@@ -37,8 +37,8 @@ mod tests {
     fn test_write_batch_atomic() {
         let store = test_store();
         let mut batch = WriteBatch::new();
-        batch.put(b"a", b"1");
-        batch.put(b"b", b"2");
+        (batch.put(b"a", b"1")).expect("write batch append invariant violated");
+        (batch.put(b"b", b"2")).expect("write batch append invariant violated");
         store.write_batch(&batch);
         assert_eq!(store.get_raw(b"a"), Some(b"1".to_vec()));
         assert_eq!(store.get_raw(b"b"), Some(b"2".to_vec()));
@@ -79,7 +79,7 @@ mod tests {
 
         store.put_raw(b"a", b"changed");
         let mut stale_batch = WriteBatch::new();
-        stale_batch.put(b"stale-cas", b"must-not-write");
+        (stale_batch.put(b"stale-cas", b"must-not-write")).expect("write batch append invariant violated");
         assert!(matches!(
             store
                 .compare_and_write_batch_async(&[observed.condition()], &stale_batch)
@@ -100,7 +100,7 @@ mod tests {
         );
 
         let mut ok_batch = WriteBatch::new();
-        ok_batch.put(b"cas", b"ok");
+        (ok_batch.put(b"cas", b"ok")).expect("write batch append invariant violated");
         store
             .compare_and_write_batch_async(
                 &[CompareCondition::with_expected(b"a", Some(b"1".to_vec()))],
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(store.get_raw(b"cas"), Some(b"ok".to_vec()));
 
         let mut failed_batch = WriteBatch::new();
-        failed_batch.put(b"cas", b"bad");
+        (failed_batch.put(b"cas", b"bad")).expect("write batch append invariant violated");
         assert!(
             store
                 .compare_and_write_batch_async(
@@ -181,18 +181,18 @@ mod tests {
         );
 
         let mut direct = WriteBatch::new();
-        direct.put(b"direct:sync", b"1");
+        (direct.put(b"direct:sync", b"1")).expect("write batch append invariant violated");
         store.write_batch_direct(&direct);
         assert_eq!(store.get_raw(b"direct:sync"), Some(b"1".to_vec()));
 
         let mut direct_async = WriteBatch::new();
-        direct_async.put(b"direct:async", b"2");
+        (direct_async.put(b"direct:async", b"2")).expect("write batch append invariant violated");
         store.write_batch_direct_async(direct_async).await;
         assert_eq!(store.get_raw(b"direct:async"), Some(b"2".to_vec()));
 
         let mut async_batch = WriteBatch::new();
-        async_batch.put(b"async:put", b"3");
-        async_batch.delete(b"direct:sync");
+        (async_batch.put(b"async:put", b"3")).expect("write batch append invariant violated");
+        (async_batch.delete(b"direct:sync")).expect("write batch append invariant violated");
         store.write_batch_async(&async_batch).await;
         assert_eq!(store.get_raw(b"async:put"), Some(b"3".to_vec()));
         assert_eq!(store.get_raw(b"direct:sync"), None);
@@ -233,8 +233,8 @@ mod tests {
 
         let txn = store.begin_transaction().unwrap();
         let mut batch = WriteBatch::new();
-        batch.put(b"batched", b"value");
-        batch.delete(b"base");
+        (batch.put(b"batched", b"value")).expect("write batch append invariant violated");
+        (batch.delete(b"base")).expect("write batch append invariant violated");
         txn.write_batch(&batch);
         txn.commit_transaction_async().await.unwrap();
         txn.commit_transaction_async().await.unwrap();
@@ -371,7 +371,7 @@ mod tests {
         );
 
         let mut compare_batch = WriteBatch::new();
-        compare_batch.put(b"txnscan:compare", b"ok");
+        (compare_batch.put(b"txnscan:compare", b"ok")).expect("write batch append invariant violated");
         txn.compare_and_write_batch_async(
             &[CompareCondition::with_expected(
                 b"txnscan:0",
@@ -387,7 +387,7 @@ mod tests {
         let observed = txn.get_raw_observed_async(b"txnscan:0").await;
         txn.put_raw(b"txnscan:0", b"changed-after-observe");
         let mut stale_batch = WriteBatch::new();
-        stale_batch.put(b"txnscan:stale-cas", b"must-not-write");
+        (stale_batch.put(b"txnscan:stale-cas", b"must-not-write")).expect("write batch append invariant violated");
         assert!(matches!(
             txn.compare_and_write_batch_async(&[observed.condition()], &stale_batch)
                 .await,

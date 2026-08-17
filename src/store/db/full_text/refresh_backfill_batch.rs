@@ -52,8 +52,11 @@ impl Db {
                 );
                 fields.retain(|(name, _)| allowed.contains(name.as_str()));
             }
-            bytes_since_publish =
-                bytes_since_publish.saturating_add(runtime.upsert_fields(key, &fields)?);
+            bytes_since_publish = bytes_since_publish.saturating_add(runtime.upsert_fields(
+                key,
+                &fields,
+                self.fulltext_source_expire_ms(key),
+            )?);
             match old_meta.source_type {
                 FullTextSourceType::Hash => {
                     self.fulltext_upsert_vectors(index, &existing_vector_meta, key, &fields, None)?
@@ -137,26 +140,38 @@ impl Db {
         }
         let (keys, has_more) =
             self.fulltext_source_keys_page(meta, cursor.as_deref(), policy.max_docs)?;
-        let finished = !has_more;
+        let mut finished = !has_more;
+        let mut vector_batches = FullTextVectorMutationBatches::new();
         for key in keys {
             if Instant::now() >= deadline {
-                return Ok(BackfillProgress {
-                    finished: false,
-                    cursor,
-                    docs,
-                    bytes,
-                });
+                finished = false;
+                break;
             }
             match meta.source_type {
                 FullTextSourceType::Hash => {
                     let fields = self.hash_get_all(&key)?;
                     if !fields.is_empty() {
                         if fulltext_index_filter_matches(meta, &fields)? {
-                            bytes += runtime.upsert_hash(&key, &fields)?;
-                            self.fulltext_upsert_vectors(index, meta, &key, &fields, None)?;
+                            bytes += runtime.upsert_hash(
+                                &key,
+                                &fields,
+                                self.fulltext_source_expire_ms(&key),
+                            )?;
+                            self.fulltext_collect_vector_mutations(
+                                index,
+                                meta,
+                                &key,
+                                None,
+                                &mut vector_batches,
+                            )?;
                         } else {
                             runtime.delete_hash(&key);
-                            self.fulltext_delete_vectors(index, meta, &key)?;
+                            self.fulltext_collect_vector_deletions(
+                                index,
+                                meta,
+                                &key,
+                                &mut vector_batches,
+                            );
                         }
                     }
                 }
@@ -164,11 +179,26 @@ impl Db {
                     if let Some(root) = self.fulltext_json_root(&key)? {
                         let fields = self.fulltext_json_fields_from_root(&root, meta)?;
                         if fulltext_index_filter_matches(meta, &fields)? {
-                            bytes += runtime.upsert_fields(&key, &fields)?;
-                            self.fulltext_upsert_vectors(index, meta, &key, &fields, Some(&root))?;
+                            bytes += runtime.upsert_fields(
+                                &key,
+                                &fields,
+                                self.fulltext_source_expire_ms(&key),
+                            )?;
+                            self.fulltext_collect_vector_mutations(
+                                index,
+                                meta,
+                                &key,
+                                Some(&root),
+                                &mut vector_batches,
+                            )?;
                         } else {
                             runtime.delete_hash(&key);
-                            self.fulltext_delete_vectors(index, meta, &key)?;
+                            self.fulltext_collect_vector_deletions(
+                                index,
+                                meta,
+                                &key,
+                                &mut vector_batches,
+                            );
                         }
                     }
                 }
@@ -176,14 +206,11 @@ impl Db {
             docs += 1;
             cursor = Some(key);
             if bytes >= policy.max_bytes {
-                return Ok(BackfillProgress {
-                    finished: false,
-                    cursor,
-                    docs,
-                    bytes,
-                });
+                finished = false;
+                break;
             }
         }
+        self.fulltext_apply_vector_mutations(vector_batches)?;
         Ok(BackfillProgress {
             finished,
             cursor,

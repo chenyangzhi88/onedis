@@ -49,6 +49,7 @@ fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
                 ("price".to_string(), "10".to_string()),
                 ("ignored".to_string(), "secret".to_string()),
             ],
+            0,
         )
         .unwrap();
     runtime
@@ -59,12 +60,14 @@ fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
                 ("tag".to_string(), "rail".to_string()),
                 ("price".to_string(), "25".to_string()),
             ],
+            0,
         )
         .unwrap();
     runtime
         .upsert_fields(
             "doc:3",
             &[("title".to_string(), "running swiftly".to_string())],
+            0,
         )
         .unwrap();
     runtime.publish().unwrap();
@@ -277,6 +280,7 @@ fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
         .upsert_fields(
             "doc:1",
             &[("title".to_string(), "ordinary token".to_string())],
+            0,
         )
         .unwrap();
     no_positions.publish().unwrap();
@@ -324,6 +328,7 @@ fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
         .upsert_fields(
             "doc:1",
             &[("title".to_string(), "ordinary token".to_string())],
+            0,
         )
         .unwrap();
     no_highlight.publish().unwrap();
@@ -353,6 +358,7 @@ fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
         .upsert_fields(
             "doc:1",
             &[("title".to_string(), "quick the fox".to_string())],
+            0,
         )
         .unwrap();
     stopword_runtime.publish().unwrap();
@@ -394,13 +400,13 @@ fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
     )
     .unwrap();
     expansion_runtime
-        .upsert_fields("doc:1", &[("title".to_string(), "apple".to_string())])
+        .upsert_fields("doc:1", &[("title".to_string(), "apple".to_string())], 0)
         .unwrap();
     expansion_runtime
-        .upsert_fields("doc:2", &[("title".to_string(), "azure".to_string())])
+        .upsert_fields("doc:2", &[("title".to_string(), "azure".to_string())], 0)
         .unwrap();
     expansion_runtime
-        .upsert_fields("doc:3", &[("title".to_string(), "apricot".to_string())])
+        .upsert_fields("doc:3", &[("title".to_string(), "apricot".to_string())], 0)
         .unwrap();
     expansion_runtime.publish().unwrap();
     assert!(

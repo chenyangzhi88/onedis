@@ -41,12 +41,13 @@ impl Db {
             .map_err(|_| Error::msg("ERR list element is not valid UTF-8"))?;
 
         let mut batch = WriteBatch::new();
-        batch.delete(&list_item_key(
+        (batch.delete(&list_item_key(
             self.db_index,
             source,
             source_meta.version,
             source_index,
-        ));
+        )))
+        .expect("write batch append invariant violated");
         if source_left {
             source_meta.head += 1;
         } else {
@@ -58,7 +59,7 @@ impl Db {
         } else if source_meta.head >= source_meta.tail {
             self.delete_main_key_with_ttl_to_batch(&mut batch, source, source_meta.expire_ms);
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(source),
                 &encode_list_meta(
                     source_meta.expire_ms,
@@ -66,7 +67,8 @@ impl Db {
                     source_meta.head,
                     source_meta.tail,
                 ),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         let destination_index = if destination_left {
@@ -77,7 +79,7 @@ impl Db {
             destination_meta.tail += 1;
             index
         };
-        batch.put(
+        (batch.put(
             &list_item_key(
                 self.db_index,
                 destination,
@@ -85,8 +87,9 @@ impl Db {
                 destination_index,
             ),
             value.as_bytes(),
-        );
-        batch.put(
+        ))
+        .expect("write batch append invariant violated");
+        (batch.put(
             &self.mk(destination),
             &encode_list_meta(
                 destination_meta.expire_ms,
@@ -94,7 +97,8 @@ impl Db {
                 destination_meta.head,
                 destination_meta.tail,
             ),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         if source != destination {
             if source_meta.head >= source_meta.tail {
@@ -180,12 +184,13 @@ impl Db {
             .map_err(|_| Error::msg("ERR list element is not valid UTF-8"))?;
 
         let mut batch = WriteBatch::new();
-        batch.delete(&list_item_key(
+        (batch.delete(&list_item_key(
             self.db_index,
             source,
             source_meta.version,
             source_index,
-        ));
+        )))
+        .expect("write batch append invariant violated");
         if source_left {
             source_meta.head += 1;
         } else {
@@ -197,7 +202,7 @@ impl Db {
         } else if source_meta.head >= source_meta.tail {
             self.delete_main_key_with_ttl_to_batch(&mut batch, source, source_meta.expire_ms);
         } else {
-            batch.put(
+            (batch.put(
                 &self.mk(source),
                 &encode_list_meta(
                     source_meta.expire_ms,
@@ -205,7 +210,8 @@ impl Db {
                     source_meta.head,
                     source_meta.tail,
                 ),
-            );
+            ))
+            .expect("write batch append invariant violated");
         }
 
         let destination_index = if destination_left {
@@ -216,7 +222,7 @@ impl Db {
             destination_meta.tail += 1;
             index
         };
-        batch.put(
+        (batch.put(
             &list_item_key(
                 self.db_index,
                 destination,
@@ -224,8 +230,9 @@ impl Db {
                 destination_index,
             ),
             value.as_bytes(),
-        );
-        batch.put(
+        ))
+        .expect("write batch append invariant violated");
+        (batch.put(
             &self.mk(destination),
             &encode_list_meta(
                 destination_meta.expire_ms,
@@ -233,7 +240,8 @@ impl Db {
                 destination_meta.head,
                 destination_meta.tail,
             ),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         if source != destination {
             if source_meta.head >= source_meta.tail {
@@ -336,7 +344,7 @@ impl Db {
         if grow_left {
             updated.head -= 1;
             for (offset, value) in items[..insert_index].iter().enumerate() {
-                batch.put(
+                (batch.put(
                     &list_item_key(
                         self.db_index,
                         key,
@@ -344,9 +352,10 @@ impl Db {
                         meta.head + offset as i64 - 1,
                     ),
                     value,
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
-            batch.put(
+            (batch.put(
                 &list_item_key(
                     self.db_index,
                     key,
@@ -354,10 +363,11 @@ impl Db {
                     meta.head + insert_index as i64 - 1,
                 ),
                 element.as_bytes(),
-            );
+            ))
+            .expect("write batch append invariant violated");
         } else {
             for (offset, value) in items[insert_index..].iter().enumerate() {
-                batch.put(
+                (batch.put(
                     &list_item_key(
                         self.db_index,
                         key,
@@ -365,9 +375,10 @@ impl Db {
                         meta.head + insert_index as i64 + offset as i64 + 1,
                     ),
                     value,
-                );
+                ))
+                .expect("write batch append invariant violated");
             }
-            batch.put(
+            (batch.put(
                 &list_item_key(
                     self.db_index,
                     key,
@@ -375,10 +386,11 @@ impl Db {
                     meta.head + insert_index as i64,
                 ),
                 element.as_bytes(),
-            );
+            ))
+            .expect("write batch append invariant violated");
             updated.tail += 1;
         }
-        batch.put(
+        (batch.put(
             &self.mk(key),
             &encode_list_meta(
                 updated.expire_ms,
@@ -386,7 +398,8 @@ impl Db {
                 updated.head,
                 updated.tail,
             ),
-        );
+        ))
+        .expect("write batch append invariant violated");
         Ok((batch, updated))
     }
 

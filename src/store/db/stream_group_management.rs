@@ -19,7 +19,8 @@ impl Db {
                     entries_added: 0,
                 };
                 let mut batch = WriteBatch::new();
-                batch.put(&self.mk(key), &encode_stream_meta(meta));
+                (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                    .expect("write batch append invariant violated");
                 self.write_batch_if_not_empty(&batch);
                 meta
             }
@@ -48,7 +49,8 @@ impl Db {
             entries_read: 0,
         };
         let mut batch = WriteBatch::new();
-        batch.put(&group_key, &encode_stream_group_state(&state));
+        (batch.put(&group_key, &encode_stream_group_state(&state)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -73,7 +75,8 @@ impl Db {
                     length: 0,
                     entries_added: 0,
                 };
-                batch.put(&self.mk(key), &encode_stream_meta(meta));
+                (batch.put(&self.mk(key), &encode_stream_meta(meta)))
+                    .expect("write batch append invariant violated");
                 meta
             }
             None => {
@@ -95,7 +98,8 @@ impl Db {
             last_delivered_id: id,
             entries_read: 0,
         };
-        batch.put(&group_key, &encode_stream_group_state(&state));
+        (batch.put(&group_key, &encode_stream_group_state(&state)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -114,7 +118,8 @@ impl Db {
             entries_read: 0,
         };
         let mut batch = WriteBatch::new();
-        batch.put(&group_key, &encode_stream_group_state(&state));
+        (batch.put(&group_key, &encode_stream_group_state(&state)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -140,7 +145,8 @@ impl Db {
             entries_read: 0,
         };
         let mut batch = WriteBatch::new();
-        batch.put(&group_key, &encode_stream_group_state(&state));
+        (batch.put(&group_key, &encode_stream_group_state(&state)))
+            .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -155,14 +161,15 @@ impl Db {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
-        batch.delete(&group_key);
+        (batch.delete(&group_key)).expect("write batch append invariant violated");
         let pel_prefix = stream_pel_group_prefix(self.db_index, key, meta.version, group);
         if let Some(end) = prefix_exclusive_upper_bound(&pel_prefix) {
-            batch.delete_range(&pel_prefix, &end);
+            (batch.delete_range(&pel_prefix, &end)).expect("write batch append invariant violated");
         }
         let consumer_prefix = stream_consumer_group_prefix(self.db_index, key, meta.version, group);
         if let Some(end) = prefix_exclusive_upper_bound(&consumer_prefix) {
-            batch.delete_range(&consumer_prefix, &end);
+            (batch.delete_range(&consumer_prefix, &end))
+                .expect("write batch append invariant violated");
         }
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
@@ -179,14 +186,15 @@ impl Db {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
-        batch.delete(&group_key);
+        (batch.delete(&group_key)).expect("write batch append invariant violated");
         let pel_prefix = stream_pel_group_prefix(self.db_index, key, meta.version, group);
         if let Some(end) = prefix_exclusive_upper_bound(&pel_prefix) {
-            batch.delete_range(&pel_prefix, &end);
+            (batch.delete_range(&pel_prefix, &end)).expect("write batch append invariant violated");
         }
         let consumer_prefix = stream_consumer_group_prefix(self.db_index, key, meta.version, group);
         if let Some(end) = prefix_exclusive_upper_bound(&consumer_prefix) {
-            batch.delete_range(&consumer_prefix, &end);
+            (batch.delete_range(&consumer_prefix, &end))
+                .expect("write batch append invariant violated");
         }
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
@@ -209,12 +217,13 @@ impl Db {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
-        batch.put(
+        (batch.put(
             &consumer_key,
             &encode_stream_consumer_state(&StreamConsumerState {
                 last_seen_ms: now_ms(),
             }),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty(&batch);
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(1)
@@ -238,12 +247,13 @@ impl Db {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
-        batch.put(
+        (batch.put(
             &consumer_key,
             &encode_stream_consumer_state(&StreamConsumerState {
                 last_seen_ms: now_ms(),
             }),
-        );
+        ))
+        .expect("write batch append invariant violated");
         self.write_batch_if_not_empty_async(&batch).await;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(1)
@@ -264,11 +274,12 @@ impl Db {
         let mut batch = WriteBatch::new();
         let consumer_key = stream_consumer_key(self.db_index, key, meta.version, group, consumer);
         if self.store.get_raw(&consumer_key).is_some() {
-            batch.delete(&consumer_key);
+            (batch.delete(&consumer_key)).expect("write batch append invariant violated");
         }
         for (id, pel) in self.stream_pending_raw(key, meta.version, group) {
             if pel.consumer == consumer {
-                batch.delete(&stream_pel_key(self.db_index, key, meta.version, group, id));
+                (batch.delete(&stream_pel_key(self.db_index, key, meta.version, group, id)))
+                    .expect("write batch append invariant violated");
                 removed += 1;
             }
         }
@@ -296,14 +307,15 @@ impl Db {
         let mut batch = WriteBatch::new();
         let consumer_key = stream_consumer_key(self.db_index, key, meta.version, group, consumer);
         if self.store.get_raw_async(&consumer_key).await.is_some() {
-            batch.delete(&consumer_key);
+            (batch.delete(&consumer_key)).expect("write batch append invariant violated");
         }
         for (id, pel) in self
             .stream_pending_raw_async(key, meta.version, group)
             .await
         {
             if pel.consumer == consumer {
-                batch.delete(&stream_pel_key(self.db_index, key, meta.version, group, id));
+                (batch.delete(&stream_pel_key(self.db_index, key, meta.version, group, id)))
+                    .expect("write batch append invariant violated");
                 removed += 1;
             }
         }

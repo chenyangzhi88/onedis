@@ -67,7 +67,7 @@ impl Db {
         )) else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
-        let meta = decode_record::<VectorIndexMeta>(&meta_raw)?;
+        let meta = decode_vector_meta(&meta_raw)?;
         validate_vector_meta_config(&meta)?;
         if meta.internal != internal {
             return Err(Error::msg("ERR invalid vector index ownership"));
@@ -151,35 +151,146 @@ impl Db {
         {
             return Ok(());
         }
+        if meta.algorithm == VectorIndexAlgorithm::Flat {
+            return Ok(());
+        }
         let (segments, _replay_after, next_segment_id) =
             self.load_vector_graph_segments(index, version, meta)?;
+        let needs_maintenance = segments
+            .iter()
+            .any(|segment| segment.meta.index_key.is_empty())
+            || meta.snapshot_doc_version.saturating_add(1) < meta.next_doc_version;
+        let (current_versions, tail_docs) =
+            self.load_vector_version_state(index, version, meta)?;
+        let mut runtime = VectorRuntime::with_segments(
+            meta.dim as usize,
+            meta.distance,
+            meta.m as usize,
+            meta.ef_construction as usize,
+            meta.initial_cap as usize,
+            next_segment_id,
+            segments,
+            meta.quantization,
+        );
+        runtime.restore_version_state(current_versions, tail_docs);
+        // Publish only after recovery is complete. A concurrent reader can no
+        // longer observe the old partially initialized empty runtime.
         self.vector_runtimes.insert_runtime(
             VectorRuntimeRegistry::key(self.db_index, index, version),
-            Arc::new(RwLock::new(VectorRuntime::with_segments(
-                meta.dim as usize,
-                meta.distance,
-                meta.m as usize,
-                meta.ef_construction as usize,
-                meta.initial_cap as usize,
-                next_segment_id,
-                segments,
-                meta.quantization,
-            ))),
+            Arc::new(RwLock::new(runtime)),
         );
-        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
-        let mut docs = Vec::new();
-        for (_, raw) in self.store.scan_prefix_raw(&prefix) {
-            docs.push(decode_record::<VectorDocRecord>(&raw)?);
+        if needs_maintenance {
+            self.vector_runtimes
+                .mark_dirty(self.db_index, index, version);
         }
-        self.vector_runtimes
-            .reconcile_docs(
+        Ok(())
+    }
+
+    fn load_vector_version_state(
+        &self,
+        index: &str,
+        version: u64,
+        meta: &VectorIndexMeta,
+    ) -> Result<(HashMap<String, u64>, Vec<VectorDocRecord>), Error> {
+        let checkpoint = self
+            .store
+            .get_raw(&vector_version_checkpoint_key(
+                self.key_layout,
                 self.db_index,
                 index,
                 version,
-                docs,
-                meta.snapshot_doc_version,
-            )?;
-        Ok(())
+            ))
+            .map(|raw| decode_record::<VectorVersionCheckpoint>(&raw))
+            .transpose()?;
+        let checkpoint_through = checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.through_doc_version);
+        let mut current_versions = checkpoint
+            .map(|checkpoint| checkpoint.current_versions.into_iter().collect::<HashMap<_, _>>())
+            .unwrap_or_default();
+        let mutation_prefix = vector_version_mutation_prefix(
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+        );
+        let mutations = self.store.scan_prefix_raw(&mutation_prefix);
+        let mut expected_version = checkpoint_through.saturating_add(1);
+        let mut latest_tail = HashMap::<String, u64>::new();
+        let mut complete = checkpoint_through < meta.next_doc_version;
+        for (key, raw) in mutations {
+            let mutation = decode_record::<VectorVersionMutation>(&raw)?;
+            if mutation.doc_version != expected_version
+                || key
+                    != vector_version_mutation_key(
+                        self.key_layout,
+                        self.db_index,
+                        index,
+                        version,
+                        mutation.doc_version,
+                    )
+            {
+                complete = false;
+                break;
+            }
+            if mutation.deleted {
+                current_versions.remove(&mutation.id);
+            } else {
+                current_versions.insert(mutation.id.clone(), mutation.doc_version);
+            }
+            if mutation.doc_version > meta.snapshot_doc_version {
+                latest_tail.insert(mutation.id, mutation.doc_version);
+            }
+            expected_version = expected_version.saturating_add(1);
+        }
+        complete &= expected_version == meta.next_doc_version;
+
+        if complete {
+            let ids = latest_tail.keys().collect::<Vec<_>>();
+            let keys = ids
+                .iter()
+                .map(|id| {
+                    vector_doc_key(
+                        self.key_layout,
+                        self.db_index,
+                        index,
+                        version,
+                        id,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut tail_docs = Vec::with_capacity(keys.len());
+            for (id, raw) in ids.into_iter().zip(self.store.multi_get_raw(&keys)) {
+                let raw = raw.ok_or_else(|| Error::msg("ERR vector mutation document missing"))?;
+                let doc = decode_record::<VectorDocRecord>(&raw)?;
+                if latest_tail.get(id).copied() != Some(doc.doc_version) {
+                    return Err(Error::msg("ERR vector mutation version mismatch"));
+                }
+                tail_docs.push(doc);
+            }
+            return Ok((current_versions, tail_docs));
+        }
+
+        // Old indexes do not have a mutation journal. Keep them readable and
+        // migrate naturally as the next explicit compaction writes a checkpoint.
+        let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
+        let docs = self
+            .store
+            .scan_prefix_raw(&prefix)
+            .into_iter()
+            .map(|(_, raw)| decode_record::<VectorDocRecord>(&raw))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut current_versions = HashMap::with_capacity(docs.len());
+        let mut tail_docs = Vec::new();
+        for doc in docs {
+            if !doc.deleted {
+                current_versions.insert(doc.id.clone(), doc.doc_version);
+            }
+            if doc.doc_version > meta.snapshot_doc_version {
+                tail_docs.push(doc);
+            }
+        }
+        Ok((current_versions, tail_docs))
     }
 
     fn load_vector_graph_segments(
@@ -298,14 +409,14 @@ impl Db {
             .store
             .get_raw(&segment.index_key)
             .ok_or_else(|| Error::msg("ERR vector HNSW index blob missing"))?;
-        let index_blob = decode_record::<VectorHnswIndexBlob>(&raw)?;
+        let index_blob = decode_vector_hnsw_index(&raw)?;
         index_blob.validate()?;
         if index_blob.dim != meta.dim
             || index_blob.distance != meta.distance
             || index_blob.m != meta.m
             || index_blob.ef_construction != meta.ef_construction
             || index_blob.quantization != meta.quantization
-            || index_blob.nodes.len() != segment.doc_count as usize
+            || index_blob.node_count() != segment.doc_count as usize
         {
             return Err(Error::msg("ERR persisted vector HNSW config mismatch"));
         }
@@ -445,7 +556,7 @@ impl Db {
         else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
-        let meta = decode_record::<VectorIndexMeta>(&meta_raw)?;
+        let meta = decode_vector_meta(&meta_raw)?;
         validate_vector_meta_config(&meta)?;
         if meta.internal != internal {
             return Err(Error::msg("ERR invalid vector index ownership"));

@@ -1,3 +1,9 @@
+#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq)]
+enum VectorIndexAlgorithm {
+    Hnsw,
+    Flat,
+}
+
 #[derive(Clone, Debug, Encode, Decode)]
 struct VectorIndexMeta {
     dim: u32,
@@ -20,6 +26,53 @@ struct VectorIndexMeta {
     max_segment_docs: u64,
     quantization: VectorQuantization,
     internal: bool,
+    algorithm: VectorIndexAlgorithm,
+}
+
+/// Vector metadata written before the index algorithm became part of the
+/// durable configuration.  Those indexes all used HNSW.
+#[derive(Clone, Debug, Encode, Decode)]
+struct LegacyVectorIndexMetaV1 {
+    dim: u32,
+    projection: Option<VectorProjection>,
+    distance: VectorDistance,
+    schema: Vec<VectorFieldSchema>,
+    m: u32,
+    ef_construction: u32,
+    ef_runtime: u32,
+    initial_cap: u64,
+    next_doc_version: u64,
+    doc_count: u64,
+    next_segment_id: u64,
+    snapshot_doc_version: u64,
+    segment_max_docs: u64,
+    max_segment_docs: u64,
+    quantization: VectorQuantization,
+    internal: bool,
+}
+
+impl From<LegacyVectorIndexMetaV1> for VectorIndexMeta {
+    fn from(legacy: LegacyVectorIndexMetaV1) -> Self {
+        Self {
+            dim: legacy.dim,
+            projection: legacy.projection,
+            distance: legacy.distance,
+            schema: legacy.schema,
+            m: legacy.m,
+            ef_construction: legacy.ef_construction,
+            ef_runtime: legacy.ef_runtime,
+            initial_cap: legacy.initial_cap,
+            next_doc_version: legacy.next_doc_version,
+            doc_count: legacy.doc_count,
+            next_segment_id: legacy.next_segment_id,
+            snapshot_doc_version: legacy.snapshot_doc_version,
+            segment_max_docs: legacy.segment_max_docs,
+            max_segment_docs: legacy.max_segment_docs,
+            quantization: legacy.quantization,
+            internal: legacy.internal,
+            algorithm: VectorIndexAlgorithm::Hnsw,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Encode, Decode)]
@@ -104,6 +157,19 @@ struct VectorSegmentEntry {
     vector: Vec<f32>,
 }
 
+#[derive(Clone, Debug, Encode, Decode)]
+struct VectorVersionMutation {
+    id: String,
+    doc_version: u64,
+    deleted: bool,
+}
+
+#[derive(Clone, Debug, Encode, Decode)]
+struct VectorVersionCheckpoint {
+    through_doc_version: u64,
+    current_versions: Vec<(String, u64)>,
+}
+
 impl From<&VectorDocRecord> for VectorSegmentEntry {
     fn from(doc: &VectorDocRecord) -> Self {
         Self {
@@ -123,11 +189,30 @@ struct VectorHnswIndexBlob {
     quantization: VectorQuantization,
     entry_point: u32,
     max_layer: u32,
-    nodes: Vec<VectorHnswIndexNode>,
+    ids: Vec<String>,
+    doc_versions: Vec<u64>,
+    vectors: Vec<HnswSnapshotVector>,
+    /// Node -> layer range offsets. Length is node_count + 1.
+    node_layer_offsets: Vec<u32>,
+    /// Layer -> neighbor range offsets. Length is layer_count + 1.
+    layer_neighbor_offsets: Vec<u32>,
+    neighbors: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Encode, Decode)]
-struct VectorHnswIndexNode {
+struct LegacyVectorHnswIndexBlobV1 {
+    dim: u32,
+    distance: VectorDistance,
+    m: u32,
+    ef_construction: u32,
+    quantization: VectorQuantization,
+    entry_point: u32,
+    max_layer: u32,
+    nodes: Vec<LegacyVectorHnswIndexNodeV1>,
+}
+
+#[derive(Clone, Debug, Encode, Decode)]
+struct LegacyVectorHnswIndexNodeV1 {
     id: String,
     doc_version: u64,
     /// The exact payload used while building the HNSW graph.  F32, Q8 and BIN

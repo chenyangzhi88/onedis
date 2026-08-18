@@ -26,6 +26,7 @@ struct HashFieldCasState {
     expire_raw: Option<Vec<u8>>,
     live: bool,
     may_have_field_ttl: bool,
+    packed_fields: Option<PackedHashFields>,
 }
 
 impl Db {
@@ -90,6 +91,11 @@ impl Db {
         let next = current
             .checked_add(increment)
             .ok_or_else(|| Error::msg("ERR increment or decrement would overflow"))?;
+
+        if meta.is_none() || meta.is_some_and(|(_, version)| version == 0) {
+            self.hash_set_bytes(key, field, next.to_string().as_bytes())?;
+            return Ok(next);
+        }
 
         let mut batch = WriteBatch::new();
         if meta.is_none() {
@@ -207,6 +213,9 @@ impl Db {
         }
 
         let state = self.observe_hash_field_cas_state(key, field).await?;
+        if state.packed_fields.is_some() {
+            return Ok(None);
+        }
         if !state.meta_exists
             || state.expired_at.is_some()
             || state.key_expire_ms > 0
@@ -353,6 +362,10 @@ impl Db {
             return Err(Error::msg("ERR increment would produce NaN or Infinity"));
         }
         let formatted = crate::cmds::string::incrbyfloat::IncrbyFloat::format_float(next);
+        if meta.is_none() || meta.is_some_and(|(_, version)| version == 0) {
+            self.hash_set_bytes(key, field, formatted.as_bytes())?;
+            return Ok(formatted);
+        }
         let mut batch = WriteBatch::new();
         if meta.is_none() {
             (batch.put(&self.mk(key), &encode_hash_meta(0, version)))
@@ -402,6 +415,7 @@ impl Db {
         let raw_meta = self.store.get_raw_async(&key_bytes).await;
         let mut expired_at = None;
         let mut key_expire_ms = 0;
+        let mut packed_fields = None;
         let (meta_exists, version, may_have_field_ttl) = match raw_meta.as_deref() {
             Some(raw) => {
                 let header = decode_meta_header(raw)
@@ -415,6 +429,12 @@ impl Db {
                         return Err(Error::msg(WRONG_TYPE_ERROR));
                     }
                     let meta = decode_hash_meta_checked(raw)?;
+                    if meta.packed {
+                        packed_fields = Some(
+                            decode_packed_hash(raw)
+                                .ok_or_else(|| Error::msg("Failed to decode packed hash"))?,
+                        );
+                    }
                     (true, meta.version, meta.may_have_field_ttl)
                 }
             }
@@ -423,7 +443,9 @@ impl Db {
 
         let field_key = hash_field_key(self.db_index, key, version, field);
         let expire_key = hash_field_expire_key(self.db_index, key, version, field);
-        let (field_raw, expire_raw) = if meta_exists {
+        let (field_raw, expire_raw) = if let Some(fields) = &packed_fields {
+            (fields.get(field).cloned(), None)
+        } else if meta_exists {
             let keys = if may_have_field_ttl {
                 vec![field_key.clone(), expire_key.clone()]
             } else {
@@ -452,6 +474,7 @@ impl Db {
             expire_raw,
             live,
             may_have_field_ttl,
+            packed_fields,
         })
     }
 
@@ -465,19 +488,16 @@ impl Db {
             self.ttl_manager
                 .remove_known_to_batch(batch, expire_ms, self.db_index, key);
         }
-        if !state.meta_exists {
-            (batch.put(&state.key_bytes, &encode_hash_meta(0, state.version)))
-                .expect("write batch append invariant violated");
-        }
     }
 
     fn hash_field_cas_conditions(&self, state: &HashFieldCasState) -> Vec<CompareCondition> {
         let mut conditions = Vec::with_capacity(3);
-        if !state.meta_exists {
+        if !state.meta_exists || state.packed_fields.is_some() {
             conditions.push(CompareCondition::with_expected(
                 &state.key_bytes,
                 state.raw_meta.clone(),
             ));
+            return conditions;
         }
         conditions.push(CompareCondition::with_expected(
             &state.field_key,
@@ -490,6 +510,40 @@ impl Db {
             ));
         }
         conditions
+    }
+
+    async fn stage_hash_field_cas_value(
+        &self,
+        batch: &mut WriteBatch,
+        key: &str,
+        field: &str,
+        value: &[u8],
+        state: &HashFieldCasState,
+    ) {
+        if state.packed_fields.is_none() && state.meta_exists {
+            (batch.put(&state.field_key, value)).expect("write batch append invariant violated");
+            return;
+        }
+        let mut fields = state.packed_fields.clone().unwrap_or_default();
+        fields.insert(field.to_string(), value.to_vec());
+        if let Some(raw) = encode_packed_hash(state.key_expire_ms, &fields) {
+            (batch.put(&state.key_bytes, &raw)).expect("write batch append invariant violated");
+            return;
+        }
+        let version = if state.version == 0 {
+            self.next_version_async().await
+        } else {
+            state.version
+        };
+        (batch.put(
+            &state.key_bytes,
+            &encode_hash_meta(state.key_expire_ms, version),
+        ))
+        .expect("write batch append invariant violated");
+        for (field, value) in fields {
+            (batch.put(&hash_field_key(self.db_index, key, version, &field), &value))
+                .expect("write batch append invariant violated");
+        }
     }
 
     async fn hash_set_nx_bytes_async_attempt(
@@ -505,7 +559,8 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         self.prepare_hash_field_cas_batch(&mut batch, key, &state);
-        (batch.put(&state.field_key, value)).expect("write batch append invariant violated");
+        self.stage_hash_field_cas_value(&mut batch, key, field, value, &state)
+            .await;
         if state.expire_raw.is_some() {
             (batch.delete(&state.expire_key)).expect("write batch append invariant violated");
         }
@@ -544,8 +599,14 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         self.prepare_hash_field_cas_batch(&mut batch, key, &state);
-        (batch.put(&state.field_key, next.to_string().as_bytes()))
-            .expect("write batch append invariant violated");
+        self.stage_hash_field_cas_value(
+            &mut batch,
+            key,
+            field,
+            next.to_string().as_bytes(),
+            &state,
+        )
+        .await;
         if !state.live && state.expire_raw.is_some() {
             (batch.delete(&state.expire_key)).expect("write batch append invariant violated");
         }
@@ -592,8 +653,8 @@ impl Db {
 
         let mut batch = WriteBatch::new();
         self.prepare_hash_field_cas_batch(&mut batch, key, &state);
-        (batch.put(&state.field_key, formatted.as_bytes()))
-            .expect("write batch append invariant violated");
+        self.stage_hash_field_cas_value(&mut batch, key, field, formatted.as_bytes(), &state)
+            .await;
         if !state.live && state.expire_raw.is_some() {
             (batch.delete(&state.expire_key)).expect("write batch append invariant violated");
         }

@@ -12,6 +12,10 @@ impl Db {
         let Some((hash_expire_ms, version)) = meta else {
             return Ok(vec![-2; fields.len()]);
         };
+        if version == 0 {
+            self.promote_packed_hash(key)?;
+            return self.hash_expire_fields_at_ms(key, expire_ms, fields, condition);
+        }
         let now = now_ms();
         let delete_immediately = expire_ms <= now;
         let live_field_count = if delete_immediately {
@@ -107,6 +111,7 @@ impl Db {
         fields: &[String],
         condition: ExpireCondition,
     ) -> Result<Vec<i64>, Error> {
+        self.promote_packed_hash_async(key).await?;
         if expire_ms <= now_ms() {
             let _hash_write_guard = self.set_write_lock(key).lock().await;
             return self
@@ -281,6 +286,20 @@ impl Db {
         key: &str,
         fields: &[String],
     ) -> Result<Vec<i64>, Error> {
+        if let Some(meta) = self.hash_meta_async(key).await?
+            && meta.packed
+        {
+            let packed = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .and_then(|raw| decode_packed_hash(&raw))
+                .unwrap_or_default();
+            return Ok(fields
+                .iter()
+                .map(|field| if packed.contains_key(field) { -1 } else { -2 })
+                .collect());
+        }
         let _hash_read_guard = self.set_write_lock(key).read().await;
         let field_shards = unique_hash_field_write_lock_shards(
             self.db_index,
@@ -403,10 +422,23 @@ impl Db {
         millis: bool,
         absolute: bool,
     ) -> Result<Vec<i64>, Error> {
-        let meta = self.hash_expire_ms_async(key).await?;
-        let Some((_, version)) = meta else {
+        let meta = self.hash_meta_async(key).await?;
+        let Some(meta) = meta else {
             return Ok(vec![-2; fields.len()]);
         };
+        if meta.packed {
+            let packed = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .and_then(|raw| decode_packed_hash(&raw))
+                .unwrap_or_default();
+            return Ok(fields
+                .iter()
+                .map(|field| if packed.contains_key(field) { -1 } else { -2 })
+                .collect());
+        }
+        let version = meta.version;
         let now = now_ms();
         let field_keys = fields
             .iter()

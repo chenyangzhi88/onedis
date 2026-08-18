@@ -37,6 +37,29 @@ impl Db {
             .await;
     }
 
+    /// Owned equivalent for planners that have already deduplicated their logical keys. Version
+    /// owners are appended in place and the engine takes ownership of the same batch allocation.
+    pub(in crate::store::db) async fn write_batch_with_logical_keys_owned_if_not_empty_async(
+        &self,
+        mut batch: WriteBatch,
+        logical_keys: &[&str],
+    ) {
+        if batch.count() == 0 {
+            return;
+        }
+        if let Err(err) = self.append_version_owner_markers(&mut batch) {
+            log::error!("failed to append version owner to owned write batch: {err}");
+            return;
+        }
+        self.invalidate_counter_cache_for_batch(&batch);
+        self.invalidate_hash_counter_cache_for_batch(&batch);
+        self.invalidate_list_meta_cache_for_batch(&batch);
+        let committed_outbox = self.fulltext_collect_committed_outbox_batch(&batch);
+        self.store.write_batch_owned_async(batch).await;
+        self.fulltext_publish_committed_outbox(committed_outbox);
+        self.record_or_publish_known_key_mutations(logical_keys);
+    }
+
     /// Commit a mutation to a structure whose version-owner marker is already durable.
     ///
     /// Callers must only use this after reading an existing, non-expired structure version. New
@@ -103,12 +126,38 @@ impl Db {
 
     pub(in crate::store::db) async fn write_plain_string_batch_owned_if_not_empty_async(
         &self,
-        batch: WriteBatch,
+        mut batch: WriteBatch,
     ) {
         if batch.count() == 0 {
             return;
         }
-        self.write_batch_if_not_empty_async(&batch).await;
+        if let Err(err) = self.append_version_owner_markers(&mut batch) {
+            log::error!("failed to append version owner to owned string batch: {err}");
+            return;
+        }
+        self.invalidate_counter_cache_for_batch(&batch);
+        self.invalidate_hash_counter_cache_for_batch(&batch);
+        self.invalidate_list_meta_cache_for_batch(&batch);
+        self.invalidate_zset_length_cache_for_batch(&batch);
+        let committed_outbox = self.fulltext_collect_committed_outbox_batch(&batch);
+        let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, &batch);
+        self.store.write_batch_owned_async(batch).await;
+        self.fulltext_publish_committed_outbox(committed_outbox);
+        if !self.store.is_transactional() && self.vector_runtimes.has_active_runtimes() {
+            if dbs.contains(&self.db_index) {
+                self.vector_runtimes.remove_db(self.db_index);
+            } else {
+                let mut seen = HashSet::new();
+                for key in &keys {
+                    if seen.insert(key)
+                        && let Ok(index) = std::str::from_utf8(key)
+                    {
+                        self.reconcile_vector_runtime_index(self.db_index, index);
+                    }
+                }
+            }
+        }
+        self.record_or_publish_collected_mutations(keys, dbs);
     }
 
     pub(in crate::store::db) async fn write_plain_string_batch_if_not_empty_without_watch_publish_async(
@@ -249,6 +298,13 @@ impl Db {
             return;
         }
         let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, batch);
+        self.record_or_publish_collected_mutations(keys, dbs);
+    }
+
+    fn record_or_publish_collected_mutations(&self, keys: Vec<Vec<u8>>, dbs: Vec<u16>) {
+        if !self.store.is_transactional() && !self.mutation_tracker.has_watched_keys() {
+            return;
+        }
         if keys.is_empty() && dbs.is_empty() {
             return;
         }

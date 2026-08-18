@@ -7,7 +7,400 @@ enum OrderedHashSetAttempt {
     Conflict,
 }
 
+struct HashSetPipelineFieldState {
+    initial: Option<Vec<u8>>,
+    current: Option<Vec<u8>>,
+    had_expire_marker: bool,
+}
+
+struct HashSetPipelineKeyState<'a> {
+    key: &'a str,
+    observed_meta: crate::store::kv_store::ObservedRawValue,
+    meta: Option<HashMeta>,
+    version: u64,
+    expired_at: Option<u64>,
+    fields: HashMap<&'a str, HashSetPipelineFieldState>,
+    error: Option<String>,
+}
+
 impl Db {
+    /// Applies an ordered HSET pipeline with one cross-key storage commit.
+    ///
+    /// Commands against the same key observe earlier commands in the pipeline,
+    /// but independent keys no longer turn a RESP pipeline into one durable KV
+    /// write per document. This is pipeline coalescing, not WAL group commit.
+    pub(crate) async fn apply_hash_set_batch_mutations_async<'a>(
+        &self,
+        mutations: &[HashSetBatchMutation<'a>],
+    ) -> Vec<Result<usize, Error>> {
+        if mutations.is_empty() {
+            return Vec::new();
+        }
+
+        let mut key_positions = HashMap::<&str, usize>::with_capacity(mutations.len());
+        let mut keys = Vec::<&str>::with_capacity(mutations.len());
+        for mutation in mutations {
+            if !key_positions.contains_key(mutation.key) {
+                key_positions.insert(mutation.key, keys.len());
+                keys.push(mutation.key);
+            }
+        }
+
+        // The corpus/indexing hot path writes previously absent document keys. A cheap unlocked
+        // preflight avoids taking every structural shard exclusively for ordinary updates. Once
+        // all relevant shards are held exclusively, the second read proves absence and makes both
+        // per-key CAS conditions and hash-field locks redundant.
+        let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        if self
+            .store
+            .multi_get_raw_async(&raw_keys)
+            .await
+            .iter()
+            .all(Option::is_none)
+        {
+            let structural_shards =
+                unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+            let structural_guards = self.lock_write_shards(&structural_shards).await;
+            if self
+                .store
+                .multi_get_raw_async(&raw_keys)
+                .await
+                .iter()
+                .all(Option::is_none)
+            {
+                let mut packed_fields = vec![PackedHashFields::new(); keys.len()];
+                let mut replies = Vec::with_capacity(mutations.len());
+                for mutation in mutations {
+                    let fields = &mut packed_fields[key_positions[mutation.key]];
+                    let mut seen = HashSet::with_capacity(mutation.fields.len());
+                    let mut added = 0usize;
+                    for (field, value) in &mutation.fields {
+                        if seen.insert(*field) && !fields.contains_key(*field) {
+                            added += 1;
+                        }
+                        fields.insert((*field).to_string(), (*value).to_vec());
+                    }
+                    replies.push(Ok(added));
+                }
+
+                let mut batch = WriteBatch::new();
+                for (key, fields) in keys.iter().zip(&packed_fields) {
+                    if let Some(raw) = encode_packed_hash(0, fields) {
+                        (batch.put(&self.mk(key), &raw))
+                            .expect("write batch append invariant violated");
+                    } else {
+                        let version = self.next_version_async().await;
+                        (batch.put(&self.mk(key), &encode_hash_meta(0, version)))
+                            .expect("write batch append invariant violated");
+                        for (field, value) in fields {
+                            (batch.put(&hash_field_key(self.db_index, key, version, field), value))
+                                .expect("write batch append invariant violated");
+                        }
+                    }
+                }
+                if let Err(error) = self.fulltext_enqueue_hash_upserts_to_batch(&mut batch, &keys) {
+                    let message = error.to_string();
+                    return mutations
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+                self.write_batch_with_logical_keys_owned_if_not_empty_async(batch, &keys)
+                    .await;
+                self.changes
+                    .fetch_add(mutations.len() as u64, Ordering::Relaxed);
+                drop(structural_guards);
+                return replies;
+            }
+            drop(structural_guards);
+        }
+
+        let structural_shards =
+            unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        let _structural_guards = self.lock_read_shards(&structural_shards).await;
+        let mut field_shards = mutations
+            .iter()
+            .flat_map(|mutation| {
+                mutation.fields.iter().map(move |(field, _)| {
+                    hash_field_write_lock_shard(self.db_index, mutation.key, field)
+                })
+            })
+            .collect::<Vec<_>>();
+        field_shards.sort_unstable();
+        field_shards.dedup();
+        let _field_guards = self.lock_hash_field_write_shards(&field_shards).await;
+
+        for _ in 0..64 {
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let now = now_ms();
+            let mut states = Vec::with_capacity(keys.len());
+            let mut packed_keys = Vec::new();
+            for (key, observed_meta) in keys.iter().copied().zip(observations) {
+                let (meta, version, expired_at, error) = match observed_meta.value() {
+                    Some(raw) => match decode_meta_header(raw) {
+                        None => (
+                            None,
+                            0,
+                            None,
+                            Some("Failed to decode hash metadata".to_string()),
+                        ),
+                        Some(header) if header.expire_ms > 0 && now >= header.expire_ms => (
+                            None,
+                            self.next_version_async().await,
+                            Some(header.expire_ms),
+                            None,
+                        ),
+                        Some(header) if header.type_tag != TYPE_HASH => {
+                            (None, 0, None, Some(WRONG_TYPE_ERROR.to_string()))
+                        }
+                        Some(_) => match decode_hash_meta_checked(raw) {
+                            Ok(meta) if meta.packed => {
+                                packed_keys.push(key);
+                                (Some(meta), meta.version, None, None)
+                            }
+                            Ok(meta) => (Some(meta), meta.version, None, None),
+                            Err(error) => (None, 0, None, Some(error.to_string())),
+                        },
+                    },
+                    None => (None, self.next_version_async().await, None, None),
+                };
+                states.push(HashSetPipelineKeyState {
+                    key,
+                    observed_meta,
+                    meta,
+                    version,
+                    expired_at,
+                    fields: HashMap::new(),
+                    error,
+                });
+            }
+            if !packed_keys.is_empty() {
+                for key in packed_keys {
+                    if let Err(error) = self.promote_packed_hash_async(key).await {
+                        let message = error.to_string();
+                        return mutations
+                            .iter()
+                            .map(|_| Err(Error::msg(message.clone())))
+                            .collect();
+                    }
+                }
+                continue;
+            }
+
+            let mut unique_fields = vec![Vec::<&str>::new(); states.len()];
+            let mut seen_fields = vec![HashSet::<&str>::new(); states.len()];
+            for mutation in mutations {
+                let position = key_positions[mutation.key];
+                if states[position].error.is_some() {
+                    continue;
+                }
+                for (field, _) in &mutation.fields {
+                    if seen_fields[position].insert(*field) {
+                        unique_fields[position].push(*field);
+                    }
+                }
+            }
+
+            let mut lookups = Vec::new();
+            for (position, state) in states.iter().enumerate() {
+                let Some(meta) = state.meta else {
+                    continue;
+                };
+                for field in &unique_fields[position] {
+                    lookups.push((
+                        position,
+                        *field,
+                        hash_field_key(self.db_index, state.key, state.version, field),
+                        meta.may_have_field_ttl.then(|| {
+                            hash_field_expire_key(self.db_index, state.key, state.version, field)
+                        }),
+                    ));
+                }
+            }
+            let mut lookup_keys = Vec::with_capacity(lookups.len().saturating_mul(2));
+            for (_, _, field_key, expire_key) in &lookups {
+                lookup_keys.push(field_key.clone());
+                if let Some(expire_key) = expire_key {
+                    lookup_keys.push(expire_key.clone());
+                }
+            }
+            let lookup_values = self.store.multi_get_raw_async(&lookup_keys).await;
+            let mut value_offset = 0usize;
+            for (position, field, _, expire_key) in lookups {
+                let value = lookup_values[value_offset].clone();
+                value_offset += 1;
+                let expire_raw = expire_key.as_ref().map(|_| {
+                    let value = lookup_values[value_offset].clone();
+                    value_offset += 1;
+                    value
+                });
+                let expire_ms = expire_raw
+                    .as_ref()
+                    .and_then(|raw| raw.as_deref())
+                    .and_then(decode_u64_be)
+                    .unwrap_or(0);
+                let live = value.is_some() && (expire_ms == 0 || now < expire_ms);
+                states[position].fields.insert(
+                    field,
+                    HashSetPipelineFieldState {
+                        initial: live.then(|| value.clone()).flatten(),
+                        current: live.then_some(value).flatten(),
+                        had_expire_marker: expire_raw.is_some_and(|raw| raw.is_some()),
+                    },
+                );
+            }
+            for (position, fields) in unique_fields.iter().enumerate() {
+                if states[position].error.is_some() || states[position].meta.is_some() {
+                    continue;
+                }
+                for field in fields {
+                    states[position].fields.insert(
+                        *field,
+                        HashSetPipelineFieldState {
+                            initial: None,
+                            current: None,
+                            had_expire_marker: false,
+                        },
+                    );
+                }
+            }
+
+            let mut replies = Vec::with_capacity(mutations.len());
+            let mut changed_commands = 0u64;
+            for mutation in mutations {
+                let position = key_positions[mutation.key];
+                if let Some(error) = &states[position].error {
+                    replies.push(Err(Error::msg(error.clone())));
+                    continue;
+                }
+                let mut added = 0usize;
+                let mut changed = false;
+                let mut seen = HashSet::with_capacity(mutation.fields.len());
+                for (field, value) in &mutation.fields {
+                    let field_state = states[position]
+                        .fields
+                        .get_mut(field)
+                        .expect("pipeline hash field was preloaded");
+                    if seen.insert(*field) && field_state.current.is_none() {
+                        added += 1;
+                    }
+                    if field_state.current.as_deref() != Some(*value)
+                        || field_state.had_expire_marker
+                    {
+                        changed = true;
+                    }
+                    field_state.current = Some((*value).to_vec());
+                }
+                if changed {
+                    changed_commands = changed_commands.saturating_add(1);
+                }
+                replies.push(Ok(added));
+            }
+
+            let mut batch = WriteBatch::new();
+            let mut dirty_positions = Vec::new();
+            for (position, state) in states.iter().enumerate() {
+                if state.error.is_some() {
+                    continue;
+                }
+                let dirty = state
+                    .fields
+                    .values()
+                    .any(|field| field.initial != field.current || field.had_expire_marker);
+                if !dirty {
+                    continue;
+                }
+                dirty_positions.push(position);
+                if let Some(expire_ms) = state.expired_at {
+                    self.ttl_manager.remove_known_to_batch(
+                        &mut batch,
+                        expire_ms,
+                        self.db_index,
+                        state.key,
+                    );
+                }
+                if state.meta.is_none() {
+                    (batch.put(&self.mk(state.key), &encode_hash_meta(0, state.version)))
+                        .expect("write batch append invariant violated");
+                }
+                for (field, field_state) in &state.fields {
+                    if field_state.initial == field_state.current && !field_state.had_expire_marker
+                    {
+                        continue;
+                    }
+                    if let Some(value) = &field_state.current {
+                        (batch.put(
+                            &hash_field_key(self.db_index, state.key, state.version, field),
+                            value,
+                        ))
+                        .expect("write batch append invariant violated");
+                    }
+                    if state.meta.is_some_and(|meta| meta.may_have_field_ttl) {
+                        (batch.delete(&hash_field_expire_key(
+                            self.db_index,
+                            state.key,
+                            state.version,
+                            field,
+                        )))
+                        .expect("write batch append invariant violated");
+                    }
+                }
+            }
+            if dirty_positions.is_empty() {
+                return replies;
+            }
+            let dirty_keys = dirty_positions
+                .iter()
+                .map(|position| states[*position].key)
+                .collect::<Vec<_>>();
+            if let Err(error) = self.fulltext_enqueue_hash_upserts_to_batch(&mut batch, &dirty_keys)
+            {
+                let message = error.to_string();
+                return mutations
+                    .iter()
+                    .map(|_| Err(Error::msg(message.clone())))
+                    .collect();
+            }
+            let conditions = dirty_positions
+                .iter()
+                .filter_map(|position| {
+                    states[*position]
+                        .meta
+                        .is_none()
+                        .then(|| CompareCondition::from_observed(&states[*position].observed_meta))
+                })
+                .collect::<Vec<_>>();
+            let committed = if conditions.is_empty() {
+                self.write_batch_if_not_empty_async(&batch).await;
+                true
+            } else {
+                match self
+                    .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                    .await
+                {
+                    Ok(committed) => committed,
+                    Err(error) => {
+                        let message = error.to_string();
+                        return mutations
+                            .iter()
+                            .map(|_| Err(Error::msg(message.clone())))
+                            .collect();
+                    }
+                }
+            };
+            if committed {
+                self.changes.fetch_add(changed_commands, Ordering::Relaxed);
+                return replies;
+            }
+        }
+
+        mutations
+            .iter()
+            .map(|_| Err(Error::msg("ERR hash batch write conflict")))
+            .collect()
+    }
+
     pub fn hash_get(&self, key: &str, field: &str) -> Result<Option<String>, Error> {
         Ok(self
             .hash_get_bytes(key, field)?
@@ -38,6 +431,14 @@ impl Db {
         let Some(meta) = self.hash_meta_async(key).await? else {
             return Ok(None);
         };
+        if meta.packed {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .and_then(|raw| decode_packed_hash(&raw))
+                .and_then(|fields| fields.get(field).cloned()));
+        }
         if meta.may_have_field_ttl
             && !self
                 .hash_field_is_live_async(key, meta.version, field)
@@ -58,6 +459,12 @@ impl Db {
 
     pub fn hash_set_bytes(&self, key: &str, field: &str, value: &[u8]) -> Result<bool, Error> {
         let meta = self.hash_expire_ms(key)?;
+        if meta.is_none() || meta.is_some_and(|(_, version)| version == 0) {
+            if let Some(added) = self.try_hash_set_packed_sync(key, &[(field, value)])? {
+                return Ok(added == 1);
+            }
+            return self.hash_set_bytes(key, field, value);
+        }
         let version = match meta {
             Some((_, v)) => v,
             None => self.next_version(),
@@ -119,6 +526,16 @@ impl Db {
         if fields.is_empty() {
             return Ok(0);
         }
+        if meta.is_none() || meta.is_some_and(|(_, version)| version == 0) {
+            let field_refs = fields
+                .iter()
+                .map(|(field, value)| (field.as_str(), value.as_slice()))
+                .collect::<Vec<_>>();
+            if let Some(added) = self.try_hash_set_packed_sync(key, &field_refs)? {
+                return Ok(added);
+            }
+            return self.hash_set_many_bytes(key, fields);
+        }
         let version = match meta {
             Some((_, v)) => v,
             None => self.next_version(),
@@ -155,6 +572,65 @@ impl Db {
             self.fulltext_request_refresh(key)?;
         }
         Ok(added)
+    }
+
+    fn try_hash_set_packed_sync(
+        &self,
+        key: &str,
+        updates: &[(&str, &[u8])],
+    ) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        loop {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let (expire_ms, mut packed) = match observed.value() {
+                None => (0, PackedHashFields::new()),
+                Some(raw) => {
+                    let header = decode_meta_header(raw)
+                        .ok_or_else(|| Error::msg("Failed to decode hash metadata"))?;
+                    if header.type_tag != TYPE_HASH {
+                        return Err(Error::msg(WRONG_TYPE_ERROR));
+                    }
+                    let meta = decode_hash_meta_checked(raw)?;
+                    if !meta.packed {
+                        return Ok(None);
+                    }
+                    (
+                        meta.expire_ms,
+                        decode_packed_hash(raw)
+                            .ok_or_else(|| Error::msg("Failed to decode packed hash"))?,
+                    )
+                }
+            };
+            let mut added = 0usize;
+            let mut seen = HashSet::with_capacity(updates.len());
+            for (field, value) in updates {
+                if seen.insert(*field) && !packed.contains_key(*field) {
+                    added += 1;
+                }
+                packed.insert((*field).to_string(), (*value).to_vec());
+            }
+            let Some(raw) = encode_packed_hash(expire_ms, &packed) else {
+                self.promote_packed_hash(key)?;
+                return Ok(None);
+            };
+            if observed
+                .value()
+                .is_some_and(|existing| existing.as_ref() == raw.as_slice())
+            {
+                return Ok(Some(added));
+            }
+            let mut batch = WriteBatch::new();
+            (batch.put(&key_bytes, &raw)).expect("write batch append invariant violated");
+            self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                self.fulltext_request_refresh(key)?;
+                return Ok(Some(added));
+            }
+        }
     }
 
     pub async fn hash_set_many_async(
@@ -297,6 +773,61 @@ impl Db {
             }
         }
 
+        if meta.is_none() || meta.is_some_and(|meta| meta.packed) {
+            let mut packed = match (meta, raw_meta.as_deref()) {
+                (Some(_), Some(raw)) => decode_packed_hash(raw)
+                    .ok_or_else(|| Error::msg("Failed to decode packed hash"))?,
+                _ => PackedHashFields::new(),
+            };
+            let mut first_seen = HashSet::with_capacity(unique_fields.len());
+            for (index, (field, value)) in fields.iter().enumerate() {
+                if first_seen.insert(*field) {
+                    added[index] = !packed.contains_key(*field);
+                }
+                packed.insert((*field).to_string(), (*value).to_vec());
+            }
+
+            let mut batch = WriteBatch::new();
+            if let Some(expire_ms) = expired_at {
+                self.ttl_manager
+                    .remove_known_to_batch(&mut batch, expire_ms, self.db_index, key);
+            }
+            if let Some(raw) = encode_packed_hash(meta.map_or(0, |meta| meta.expire_ms), &packed) {
+                if expired_at.is_none() && raw_meta.as_deref() == Some(raw.as_slice()) {
+                    return Ok(OrderedHashSetAttempt::Applied(added));
+                }
+                (batch.put(&key_bytes, &raw)).expect("write batch append invariant violated");
+            } else {
+                let split_version = self.next_version_async().await;
+                (batch.put(
+                    &key_bytes,
+                    &encode_hash_meta(meta.map_or(0, |meta| meta.expire_ms), split_version),
+                ))
+                .expect("write batch append invariant violated");
+                for (field, value) in packed {
+                    (batch.put(
+                        &hash_field_key(self.db_index, key, split_version, &field),
+                        &value,
+                    ))
+                    .expect("write batch append invariant violated");
+                }
+            }
+            self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            let condition = match raw_meta.as_deref() {
+                Some(raw) => CompareCondition::exists_with(&key_bytes, raw),
+                None => CompareCondition::absent(&key_bytes),
+            };
+            if !self
+                .compare_and_write_batch_if_not_empty_async(&[condition], &batch)
+                .await?
+            {
+                return Ok(OrderedHashSetAttempt::Conflict);
+            }
+            self.changes.fetch_add(1, Ordering::Relaxed);
+            self.fulltext_request_refresh(key)?;
+            return Ok(OrderedHashSetAttempt::Applied(added));
+        }
+
         let may_have_field_ttl = meta.is_some_and(|meta| meta.may_have_field_ttl);
         let field_keys = unique_fields
             .iter()
@@ -407,6 +938,38 @@ impl Db {
         let Some((expire_ms, version)) = meta else {
             return Ok(0);
         };
+        if version == 0 {
+            let key_bytes = self.mk(key);
+            let Some(raw) = self.store.get_raw(&key_bytes) else {
+                return Ok(0);
+            };
+            let mut packed = decode_packed_hash(&raw)
+                .ok_or_else(|| Error::msg("Failed to decode packed hash"))?;
+            let mut deleted = 0usize;
+            let mut seen = HashSet::new();
+            for field in fields {
+                if seen.insert(field) && packed.remove(field).is_some() {
+                    deleted += 1;
+                }
+            }
+            if deleted == 0 {
+                return Ok(0);
+            }
+            let mut batch = WriteBatch::new();
+            if packed.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, expire_ms);
+                self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)?;
+            } else {
+                let encoded = encode_packed_hash(expire_ms, &packed)
+                    .expect("shrinking packed hash must remain encodable");
+                (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
+                self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            }
+            self.write_batch_if_not_empty(&batch);
+            self.changes.fetch_add(1, Ordering::Relaxed);
+            self.fulltext_request_refresh(key)?;
+            return Ok(deleted);
+        }
 
         let existing_fields = self.hash_live_entries_raw(key, version);
         let existing_field_keys: std::collections::HashSet<Vec<u8>> = existing_fields
@@ -491,6 +1054,38 @@ impl Db {
         let Some(meta) = self.hash_meta_async(key).await? else {
             return Ok(vec![false; fields.len()]);
         };
+        if meta.packed {
+            let key_bytes = self.mk(key);
+            let Some(raw) = self.store.get_raw_async(&key_bytes).await else {
+                return Ok(vec![false; fields.len()]);
+            };
+            let mut packed = decode_packed_hash(&raw)
+                .ok_or_else(|| Error::msg("Failed to decode packed hash"))?;
+            let mut deleted_by_position = vec![false; fields.len()];
+            let mut seen = HashSet::new();
+            for (index, field) in fields.iter().enumerate() {
+                if seen.insert(*field) && packed.remove(*field).is_some() {
+                    deleted_by_position[index] = true;
+                }
+            }
+            if !deleted_by_position.iter().any(|deleted| *deleted) {
+                return Ok(deleted_by_position);
+            }
+            let mut batch = WriteBatch::new();
+            if packed.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
+                self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)?;
+            } else {
+                let encoded = encode_packed_hash(meta.expire_ms, &packed)
+                    .expect("shrinking packed hash must remain encodable");
+                (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
+                self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
+            }
+            self.write_batch_if_not_empty_async(&batch).await;
+            self.changes.fetch_add(1, Ordering::Relaxed);
+            self.fulltext_request_refresh(key)?;
+            return Ok(deleted_by_position);
+        }
         let logical_key = key.as_bytes().to_vec();
         let key_epoch = self
             .counter_cache

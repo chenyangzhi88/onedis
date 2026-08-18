@@ -1,6 +1,77 @@
 use super::*;
 
 impl Db {
+    /// Deletes one bounded page of independent logical keys with one storage
+    /// commit. The caller owns higher-level lifecycle coordination; CAS keeps a
+    /// concurrently replaced key from being removed by a stale page snapshot.
+    pub(in crate::store::db) fn delete_keys_internal_batch(
+        &self,
+        keys: &[String],
+    ) -> Result<usize, Error> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        for _ in 0..64 {
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = raw_keys
+                .iter()
+                .map(|key| self.store.get_raw_observed(key))
+                .collect::<Vec<_>>();
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::new();
+            let mut deleted = Vec::new();
+            for ((key, raw_key), observed) in keys.iter().zip(&raw_keys).zip(&observations) {
+                let Some(raw) = observed.value() else {
+                    continue;
+                };
+                let Some(header) = decode_meta_header(raw) else {
+                    continue;
+                };
+                batch
+                    .delete(raw_key)
+                    .map_err(|error| Error::msg(error.to_string()))?;
+                self.ttl_manager.remove_known_to_batch(
+                    &mut batch,
+                    header.expire_ms,
+                    self.db_index,
+                    key,
+                );
+                delete_sub_keys_to_batch(
+                    &mut batch,
+                    self.db_index,
+                    key,
+                    header.version,
+                    header.type_tag,
+                );
+                match header.type_tag {
+                    TYPE_HASH => self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)?,
+                    TYPE_JSON => self.fulltext_enqueue_json_delete_to_batch(&mut batch, key)?,
+                    _ => {}
+                }
+                conditions.push(CompareCondition::from_observed(observed));
+                deleted.push((key.as_str(), header.type_tag));
+            }
+            if deleted.is_empty() {
+                return Ok(0);
+            }
+            if !self.compare_and_write_batch_if_not_empty(&conditions, &batch)? {
+                continue;
+            }
+            self.changes
+                .fetch_add(deleted.len() as u64, Ordering::Relaxed);
+            for (key, type_tag) in &deleted {
+                self.remove_list_meta_cache_if_non_transactional(key);
+                match *type_tag {
+                    TYPE_HASH => self.fulltext_request_refresh(key)?,
+                    TYPE_JSON => self.fulltext_request_json_refresh(key)?,
+                    _ => {}
+                }
+            }
+            return Ok(deleted.len());
+        }
+        Err(Error::msg("ERR key batch delete conflict"))
+    }
+
     /// Apply ordered DEL/UNLINK commands as one storage batch. Duplicate keys count once in the
     /// first command that removes them, matching sequential Redis pipeline semantics.
     pub(crate) async fn delete_key_commands_batch_async(

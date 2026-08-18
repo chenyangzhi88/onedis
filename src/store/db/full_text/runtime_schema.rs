@@ -237,6 +237,7 @@ impl FullTextRuntime {
             has_expiring_documents,
             expansion_terms: Mutex::new(HashMap::new()),
             last_refresh_at: Instant::now(),
+            last_checkpoint_at: Instant::now(),
         })
     }
 }

@@ -37,6 +37,42 @@ fn fulltext_vector_indexes_are_internal_and_not_redis_keys() {
 }
 
 #[test]
+fn drop_index_dd_deletes_multiple_source_pages() {
+    let store = test_store("drop-index-dd-pages");
+    let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
+    let ttl_manager =
+        crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
+    let db = Db::new(0, store, version_counter, ttl_manager);
+    let mut options = FullTextIndexOptions::default();
+    options.skip_initial_scan = true;
+    db.fulltext_create(
+        "idx",
+        FullTextCreateOptions {
+            source_type: FullTextSourceType::Hash,
+            prefixes: vec!["doc:".to_string()],
+            schema: vec![text_field("title")],
+            index_options: options,
+        },
+    )
+    .unwrap();
+    for ordinal in 0..300 {
+        db.hash_set(&format!("doc:{ordinal}"), "title", "batch delete")
+            .unwrap();
+    }
+    db.hash_set("keep:1", "title", "unrelated").unwrap();
+
+    db.fulltext_drop_index("idx", true).unwrap();
+
+    assert!(db.fulltext_list().is_ok());
+    assert!(db.hash_get("doc:0", "title").unwrap().is_none());
+    assert!(db.hash_get("doc:299", "title").unwrap().is_none());
+    assert_eq!(
+        db.hash_get("keep:1", "title").unwrap().as_deref(),
+        Some("unrelated")
+    );
+}
+
+#[test]
 fn alter_runtime_failure_rolls_back_schema_generation_and_runtime() {
     let store = test_store("alter-rollback");
     let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());

@@ -127,6 +127,9 @@ impl Db {
         expiration: Option<StringExpireUpdate>,
     ) -> Result<Vec<Option<Vec<u8>>>, Error> {
         let resolved = expiration.map(resolve_hash_expiration).transpose()?;
+        if matches!(resolved, Some(ResolvedHashExpiration::At(_))) {
+            self.promote_packed_hash(key)?;
+        }
         let delete_immediately = matches!(resolved, Some(ResolvedHashExpiration::At(expire_ms)) if expire_ms <= now_ms());
         let values = if delete_immediately {
             let mut seen = HashSet::new();
@@ -178,6 +181,9 @@ impl Db {
         expiration: Option<StringExpireUpdate>,
     ) -> Result<Vec<Option<Vec<u8>>>, Error> {
         let resolved = expiration.map(resolve_hash_expiration).transpose()?;
+        if matches!(resolved, Some(ResolvedHashExpiration::At(_))) {
+            self.promote_packed_hash_async(key).await?;
+        }
         let delete_immediately = matches!(resolved, Some(ResolvedHashExpiration::At(expire_ms)) if expire_ms <= now_ms());
         if delete_immediately {
             let _hash_write_guard = self.set_write_lock(key).lock().await;
@@ -261,9 +267,33 @@ impl Db {
         fxx: bool,
     ) -> Result<bool, Error> {
         let expiration = expiration.map(resolve_hash_expiration).transpose()?;
-        let meta = self.hash_expire_ms(key)?;
         if fields.is_empty() {
             return Ok(true);
+        }
+        let mut meta = self.hash_expire_ms(key)?;
+        if !matches!(expiration, Some(ResolvedHashExpiration::At(_)))
+            && (meta.is_none() || meta.is_some_and(|(_, version)| version == 0))
+        {
+            if fnx
+                && fields
+                    .iter()
+                    .any(|(field, _)| self.hash_live_field_value(key, 0, field).is_some())
+            {
+                return Ok(false);
+            }
+            if fxx
+                && fields
+                    .iter()
+                    .any(|(field, _)| self.hash_live_field_value(key, 0, field).is_none())
+            {
+                return Ok(false);
+            }
+            self.hash_set_many_bytes(key, fields)?;
+            return Ok(true);
+        }
+        if matches!(expiration, Some(ResolvedHashExpiration::At(_))) {
+            self.promote_packed_hash(key)?;
+            meta = self.hash_expire_ms(key)?;
         }
         let version = match meta {
             Some((_, v)) => v,
@@ -391,6 +421,32 @@ impl Db {
         fxx: bool,
     ) -> Result<bool, Error> {
         let expiration = expiration.map(resolve_hash_expiration).transpose()?;
+        if fields.is_empty() {
+            return Ok(true);
+        }
+        let meta = self.hash_meta_async(key).await?;
+        if !matches!(expiration, Some(ResolvedHashExpiration::At(_)))
+            && (meta.is_none() || meta.is_some_and(|meta| meta.packed))
+        {
+            if fnx || fxx {
+                let field_names = fields
+                    .iter()
+                    .map(|(field, _)| field.clone())
+                    .collect::<Vec<_>>();
+                let existing = self.hash_multi_get_bytes_async(key, &field_names).await?;
+                if existing
+                    .into_iter()
+                    .any(|value| (fnx && value.is_some()) || (fxx && value.is_none()))
+                {
+                    return Ok(false);
+                }
+            }
+            self.hash_set_many_bytes_async(key, fields).await?;
+            return Ok(true);
+        }
+        if matches!(expiration, Some(ResolvedHashExpiration::At(_))) {
+            self.promote_packed_hash_async(key).await?;
+        }
         let delete_immediately = matches!(expiration, Some(ResolvedHashExpiration::At(expire_ms)) if expire_ms <= now_ms());
         if delete_immediately {
             let _hash_write_guard = self.set_write_lock(key).lock().await;

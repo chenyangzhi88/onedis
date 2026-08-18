@@ -52,7 +52,9 @@ impl KvStore {
             return;
         }
         let started = Instant::now();
-        let table_batch = bind_write_batch(&self.table, &batch)
+        let table_batch = self
+            .table
+            .bind_write_batch(batch)
             .expect("failed to bind owned batch to kv_engine table");
         self.table
             .write_async(table_batch, self.write_options.clone())
@@ -159,7 +161,9 @@ impl KvStore {
 
     pub async fn write_batch_direct_async(&self, batch: WriteBatch) {
         let started = Instant::now();
-        let table_batch = bind_write_batch(&self.table, &batch)
+        let table_batch = self
+            .table
+            .bind_write_batch(batch)
             .expect("failed to bind direct batch to kv_engine table");
         self.table
             .write_async(table_batch, self.write_options.clone())

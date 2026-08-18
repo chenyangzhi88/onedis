@@ -115,6 +115,7 @@ fn set_over_complex_type_hides_old_subkeys_and_compaction_cleans_after_rebuild()
     let db = test_db();
 
     assert!(db.hash_set("reuse-key", "old-field", "old-value").unwrap());
+    db.promote_packed_hash("reuse-key").unwrap();
     let old_version = db.version_counter.current();
     let old_field_key = hash_field_key(db.db_index, "reuse-key", old_version, "old-field");
     assert!(db.store.contains_key(&old_field_key));

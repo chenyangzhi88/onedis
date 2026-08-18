@@ -32,7 +32,7 @@ pub(super) use tantivy::{
     indexer::LogMergePolicy,
     query::{
         AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, EmptyQuery, Occur, PhraseQuery,
-        Query, QueryParser, RangeQuery, RegexQuery, TermQuery, Weight,
+        Query, QueryParser, RangeQuery, RegexQuery, TermQuery,
     },
     schema::{
         FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TantivyDocument,
@@ -61,13 +61,14 @@ pub(super) const FULLTEXT_GEO_FIELD_PREFIX: &str = "__geo_";
 pub(super) const FULLTEXT_GEOSHAPE_FIELD_PREFIX: &str = "__geoshape_";
 pub(super) const FULLTEXT_WRITER_HEAP_BYTES: usize = 50_000_000;
 pub(super) const DEFAULT_REFRESH_INTERVAL_MS: u64 = 100;
-pub(super) const DEFAULT_REFRESH_MAX_DOCS: usize = 1024;
+pub(super) const DEFAULT_CHECKPOINT_INTERVAL_MS: u64 = 1_000;
+pub(super) const DEFAULT_REFRESH_MAX_DOCS: usize = 8192;
 pub(super) const DEFAULT_REFRESH_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const DEFAULT_REFRESH_TIMEOUT_MS: u64 = 500;
 pub(super) const DEFAULT_OUTBOX_COMPACT_THRESHOLD: usize = 1024;
 pub(super) const DEFAULT_REPAIR_THROTTLE_MS: u64 = 1_000;
 pub(super) const DEFAULT_DIRECTORY_CACHE_BYTES: usize = 64 * 1024 * 1024;
-pub(super) const DEFAULT_MERGE_MIN_SEGMENTS: usize = 8;
+pub(super) const DEFAULT_MERGE_MIN_SEGMENTS: usize = 4;
 pub(super) const DEFAULT_MERGE_MAX_DOCS: usize = 10_000_000;
 pub(super) const DEFAULT_MERGE_MIN_LAYER_DOCS: usize = 10_000;
 pub(super) const DEFAULT_MERGE_DELETE_RATIO: f32 = 0.25;

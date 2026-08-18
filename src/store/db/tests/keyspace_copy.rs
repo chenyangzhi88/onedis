@@ -348,6 +348,8 @@ fn flushdb_does_not_remove_global_version_reservation() {
 
     db0.hash_set("db0-hash", "field", "value").unwrap();
     db1.hash_set("db1-hash", "field", "value").unwrap();
+    db0.promote_packed_hash("db0-hash").unwrap();
+    db1.promote_packed_hash("db1-hash").unwrap();
     let allocated = version_counter.current();
     assert!(allocated >= 2);
     db0.flushdb();
@@ -389,6 +391,7 @@ fn set_string_over_hash_hides_old_subkeys_until_compaction() {
     let db = test_db();
 
     db.hash_set("mixed", "field", "value").unwrap();
+    db.promote_packed_hash("mixed").unwrap();
     let raw = db.store.get_raw(&db.mk("mixed")).unwrap();
     let header = super::decode_meta_header(&raw).unwrap();
     let field_key = hash_field_key(db.db_index, "mixed", header.version, "field");
@@ -649,7 +652,11 @@ async fn copy_move_rename_and_remove_cover_complex_structure_namespaces() {
         SetCondition::Always,
     )
     .unwrap();
-    assert!(db1.remove("remove-hash").is_none());
+    assert!(matches!(
+        db1.remove("remove-hash"),
+        Some(Structure::Hash(values)) if values == HashMap::from([("a".to_string(), "1".to_string())])
+    ));
+    assert!(!db1.exists("remove-hash"));
     assert!(matches!(
         db1.remove_async("remove-list").await,
         Some(Structure::List(values)) if values == vec!["x".to_string(), "y".to_string()]

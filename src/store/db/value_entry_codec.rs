@@ -48,6 +48,15 @@ pub(in crate::store::db) fn decode_entry(raw: &[u8]) -> Option<(u64, u64, Struct
     if decode_stream_meta(raw).is_some() {
         return None;
     }
+    if let Some(meta) = decode_hash_meta(raw)
+        && meta.packed
+    {
+        let hash = decode_packed_hash(raw)?
+            .into_iter()
+            .filter_map(|(field, value)| String::from_utf8(value).ok().map(|value| (field, value)))
+            .collect();
+        return Some((meta.expire_ms, 0, Structure::Hash(hash)));
+    }
     if raw.len() < 17 {
         return None;
     }

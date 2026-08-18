@@ -87,6 +87,18 @@ impl Db {
             return Ok(());
         };
         let policy = self.fulltext_effective_refresh_policy(&meta)?;
+        let checkpoint_interval_ms = self.fulltext_checkpoint_interval_ms()?;
+        let durable_checkpoint = if durable_checkpoint {
+            let runtime_guard = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+            force
+                || checkpoint_interval_ms == 0
+                || runtime_guard.last_checkpoint_at.elapsed()
+                    >= Duration::from_millis(checkpoint_interval_ms)
+        } else {
+            false
+        };
         {
             let runtime_guard = runtime
                 .read()
@@ -97,7 +109,12 @@ impl Db {
         }
 
         let threshold = self.fulltext_outbox_compact_threshold()?;
-        self.fulltext_compact_outbox_if_needed(index, threshold)?;
+        if self
+            .fulltext_runtimes
+            .take_outbox_compaction_due(self.db_index, index, threshold)
+        {
+            self.fulltext_compact_outbox_if_needed(index, threshold)?;
+        }
         let refresh_timeout_ms = self.fulltext_refresh_timeout_ms()?;
         let deadline = match (external_deadline, refresh_timeout_ms) {
             (_, 0) => Instant::now(),

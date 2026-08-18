@@ -193,6 +193,38 @@ fn decode_version_owner(prefix: &[u8], raw_key: &[u8], raw_value: &[u8]) -> Opti
 }
 
 impl Db {
+    pub(in crate::store::db) fn append_version_owner_markers(
+        &self,
+        batch: &mut WriteBatch,
+    ) -> Result<(), Error> {
+        let mut owners = Vec::new();
+        for (write_type, raw_key, raw_value) in batch.iter() {
+            if !matches!(
+                write_type,
+                WriteType::Put | WriteType::PutBlobMedium | WriteType::PutBlobExternal
+            ) {
+                continue;
+            }
+            let Some(header) = decode_meta_header(raw_value) else {
+                continue;
+            };
+            if header.type_tag == TYPE_STRING || header.version == 0 {
+                continue;
+            }
+            let Some(logical_key) =
+                logical_main_key_from_raw_key(self.key_layout, self.db_index, raw_key)
+            else {
+                continue;
+            };
+            owners.push((logical_key, header.version, header.type_tag));
+        }
+        for (logical_key, version, type_tag) in owners {
+            self.store.register_live_version(version);
+            put_version_owner_to_batch(batch, self.db_index, &logical_key, version, type_tag)?;
+        }
+        Ok(())
+    }
+
     pub(in crate::store::db) fn batch_with_version_owner_markers(
         &self,
         batch: &WriteBatch,

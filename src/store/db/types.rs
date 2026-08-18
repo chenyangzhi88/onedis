@@ -163,6 +163,16 @@ pub(crate) enum SetBatchMutation<'a> {
     Remove { key: &'a str, members: Vec<&'a str> },
 }
 
+/// One HSET command in an already ordered RESP pipeline.
+///
+/// The server keeps command boundaries so the database layer can return the
+/// added-field count for every command while still committing independent
+/// keys in one storage batch.
+pub(crate) struct HashSetBatchMutation<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) fields: Vec<(&'a str, &'a [u8])>,
+}
+
 impl SetBatchMutation<'_> {
     pub(crate) fn key(&self) -> &str {
         match self {

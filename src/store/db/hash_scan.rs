@@ -83,7 +83,7 @@ impl Db {
         let Some(meta) = self.hash_meta_async(key).await? else {
             return Ok((0, Vec::new()));
         };
-        if pattern_str != "*" || meta.may_have_field_ttl {
+        if pattern_str != "*" || meta.may_have_field_ttl || meta.packed {
             return self
                 .hash_scan_bytes_async_filtered(key, meta, cursor, pattern_str, count)
                 .await;

@@ -106,24 +106,108 @@ pub(in crate::store::db) struct HashMeta {
     pub(in crate::store::db) expire_ms: u64,
     pub(in crate::store::db) version: u64,
     pub(in crate::store::db) may_have_field_ttl: bool,
+    pub(in crate::store::db) packed: bool,
 }
 
 pub(in crate::store::db) const HASH_META_COMPACT_LEN: usize = 18;
 pub(in crate::store::db) const HASH_META_FLAG_MAY_HAVE_FIELD_TTL: u8 = 0x01;
+pub(in crate::store::db) const HASH_META_FLAG_PACKED: u8 = 0x02;
+pub(in crate::store::db) const SMALL_HASH_MAX_FIELDS: usize = 128;
+pub(in crate::store::db) const SMALL_HASH_MAX_ENCODED_BYTES: usize = 8 * 1024;
+const PACKED_HASH_MAGIC: [u8; 4] = [0xf1, b'H', b'P', 1];
+const PACKED_HASH_HEADER_LEN: usize = HASH_META_COMPACT_LEN + PACKED_HASH_MAGIC.len() + 2;
+
+pub(in crate::store::db) type PackedHashFields = BTreeMap<String, Vec<u8>>;
+
+pub(in crate::store::db) fn is_packed_hash_raw(raw: &[u8]) -> bool {
+    raw.len() >= PACKED_HASH_HEADER_LEN
+        && raw.get(16) == Some(&TYPE_HASH)
+        && raw[17] & HASH_META_FLAG_PACKED != 0
+        && raw[HASH_META_COMPACT_LEN..HASH_META_COMPACT_LEN + PACKED_HASH_MAGIC.len()]
+            == PACKED_HASH_MAGIC
+}
+
+pub(in crate::store::db) fn decode_packed_hash(raw: &[u8]) -> Option<PackedHashFields> {
+    if !is_packed_hash_raw(raw) {
+        return None;
+    }
+    let mut offset = HASH_META_COMPACT_LEN + PACKED_HASH_MAGIC.len();
+    let count = u16::from_be_bytes(raw.get(offset..offset + 2)?.try_into().ok()?) as usize;
+    offset += 2;
+    if count > SMALL_HASH_MAX_FIELDS {
+        return None;
+    }
+    let mut fields = BTreeMap::new();
+    for _ in 0..count {
+        let field_len = u16::from_be_bytes(raw.get(offset..offset + 2)?.try_into().ok()?) as usize;
+        offset += 2;
+        let value_len = u32::from_be_bytes(raw.get(offset..offset + 4)?.try_into().ok()?) as usize;
+        offset += 4;
+        let field_end = offset.checked_add(field_len)?;
+        let field = std::str::from_utf8(raw.get(offset..field_end)?)
+            .ok()?
+            .to_string();
+        offset = field_end;
+        let value_end = offset.checked_add(value_len)?;
+        let value = raw.get(offset..value_end)?.to_vec();
+        offset = value_end;
+        if fields.insert(field, value).is_some() {
+            return None;
+        }
+    }
+    (offset == raw.len()).then_some(fields)
+}
+
+pub(in crate::store::db) fn encode_packed_hash(
+    expire_ms: u64,
+    fields: &PackedHashFields,
+) -> Option<Vec<u8>> {
+    if fields.len() > SMALL_HASH_MAX_FIELDS {
+        return None;
+    }
+    let encoded_len = fields
+        .iter()
+        .try_fold(PACKED_HASH_HEADER_LEN, |len, (field, value)| {
+            u16::try_from(field.len()).ok()?;
+            u32::try_from(value.len()).ok()?;
+            len.checked_add(2 + 4 + field.len() + value.len())
+        })?;
+    if encoded_len > SMALL_HASH_MAX_ENCODED_BYTES {
+        return None;
+    }
+    let mut raw = Vec::with_capacity(encoded_len);
+    raw.extend_from_slice(&expire_ms.to_be_bytes());
+    raw.extend_from_slice(&0u64.to_be_bytes());
+    raw.push(TYPE_HASH);
+    raw.push(HASH_META_FLAG_PACKED);
+    raw.extend_from_slice(&PACKED_HASH_MAGIC);
+    raw.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+    for (field, value) in fields {
+        raw.extend_from_slice(&(field.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        raw.extend_from_slice(field.as_bytes());
+        raw.extend_from_slice(value);
+    }
+    Some(raw)
+}
 
 pub(in crate::store::db) fn decode_hash_meta(raw: &[u8]) -> Option<HashMeta> {
     let header = decode_meta_header(raw)?;
     if header.type_tag != TYPE_HASH {
         return None;
     }
+    let packed = is_packed_hash_raw(raw);
     Some(HashMeta {
         expire_ms: header.expire_ms,
         version: header.version,
-        may_have_field_ttl: if raw.len() == HASH_META_COMPACT_LEN {
+        may_have_field_ttl: if packed {
+            false
+        } else if raw.len() == HASH_META_COMPACT_LEN {
             raw[17] & HASH_META_FLAG_MAY_HAVE_FIELD_TTL != 0
         } else {
             true
         },
+        packed,
     })
 }
 

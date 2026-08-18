@@ -214,6 +214,8 @@ impl Db {
             Frame::Integer(effective_policy.max_bytes as i64),
             Frame::bulk_string("refresh_timeout_ms"),
             Frame::Integer(self.fulltext_refresh_timeout_ms()? as i64),
+            Frame::bulk_string("checkpoint_interval_ms"),
+            Frame::Integer(self.fulltext_checkpoint_interval_ms()? as i64),
             Frame::bulk_string("outbox_compact_threshold"),
             Frame::Integer(self.fulltext_outbox_compact_threshold()? as i64),
             Frame::bulk_string("repair_throttle_ms"),

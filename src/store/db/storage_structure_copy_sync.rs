@@ -41,6 +41,12 @@ impl Db {
         };
         let target_version = Self::next_version_for_store(target_store, version_counter);
 
+        if is_packed_hash_raw(raw) {
+            (batch.put(&main_key(target_db_index, target_key), raw))
+                .expect("write batch append invariant violated");
+            return;
+        }
+
         if let Some(meta) = decode_list_meta(raw) {
             (batch.put(
                 &main_key(target_db_index, target_key),

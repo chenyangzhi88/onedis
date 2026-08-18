@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) type FullTextVectorMutationBatches = HashMap<String, Vec<(String, Option<Vec<f32>>)>>;
+pub(in crate::store::db) type FullTextCommittedOutbox = HashMap<String, (u64, u64)>;
 impl Db {
     pub(super) fn fulltext_request_refresh_for_source(
         &self,
@@ -19,9 +20,26 @@ impl Db {
     }
 
     pub(in crate::store) fn fulltext_observe_committed_outbox_batch(&self, batch: &WriteBatch) {
-        let mut committed = HashMap::<String, (u64, u64)>::new();
+        let committed = self.fulltext_collect_committed_outbox_batch(batch);
+        self.fulltext_publish_committed_outbox(committed);
+    }
+
+    pub(in crate::store::db) fn fulltext_collect_committed_outbox_batch(
+        &self,
+        batch: &WriteBatch,
+    ) -> FullTextCommittedOutbox {
+        let mut committed = FullTextCommittedOutbox::new();
         for (write_type, key, value) in batch.iter() {
-            if !write_type.is_put_like() || value.len() != std::mem::size_of::<u64>() {
+            if !write_type.is_put_like() {
+                continue;
+            }
+            if let Some((index, seq)) = fulltext_index_and_seq_from_outbox_key(self.db_index, key) {
+                let entry = committed.entry(index).or_default();
+                entry.0 = entry.0.max(seq);
+                entry.1 = entry.1.saturating_add(1);
+                continue;
+            }
+            if value.len() != std::mem::size_of::<u64>() {
                 continue;
             }
             let Some(index) = fulltext_index_from_outbox_latest_key(self.db_index, key) else {
@@ -32,11 +50,14 @@ impl Db {
             };
             let entry = committed.entry(index).or_default();
             entry.0 = entry.0.max(seq);
-            entry.1 = entry.1.saturating_add(1);
         }
-        let compact_threshold = self
-            .fulltext_outbox_compact_threshold()
-            .unwrap_or(DEFAULT_OUTBOX_COMPACT_THRESHOLD);
+        committed
+    }
+
+    pub(in crate::store::db) fn fulltext_publish_committed_outbox(
+        &self,
+        committed: FullTextCommittedOutbox,
+    ) {
         for (index, (seq, count)) in committed {
             self.fulltext_runtimes
                 .note_latest_outbox_seq(self.db_index, &index, seq);
@@ -50,16 +71,8 @@ impl Db {
             } else {
                 self.fulltext_pending_outbox_count(&index);
             }
-            if self.fulltext_runtimes.note_outbox_mutations(
-                self.db_index,
-                &index,
-                count as usize,
-                compact_threshold,
-            ) && let Err(error) =
-                self.fulltext_compact_outbox_if_needed(&index, compact_threshold)
-            {
-                log::error!("failed to compact committed fulltext outbox {index}: {error}");
-            }
+            self.fulltext_runtimes
+                .note_outbox_mutations(self.db_index, &index, count as usize);
         }
     }
 
@@ -68,7 +81,6 @@ impl Db {
         key: &str,
         source_type: FullTextSourceType,
     ) -> Result<(), Error> {
-        let compact_threshold = self.fulltext_outbox_compact_threshold()?;
         for (index, _) in self.fulltext_matching_metas_for_source(key, source_type)? {
             let Some(seq) = self
                 .store
@@ -96,14 +108,8 @@ impl Db {
             } else {
                 self.fulltext_pending_outbox_count(&index);
             }
-            if self.fulltext_runtimes.note_outbox_mutations(
-                self.db_index,
-                &index,
-                1,
-                compact_threshold,
-            ) {
-                self.fulltext_compact_outbox_if_needed(&index, compact_threshold)?;
-            }
+            self.fulltext_runtimes
+                .note_outbox_mutations(self.db_index, &index, 1);
         }
         Ok(())
     }

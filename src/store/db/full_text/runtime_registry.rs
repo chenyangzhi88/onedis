@@ -276,21 +276,30 @@ impl FullTextRuntimeRegistry {
         *latest = (*latest).max(seq);
     }
 
-    pub(super) fn note_outbox_mutations(
-        &self,
-        db_index: u16,
-        index: &str,
-        delta: usize,
-        compact_threshold: usize,
-    ) -> bool {
-        if delta == 0 || compact_threshold == 0 || compact_threshold == usize::MAX {
-            return false;
+    pub(super) fn note_outbox_mutations(&self, db_index: u16, index: &str, delta: usize) {
+        if delta == 0 {
+            return;
         }
         let mut pending = self
             .outbox_mutations_since_compaction
             .entry(Self::key(db_index, index))
             .or_default();
         *pending = pending.saturating_add(delta);
+    }
+
+    pub(super) fn take_outbox_compaction_due(
+        &self,
+        db_index: u16,
+        index: &str,
+        compact_threshold: usize,
+    ) -> bool {
+        if compact_threshold == 0 || compact_threshold == usize::MAX {
+            return false;
+        }
+        let mut pending = self
+            .outbox_mutations_since_compaction
+            .entry(Self::key(db_index, index))
+            .or_default();
         if *pending <= compact_threshold {
             return false;
         }

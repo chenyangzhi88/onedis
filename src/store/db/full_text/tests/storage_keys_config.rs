@@ -38,6 +38,10 @@ fn storage_key_helpers_round_trip_and_reject_bad_suffixes() {
         fulltext_outbox_seq_from_key(7, "idx", &fulltext_outbox_key(7, "idx", 42)).unwrap(),
         42
     );
+    assert_eq!(
+        fulltext_index_and_seq_from_outbox_key(7, &fulltext_outbox_key(7, "idx", 42)),
+        Some(("idx".to_string(), 42))
+    );
     assert!(
         fulltext_outbox_latest_key(7, "idx").starts_with(&fulltext_meta_prefix(7)),
         "the durable latest-outbox watermark belongs to the index metadata namespace"
@@ -58,4 +62,27 @@ fn storage_key_helpers_round_trip_and_reject_bad_suffixes() {
     assert!(fulltext_config_key(1, "DEFAULT_DIALECT").starts_with(&fulltext_meta_prefix(1)));
 
     assert!(current_fulltext_millis() > 0);
+}
+
+#[test]
+fn packed_mutation_records_round_trip_and_legacy_records_remain_readable() {
+    let packed =
+        encode_fulltext_mutation_batch(17, FullTextMutationKind::UpsertKey, &["doc:1", "doc:2"])
+            .unwrap();
+    let decoded = decode_fulltext_mutation_records(&packed).unwrap();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].incarnation, 17);
+    assert_eq!(decoded[0].kind, FullTextMutationKind::UpsertKey);
+    assert_eq!(decoded[0].key, "doc:1");
+    assert_eq!(decoded[1].key, "doc:2");
+
+    let legacy = encode_record(&FullTextMutationRecord {
+        incarnation: 9,
+        kind: FullTextMutationKind::DeleteKey,
+        key: "doc:old".to_string(),
+    })
+    .unwrap();
+    let decoded = decode_fulltext_mutation_records(&legacy).unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].key, "doc:old");
 }

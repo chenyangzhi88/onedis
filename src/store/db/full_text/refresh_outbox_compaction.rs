@@ -24,7 +24,15 @@ impl Db {
                 stale.push(outbox_key);
                 continue;
             };
-            let record = decode_record::<FullTextMutationRecord>(&raw)?;
+            let records = decode_fulltext_mutation_records(&raw)?;
+            // Packed records are the atomic publication unit. A later mutation
+            // may supersede only some of their keys, so leave them for the
+            // normal durable-checkpoint range deletion instead of deleting a
+            // partially-live batch during opportunistic compaction.
+            if records.len() != 1 {
+                continue;
+            }
+            let record = records.into_iter().next().expect("single mutation record");
             match latest_by_key.insert(record.key.clone(), (seq, outbox_key.clone())) {
                 Some((previous_seq, previous_key)) if previous_seq < seq => {
                     stale.push(previous_key)

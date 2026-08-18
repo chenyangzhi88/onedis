@@ -1,4 +1,8 @@
 use super::*;
+use crate::store::db::{
+    decode_hash_meta_checked, decode_packed_hash, decode_u64_be, hash_field_expire_key,
+    hash_field_key, now_ms,
+};
 
 enum FullTextPendingSourceAction {
     Upsert {
@@ -31,7 +35,137 @@ struct FullTextPreparedRefreshMutation {
     action: FullTextPreparedRefreshAction,
 }
 
+struct FullTextHashSourceSnapshot {
+    fields: Vec<(String, String)>,
+    expires_at_ms: u64,
+}
+
 impl Db {
+    /// Loads the hash fields needed by an index with two KV multi-gets instead
+    /// of one prefix scan per document. Index filters may reference fields that
+    /// are not in the schema, so those indexes keep the complete-scan path.
+    fn fulltext_hash_sources_for_refresh(
+        &self,
+        meta: &FullTextIndexMeta,
+        keys: &[String],
+    ) -> Result<Vec<FullTextHashSourceSnapshot>, Error> {
+        if meta.index_options.filter.is_some() {
+            return keys
+                .iter()
+                .map(|key| {
+                    Ok(FullTextHashSourceSnapshot {
+                        fields: self.hash_get_all(key)?,
+                        expires_at_ms: self.fulltext_source_expire_ms(key),
+                    })
+                })
+                .collect();
+        }
+
+        let mut field_names = meta
+            .schema
+            .iter()
+            .map(|field| field.name.as_str())
+            .chain(meta.index_options.language_field.as_deref())
+            .chain(meta.index_options.score_field.as_deref())
+            .chain(meta.index_options.payload_field.as_deref())
+            .collect::<Vec<_>>();
+        field_names.sort_unstable();
+        field_names.dedup();
+
+        let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let raw_metas = self.store.multi_get_raw(&meta_keys);
+        let now = now_ms();
+        let hash_metas = raw_metas
+            .iter()
+            .map(|raw| {
+                let Some(raw) = raw.as_ref() else {
+                    return Ok(None);
+                };
+                let header = decode_meta_header(&raw)
+                    .ok_or_else(|| Error::msg("Failed to decode hash metadata"))?;
+                if header.type_tag != TYPE_HASH || (header.expire_ms > 0 && now >= header.expire_ms)
+                {
+                    return Ok(None);
+                }
+                Ok(Some(decode_hash_meta_checked(&raw)?))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        let mut lookup_keys = Vec::with_capacity(
+            keys.len()
+                .saturating_mul(field_names.len())
+                .saturating_mul(2),
+        );
+        let mut lookups = Vec::with_capacity(keys.len().saturating_mul(field_names.len()));
+        let mut packed_values = Vec::new();
+        for (key_offset, (key, hash_meta)) in keys.iter().zip(&hash_metas).enumerate() {
+            let Some(hash_meta) = hash_meta else {
+                continue;
+            };
+            if hash_meta.packed {
+                let packed = raw_metas[key_offset]
+                    .as_deref()
+                    .and_then(decode_packed_hash)
+                    .ok_or_else(|| Error::msg("Failed to decode packed hash"))?;
+                for field in &field_names {
+                    if let Some(value) = packed.get(*field)
+                        && let Ok(value) = String::from_utf8(value.clone())
+                    {
+                        packed_values.push((key_offset, (*field).to_string(), value));
+                    }
+                }
+                continue;
+            }
+            for field in &field_names {
+                let value_offset = lookup_keys.len();
+                lookup_keys.push(hash_field_key(self.db_index, key, hash_meta.version, field));
+                let expire_offset = hash_meta.may_have_field_ttl.then(|| {
+                    let offset = lookup_keys.len();
+                    lookup_keys.push(hash_field_expire_key(
+                        self.db_index,
+                        key,
+                        hash_meta.version,
+                        field,
+                    ));
+                    offset
+                });
+                lookups.push((key_offset, *field, value_offset, expire_offset));
+            }
+        }
+        let values = self.store.multi_get_raw(&lookup_keys);
+        let mut snapshots = hash_metas
+            .iter()
+            .map(|hash_meta| FullTextHashSourceSnapshot {
+                fields: Vec::with_capacity(field_names.len()),
+                expires_at_ms: hash_meta.map_or(0, |hash_meta| hash_meta.expire_ms),
+            })
+            .collect::<Vec<_>>();
+        for (key_offset, field, value) in packed_values {
+            snapshots[key_offset].fields.push((field, value));
+        }
+        for (key_offset, field, value_offset, expire_offset) in lookups {
+            let expired = expire_offset
+                .and_then(|offset| values.get(offset))
+                .and_then(|raw| raw.as_deref())
+                .and_then(decode_u64_be)
+                .is_some_and(|expire_ms| expire_ms > 0 && now >= expire_ms);
+            if expired {
+                continue;
+            }
+            let Some(value) = values
+                .get(value_offset)
+                .and_then(|raw| raw.as_ref())
+                .and_then(|raw| String::from_utf8(raw.clone()).ok())
+            else {
+                continue;
+            };
+            snapshots[key_offset]
+                .fields
+                .push((field.to_string(), value));
+        }
+        Ok(snapshots)
+    }
+
     pub(super) fn fulltext_apply_pending(
         &self,
         index: &str,
@@ -185,17 +319,43 @@ impl Db {
                 else {
                     continue;
                 };
-                scanned_through = scanned_through.max(seq);
-                let record = decode_record::<FullTextMutationRecord>(&raw)?;
-                if record.incarnation != meta.incarnation {
-                    continue;
+                let records = decode_fulltext_mutation_records(&raw)?;
+                if !latest_by_key.is_empty()
+                    && latest_by_key.len().saturating_add(records.len()) > remaining_docs
+                {
+                    processed_all = false;
+                    break;
                 }
-                latest_by_key.insert(record.key.clone(), (seq, record));
+                scanned_through = scanned_through.max(seq);
+                for record in records {
+                    if record.incarnation != meta.incarnation {
+                        continue;
+                    }
+                    latest_by_key.insert(record.key.clone(), (seq, record));
+                }
             }
             let mut pending = latest_by_key.into_values().collect::<Vec<_>>();
             pending.sort_by_key(|(seq, _)| *seq);
-            for (seq, record) in pending {
-                if Instant::now() >= deadline {
+            let hash_snapshots = matches!(meta.source_type, FullTextSourceType::Hash)
+                .then(|| {
+                    let keys = pending
+                        .iter()
+                        .map(|(_, record)| record.key.clone())
+                        .collect::<Vec<_>>();
+                    self.fulltext_hash_sources_for_refresh(meta, &keys)
+                })
+                .transpose()?;
+            let mut current_seq = None;
+            let mut stop_after_seq = None;
+            for (pending_offset, (seq, record)) in pending.into_iter().enumerate() {
+                if current_seq != Some(seq) {
+                    if stop_after_seq.is_some() || Instant::now() >= deadline {
+                        processed_all = false;
+                        break;
+                    }
+                    current_seq = Some(seq);
+                }
+                if stop_after_seq.is_some_and(|stop_seq| stop_seq != seq) {
                     processed_all = false;
                     break;
                 }
@@ -204,13 +364,16 @@ impl Db {
                         if !matches!(meta.source_type, FullTextSourceType::Hash) {
                             FullTextPendingSourceAction::Noop
                         } else {
-                            let fields = self.hash_get_all(&record.key)?;
+                            let snapshot = &hash_snapshots
+                                .as_ref()
+                                .expect("hash refresh snapshots were loaded")[pending_offset];
+                            let fields = snapshot.fields.clone();
                             if fields.is_empty() || !fulltext_index_filter_matches(meta, &fields)? {
                                 FullTextPendingSourceAction::Delete
                             } else {
                                 FullTextPendingSourceAction::Upsert {
                                     fields,
-                                    expires_at_ms: self.fulltext_source_expire_ms(&record.key),
+                                    expires_at_ms: snapshot.expires_at_ms,
                                     json_root: None,
                                 }
                             }
@@ -241,6 +404,9 @@ impl Db {
                     key: record.key,
                     action,
                 });
+                if indexed_docs.saturating_add(pending_sources.len()) >= policy.max_docs {
+                    stop_after_seq = Some(seq);
+                }
             }
         }
 
@@ -251,7 +417,16 @@ impl Db {
             let runtime = runtime
                 .read()
                 .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+            let mut current_outbox_seq = None;
+            let mut stop_after_seq = None;
             for pending in pending_sources {
+                if current_outbox_seq != Some(pending.seq) {
+                    if stop_after_seq.is_some() {
+                        processed_all = false;
+                        break;
+                    }
+                    current_outbox_seq = Some(pending.seq);
+                }
                 let action = match pending.action {
                     FullTextPendingSourceAction::Upsert {
                         fields,
@@ -282,8 +457,7 @@ impl Db {
                     action,
                 });
                 if indexed_docs >= policy.max_docs || indexed_bytes >= policy.max_bytes {
-                    processed_all = false;
-                    break;
+                    stop_after_seq = Some(pending.seq);
                 }
             }
         }
@@ -367,6 +541,7 @@ impl Db {
                 .write()
                 .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
             runtime.durable_outbox_seq = runtime.durable_outbox_seq.max(checkpoint_seq);
+            runtime.last_checkpoint_at = Instant::now();
             meta.indexed_docs = runtime.num_docs();
         }
 

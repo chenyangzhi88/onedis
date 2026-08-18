@@ -241,23 +241,27 @@ impl FullTextRuntime {
                     } else {
                         vec![self.text_variant_field(field)]
                     };
-                    let query = Box::new(BooleanQuery::new(
-                        variants
-                            .into_iter()
-                            .flat_map(|variant| {
-                                query_fields.iter().copied().map(move |query_field| {
-                                    (
-                                        Occur::Should,
-                                        Box::new(TermQuery::new(
-                                            Term::from_field_text(query_field, &variant),
-                                            IndexRecordOption::Basic,
-                                        ))
-                                            as Box<dyn Query>,
-                                    )
-                                })
+                    let mut clauses = variants
+                        .into_iter()
+                        .flat_map(|variant| {
+                            query_fields.iter().copied().map(move |query_field| {
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(query_field, &variant),
+                                    IndexRecordOption::Basic,
+                                )) as Box<dyn Query>
                             })
-                            .collect(),
-                    )) as Box<dyn Query>;
+                        })
+                        .collect::<Vec<_>>();
+                    let query = if clauses.len() == 1 {
+                        clauses.pop().expect("one text term")
+                    } else {
+                        Box::new(BooleanQuery::new(
+                            clauses
+                                .into_iter()
+                                .map(|query| (Occur::Should, query))
+                                .collect(),
+                        )) as Box<dyn Query>
+                    };
                     Ok(self.boost_text_field(query, field))
                 }),
                 options.scorer,
@@ -809,6 +813,38 @@ impl FullTextRuntime {
     ) -> Result<Box<dyn Query>, Error> {
         if expanded.terms.is_empty() {
             return Ok(Box::new(EmptyQuery));
+        }
+        // BM25 unions are additive, so flattening the field/term Boolean tree
+        // preserves scores while allowing Tantivy to build one disjunction and
+        // apply its specialized scorer directly.
+        if !matches!(scorer, FullTextScorer::DisMax) {
+            let mut clauses = Vec::with_capacity(expanded.terms.len());
+            for field in fields {
+                let query_field = self.text_variant_field(*field);
+                for (_, term) in expanded
+                    .terms
+                    .iter()
+                    .filter(|(expanded_field, _)| *expanded_field == query_field)
+                {
+                    let query = Box::new(TermQuery::new(
+                        Term::from_field_text(query_field, term),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>;
+                    clauses.push(self.boost_text_field(query, *field));
+                }
+            }
+            if clauses.is_empty() {
+                return Ok(Box::new(EmptyQuery));
+            }
+            if clauses.len() == 1 {
+                return Ok(clauses.pop().expect("one expanded term"));
+            }
+            return Ok(Box::new(BooleanQuery::new(
+                clauses
+                    .into_iter()
+                    .map(|query| (Occur::Should, query))
+                    .collect(),
+            )));
         }
         self.or_field_queries(
             fields.iter().filter_map(|field| {

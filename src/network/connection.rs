@@ -19,6 +19,8 @@ const SHARED_WRITE_QUEUE_CAPACITY: usize = 64;
 const SHARED_WRITE_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const SHARED_WRITE_MAX_MESSAGE_BYTES: usize = MAX_FRAME_BYTES + 1024 * 1024;
 const SOCKET_READ_BUFFER_BYTES: usize = 16 * 1024;
+const PIPELINE_READ_MAX_COMMANDS: usize = 256;
+const PIPELINE_READ_MAX_BYTES: usize = 256 * 1024;
 
 struct QueuedWrite {
     chunks: Vec<Arc<[u8]>>,
@@ -274,21 +276,41 @@ impl Connection {
             if self.read_buf.len() > MAX_FRAME_BYTES {
                 return Err(Error::msg("ERR protocol frame exceeds configured limit"));
             }
-            match Frame::scan_complete_frames(&self.read_buf) {
-                FrameScanResult::Ready(complete_len) => {
-                    let mut bytes = std::mem::take(&mut self.read_buf);
-                    self.read_buf = bytes.split_off(complete_len);
-                    if self.read_buf.is_empty() {
-                        self.partial_frame_started_at = None;
-                    } else {
-                        self.partial_frame_started_at = Some(tokio::time::Instant::now());
+            match Frame::scan_complete_frames_bounded(
+                &self.read_buf,
+                PIPELINE_READ_MAX_COMMANDS,
+                PIPELINE_READ_MAX_BYTES,
+            ) {
+                Ok(scan) => {
+                    if !scan.limit_reached {
+                        match self.reader.try_read(&mut temp_bytes) {
+                            Ok(0) => return Ok(self.take_complete_read_bytes(scan.complete_len)),
+                            Ok(n) => {
+                                if self.read_buf.len().saturating_add(n) > MAX_FRAME_BYTES {
+                                    return Err(Error::msg(
+                                        "ERR protocol frame exceeds configured limit",
+                                    ));
+                                }
+                                self.read_buf.extend_from_slice(&temp_bytes[..n]);
+                                continue;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(error) => {
+                                return Err(Error::msg(format!(
+                                    "Failed to read from stream: {error:?}"
+                                )));
+                            }
+                        }
                     }
-                    return Ok(bytes);
+                    return Ok(self.take_complete_read_bytes(scan.complete_len));
                 }
-                FrameScanResult::Invalid(message) => {
+                Err(FrameScanResult::Invalid(message)) => {
                     return Err(Error::msg(format!("ERR Protocol error: {message}")));
                 }
-                FrameScanResult::Incomplete => {}
+                Err(FrameScanResult::Incomplete) => {}
+                Err(FrameScanResult::Ready(_)) => {
+                    unreachable!("bounded scanner returns Ready as Ok")
+                }
             }
 
             let shared_writer = match self.writer.as_ref() {
@@ -334,27 +356,6 @@ impl Connection {
                     ));
                 }
             }
-            if self.read_buf.is_empty() {
-                match Frame::scan_complete_frames(&temp_bytes[..n]) {
-                    FrameScanResult::Ready(complete_len) => {
-                        if complete_len < n {
-                            if n - complete_len > MAX_FRAME_BYTES {
-                                return Err(Error::msg(
-                                    "ERR protocol frame exceeds configured limit",
-                                ));
-                            }
-                            self.read_buf
-                                .extend_from_slice(&temp_bytes[complete_len..n]);
-                            self.partial_frame_started_at = Some(tokio::time::Instant::now());
-                        }
-                        return Ok(temp_bytes[..complete_len].to_vec());
-                    }
-                    FrameScanResult::Invalid(message) => {
-                        return Err(Error::msg(format!("ERR Protocol error: {message}")));
-                    }
-                    FrameScanResult::Incomplete => {}
-                }
-            }
             if self.read_buf.len() + n > MAX_FRAME_BYTES {
                 return Err(Error::msg("ERR protocol frame exceeds configured limit"));
             }
@@ -363,6 +364,18 @@ impl Connection {
             }
             self.read_buf.extend_from_slice(&temp_bytes[..n]);
         }
+    }
+
+    fn take_complete_read_bytes(&mut self, complete_len: usize) -> Vec<u8> {
+        let mut bytes = std::mem::take(&mut self.read_buf);
+        self.read_buf = bytes.split_off(complete_len);
+        self.partial_frame_started_at = match Frame::scan_complete_frames(&self.read_buf) {
+            FrameScanResult::Incomplete if !self.read_buf.is_empty() => {
+                Some(tokio::time::Instant::now())
+            }
+            _ => None,
+        };
+        bytes
     }
 
     pub async fn write_bytes(&mut self, bytes: Vec<u8>) -> bool {
@@ -473,6 +486,18 @@ mod tests {
             connection.read_bytes().await.unwrap(),
             b"*1\r\n$4\r\nPONG\r\n"
         );
+    }
+
+    #[tokio::test]
+    async fn read_bytes_nonblocking_drains_pipeline_to_command_boundary() {
+        let (mut connection, mut client) = connection_pair().await;
+        let frame = b"*1\r\n$4\r\nPING\r\n";
+        client.write_all(&frame.repeat(300)).await.unwrap();
+
+        let first = connection.read_bytes().await.unwrap();
+        let second = connection.read_bytes().await.unwrap();
+        assert_eq!(Frame::parse_multiple_frames(&first).unwrap().len(), 256);
+        assert_eq!(Frame::parse_multiple_frames(&second).unwrap().len(), 44);
     }
 
     #[tokio::test]

@@ -6,6 +6,9 @@ async fn async_batch_string_overwrite_defers_old_subkeys_to_compaction() {
     db.hash_set_async("batch-overwrite", "field", "value")
         .await
         .unwrap();
+    db.promote_packed_hash_async("batch-overwrite")
+        .await
+        .unwrap();
     let raw = db.store.get_raw(&db.mk("batch-overwrite")).unwrap();
     let version = decode_meta_header(&raw).unwrap().version;
     let prefix = hash_field_prefix(db.db_index, "batch-overwrite", version);

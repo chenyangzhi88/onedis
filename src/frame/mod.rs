@@ -118,6 +118,22 @@ mod tests {
     }
 
     #[test]
+    fn bounded_frame_scanner_stops_at_command_and_byte_limits() {
+        let frame = b"*1\r\n$4\r\nPING\r\n";
+        let bytes = frame.repeat(300);
+        let scan = Frame::scan_complete_frames_bounded(&bytes, 256, usize::MAX).unwrap();
+        assert_eq!(scan.command_count, 256);
+        assert_eq!(scan.complete_len, frame.len() * 256);
+        assert!(scan.limit_reached);
+
+        let scan =
+            Frame::scan_complete_frames_bounded(&bytes, usize::MAX, frame.len() * 2).unwrap();
+        assert_eq!(scan.command_count, 2);
+        assert_eq!(scan.complete_len, frame.len() * 2);
+        assert!(scan.limit_reached);
+    }
+
+    #[test]
     fn parse_multiple_frames_ignores_pipe_separator_before_binary_echo() {
         let bytes = b"*1\r\n$4\r\nPING\r\n\r\n*2\r\n$4\r\nECHO\r\n$4\r\n\xff\x00\x80x\r\n";
         let frames = Frame::parse_multiple_frames(bytes).unwrap();

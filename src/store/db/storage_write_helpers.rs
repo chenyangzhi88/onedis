@@ -202,7 +202,7 @@ impl Db {
         let Some(header) = decode_meta_header(raw) else {
             return;
         };
-        if header.type_tag == TYPE_STRING || header.version == 0 {
+        if header.type_tag == TYPE_STRING {
             return;
         }
         self.enqueue_fulltext_delete_for_string_overwrite(batch, key, raw);
@@ -220,7 +220,7 @@ impl Db {
         let Some(header) = decode_meta_header(raw) else {
             return;
         };
-        if header.type_tag == TYPE_STRING || header.version == 0 {
+        if header.type_tag == TYPE_STRING {
             return;
         }
         if let Ok(key) = std::str::from_utf8(key) {
@@ -245,6 +245,15 @@ impl Db {
                 .expect("write batch append invariant violated");
             }
             Structure::Hash(hash) => {
+                let packed = hash
+                    .iter()
+                    .map(|(field, value)| (field.clone(), value.as_bytes().to_vec()))
+                    .collect::<PackedHashFields>();
+                if let Some(raw) = encode_packed_hash(expire_ms, &packed) {
+                    (batch.put(&main_key(db_index, key), &raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(db_index, key),
                     &encode_hash_meta(expire_ms, version),

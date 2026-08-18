@@ -1,7 +1,47 @@
 use super::*;
+const FULLTEXT_MUTATION_BATCH_MAGIC: &[u8; 8] = b"\0ODFTB01";
+
 pub(super) fn encode_record<T: Encode>(value: &T) -> Result<Vec<u8>, Error> {
     bincode::encode_to_vec(value, bincode::config::standard())
         .map_err(|_| Error::msg("ERR failed to encode fulltext record"))
+}
+
+pub(super) fn encode_fulltext_mutation_batch(
+    incarnation: u64,
+    kind: FullTextMutationKind,
+    keys: &[&str],
+) -> Result<Vec<u8>, Error> {
+    let record = FullTextMutationBatchRecord {
+        incarnation,
+        kind,
+        keys: keys.iter().map(|key| (*key).to_string()).collect(),
+    };
+    let encoded = encode_record(&record)?;
+    let mut raw = Vec::with_capacity(FULLTEXT_MUTATION_BATCH_MAGIC.len() + encoded.len());
+    raw.extend_from_slice(FULLTEXT_MUTATION_BATCH_MAGIC);
+    raw.extend_from_slice(&encoded);
+    Ok(raw)
+}
+
+pub(super) fn decode_fulltext_mutation_records(
+    raw: &[u8],
+) -> Result<Vec<FullTextMutationRecord>, Error> {
+    let Some(encoded) = raw.strip_prefix(FULLTEXT_MUTATION_BATCH_MAGIC) else {
+        return decode_record(raw).map(|record| vec![record]);
+    };
+    let batch = decode_record::<FullTextMutationBatchRecord>(encoded)?;
+    if batch.keys.is_empty() {
+        return Err(Error::msg("ERR empty fulltext mutation batch"));
+    }
+    Ok(batch
+        .keys
+        .into_iter()
+        .map(|key| FullTextMutationRecord {
+            incarnation: batch.incarnation,
+            kind: batch.kind,
+            key,
+        })
+        .collect())
 }
 
 pub(super) fn decode_record<T: Decode<()>>(raw: &[u8]) -> Result<T, Error> {
@@ -231,6 +271,22 @@ pub(super) fn fulltext_outbox_seq_from_key(db_index: u16, index: &str, key: &[u8
     Some(u64::from_be_bytes(rest.try_into().ok()?))
 }
 
+pub(super) fn fulltext_index_and_seq_from_outbox_key(
+    db_index: u16,
+    key: &[u8],
+) -> Option<(String, u64)> {
+    let mut prefix = internal_prefix(db_index);
+    prefix.extend_from_slice(&FULLTEXT_OUTBOX_NAMESPACE);
+    let rest = key.strip_prefix(prefix.as_slice())?;
+    let split = rest.iter().position(|byte| *byte == 0x00)?;
+    if split == 0 || rest.len() != split.saturating_add(1 + std::mem::size_of::<u64>()) {
+        return None;
+    }
+    let index = String::from_utf8(rest[..split].to_vec()).ok()?;
+    let seq = u64::from_be_bytes(rest[split + 1..].try_into().ok()?);
+    Some((index, seq))
+}
+
 pub(super) fn current_fulltext_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -279,6 +335,7 @@ pub(super) fn fulltext_default_config() -> BTreeMap<&'static str, &'static str> 
         ("CLUSTER_SHARD_ID", "0"),
         ("CLUSTER_SHARDS", "1"),
         ("CLUSTER_VECTOR_MERGE", "local"),
+        ("CHECKPOINT_INTERVAL_MS", "1000"),
         ("CONSISTENCY", "CONSISTENT"),
         ("DEFAULT_DIALECT", "2"),
         ("FRISOINI", ""),
@@ -295,14 +352,14 @@ pub(super) fn fulltext_default_config() -> BTreeMap<&'static str, &'static str> 
         ("MERGE_DELETE_RATIO", "0.25"),
         ("MERGE_MAX_DOCS", "10000000"),
         ("MERGE_MIN_LAYER_DOCS", "10000"),
-        ("MERGE_MIN_SEGMENTS", "8"),
+        ("MERGE_MIN_SEGMENTS", "4"),
         ("MINPREFIX", "2"),
         ("NOGC", "false"),
         ("ON_TIMEOUT", "RETURN"),
         ("OUTBOX_COMPACT_THRESHOLD", "1024"),
         ("REFRESH_INTERVAL_MS", "100"),
         ("REFRESH_MAX_BYTES", "4194304"),
-        ("REFRESH_MAX_DOCS", "1024"),
+        ("REFRESH_MAX_DOCS", "8192"),
         ("REFRESH_TIMEOUT_MS", "500"),
         ("REPAIR_THROTTLE_MS", "1000"),
         ("TIMEOUT", "500"),
@@ -375,6 +432,7 @@ pub(super) fn validate_fulltext_config_value(name: &str, value: &str) -> Result<
         | "MAXEXPANSIONS"
         | "MAXPREFIXEXPANSIONS"
         | "CLUSTER_SHARD_ID"
+        | "CHECKPOINT_INTERVAL_MS"
         | "REFRESH_INTERVAL_MS"
         | "REFRESH_TIMEOUT_MS"
         | "OUTBOX_COMPACT_THRESHOLD"

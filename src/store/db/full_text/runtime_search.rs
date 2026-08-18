@@ -36,9 +36,17 @@ impl FullTextRuntime {
         deadline: FullTextSearchDeadline,
     ) -> Result<FullTextSearchHits, Error> {
         let searcher = self.reader.searcher();
+        let requires_scoring = fulltext_ast_requires_scoring(ast);
         let query = self.plan_query(ast, options.in_fields.as_deref(), options)?;
         let query = self.apply_search_filters(query, options)?;
-        self.search_query(query, &searcher, fetch_limit, deadline)
+        self.search_query_window(
+            query,
+            &searcher,
+            fetch_limit.unwrap_or(usize::MAX),
+            0,
+            deadline,
+            requires_scoring,
+        )
     }
 
     pub(super) fn search_ast_page_hits(
@@ -50,9 +58,17 @@ impl FullTextRuntime {
         deadline: FullTextSearchDeadline,
     ) -> Result<FullTextSearchHits, Error> {
         let searcher = self.reader.searcher();
+        let requires_scoring = fulltext_ast_requires_scoring(ast);
         let query = self.plan_query(ast, options.in_fields.as_deref(), options)?;
         let query = self.apply_search_filters(query, options)?;
-        self.search_query_window(query, &searcher, fetch_limit, key_offset, deadline)
+        self.search_query_window(
+            query,
+            &searcher,
+            fetch_limit,
+            key_offset,
+            deadline,
+            requires_scoring,
+        )
     }
 
     pub(super) fn search_sorted_ast(
@@ -171,6 +187,7 @@ impl FullTextRuntime {
             fetch_limit.unwrap_or(usize::MAX),
             0,
             deadline,
+            true,
         )
     }
 
@@ -181,15 +198,26 @@ impl FullTextRuntime {
         fetch_limit: usize,
         key_offset: usize,
         deadline: FullTextSearchDeadline,
+        requires_scoring: bool,
     ) -> Result<FullTextSearchHits, Error> {
         let query = self.with_live_documents_query(query);
-        let result = searcher.search(
-            query.as_ref(),
-            &FullTextDeadlineCollector {
-                limit: fetch_limit,
-                deadline: deadline.at,
-            },
-        )?;
+        let result = if requires_scoring && fetch_limit > 0 {
+            searcher.search(
+                query.as_ref(),
+                &FullTextDeadlineCollector {
+                    limit: fetch_limit,
+                    deadline: deadline.at,
+                },
+            )?
+        } else {
+            searcher.search(
+                query.as_ref(),
+                &FullTextConstantScoreCollector {
+                    limit: fetch_limit,
+                    deadline: deadline.at,
+                },
+            )?
+        };
         if result.timed_out && deadline.fail_on_timeout {
             return Err(Error::msg("Timeout limit was reached"));
         }
@@ -333,6 +361,34 @@ impl FullTextRuntime {
     }
 }
 
+fn fulltext_ast_requires_scoring(ast: &FullTextQueryAst) -> bool {
+    match ast {
+        FullTextQueryAst::All
+        | FullTextQueryAst::Numeric { .. }
+        | FullTextQueryAst::Geo { .. }
+        | FullTextQueryAst::GeoShape { .. }
+        | FullTextQueryAst::Missing { .. }
+        | FullTextQueryAst::Not(_) => false,
+        FullTextQueryAst::Tag { values, .. } => values.len() != 1,
+        FullTextQueryAst::Field { expr, .. } => fulltext_ast_requires_scoring(expr),
+        FullTextQueryAst::Attributed { expr, weight, .. } => {
+            weight.is_some() || fulltext_ast_requires_scoring(expr)
+        }
+        FullTextQueryAst::And(children) => children.iter().any(fulltext_ast_requires_scoring),
+        FullTextQueryAst::Or(children) => {
+            children.len() != 1 || children.iter().any(fulltext_ast_requires_scoring)
+        }
+        FullTextQueryAst::Optional(_)
+        | FullTextQueryAst::Text(_)
+        | FullTextQueryAst::Phrase(_)
+        | FullTextQueryAst::Prefix(_)
+        | FullTextQueryAst::Wildcard(_)
+        | FullTextQueryAst::Fuzzy(_)
+        | FullTextQueryAst::VectorKnn { .. }
+        | FullTextQueryAst::VectorRange { .. } => true,
+    }
+}
+
 fn fulltext_fast_key(
     searcher: &tantivy::Searcher,
     address: DocAddress,
@@ -387,95 +443,182 @@ pub(super) struct FullTextDeadlineCollector {
     pub(super) deadline: Instant,
 }
 
-pub(super) struct FullTextUnusedSegmentCollector;
+pub(super) struct FullTextConstantScoreCollector {
+    pub(super) limit: usize,
+    pub(super) deadline: Instant,
+}
 
-impl SegmentCollector for FullTextUnusedSegmentCollector {
+pub(super) struct FullTextConstantScoreSegmentCollector {
+    segment_ord: SegmentOrdinal,
+    limit: usize,
+    deadline: Instant,
+    total: usize,
+    top_docs: Vec<FullTextScoredDoc>,
+    timed_out: bool,
+    checked: usize,
+}
+
+impl SegmentCollector for FullTextConstantScoreSegmentCollector {
     type Fruit = FullTextCollectorFruit;
 
-    fn collect(&mut self, _doc: DocId, _score: Score) {}
+    fn collect(&mut self, doc: DocId, _score: Score) {
+        self.total = self.total.saturating_add(1);
+        if self.checked == 0 && Instant::now() >= self.deadline {
+            self.timed_out = true;
+        }
+        self.checked = (self.checked + 1) & 127;
+        if !self.timed_out && self.top_docs.len() < self.limit {
+            self.top_docs.push(FullTextScoredDoc {
+                score: 1.0,
+                address: DocAddress::new(self.segment_ord, doc),
+            });
+        }
+    }
+
+    fn collect_block(&mut self, docs: &[DocId]) {
+        self.total = self.total.saturating_add(docs.len());
+        if Instant::now() >= self.deadline {
+            self.timed_out = true;
+            return;
+        }
+        let remaining = self.limit.saturating_sub(self.top_docs.len());
+        self.top_docs
+            .extend(docs.iter().take(remaining).map(|doc| FullTextScoredDoc {
+                score: 1.0,
+                address: DocAddress::new(self.segment_ord, *doc),
+            }));
+    }
 
     fn harvest(self) -> Self::Fruit {
         FullTextCollectorFruit {
-            total: 0,
-            top_docs: Vec::new(),
-            timed_out: false,
+            total: self.total,
+            top_docs: self.top_docs,
+            timed_out: self.timed_out || Instant::now() >= self.deadline,
+        }
+    }
+}
+
+pub(super) struct FullTextScoringSegmentCollector {
+    segment_ord: SegmentOrdinal,
+    limit: usize,
+    deadline: Instant,
+    total: usize,
+    heap: BinaryHeap<Reverse<FullTextScoredDoc>>,
+    timed_out: bool,
+    checked: usize,
+}
+
+impl SegmentCollector for FullTextScoringSegmentCollector {
+    type Fruit = FullTextCollectorFruit;
+
+    fn collect(&mut self, doc: DocId, score: Score) {
+        self.total = self.total.saturating_add(1);
+        if self.checked == 0 && Instant::now() >= self.deadline {
+            self.timed_out = true;
+        }
+        self.checked = (self.checked + 1) & 127;
+        if self.limit == 0 || self.timed_out {
+            return;
+        }
+        let scored = FullTextScoredDoc {
+            score,
+            address: DocAddress::new(self.segment_ord, doc),
+        };
+        if self.heap.len() < self.limit {
+            self.heap.push(Reverse(scored));
+        } else if self.heap.peek().is_some_and(|worst| scored > worst.0) {
+            self.heap.pop();
+            self.heap.push(Reverse(scored));
+        }
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        FullTextCollectorFruit {
+            total: self.total,
+            top_docs: self.heap.into_iter().map(|entry| entry.0).collect(),
+            timed_out: self.timed_out || Instant::now() >= self.deadline,
         }
     }
 }
 
 impl Collector for FullTextDeadlineCollector {
     type Fruit = FullTextCollectorFruit;
-    type Child = FullTextUnusedSegmentCollector;
+    type Child = FullTextScoringSegmentCollector;
 
     fn for_segment(
         &self,
-        _segment_local_id: SegmentOrdinal,
+        segment_local_id: SegmentOrdinal,
         _segment: &SegmentReader,
     ) -> tantivy::Result<Self::Child> {
-        Ok(FullTextUnusedSegmentCollector)
+        Ok(FullTextScoringSegmentCollector {
+            segment_ord: segment_local_id,
+            limit: self.limit,
+            deadline: self.deadline,
+            total: 0,
+            heap: BinaryHeap::new(),
+            timed_out: false,
+            checked: 0,
+        })
     }
 
     fn requires_scoring(&self) -> bool {
         true
     }
 
-    fn collect_segment(
+    fn merge_fruits(
         &self,
-        weight: &dyn Weight,
-        segment_ord: u32,
-        reader: &SegmentReader,
+        segment_fruits: Vec<FullTextCollectorFruit>,
     ) -> tantivy::Result<FullTextCollectorFruit> {
-        if Instant::now() >= self.deadline {
-            return Ok(FullTextCollectorFruit {
-                total: 0,
-                top_docs: Vec::new(),
-                timed_out: true,
-            });
-        }
-        // Counting through Weight::count avoids score computation. The second pass
-        // deliberately uses for_each_pruning so Tantivy can select its Block-WAND
-        // implementation for eligible Boolean/term queries.
-        let total = weight.count(reader)? as usize;
+        let mut total = 0usize;
+        let mut timed_out = false;
         let mut heap = BinaryHeap::new();
-        let mut timed_out = Instant::now() >= self.deadline;
-        let mut checked = 0usize;
-        if self.limit > 0 && !timed_out {
-            weight.for_each_pruning(Score::MIN, reader, &mut |doc, score| {
-                if checked == 0 && Instant::now() >= self.deadline {
-                    timed_out = true;
-                    return Score::MAX;
+        for fruit in segment_fruits {
+            total = total.saturating_add(fruit.total);
+            timed_out |= fruit.timed_out;
+            for scored in fruit.top_docs {
+                if self.limit == 0 {
+                    continue;
                 }
-                checked = (checked + 1) & 127;
-                if reader
-                    .alive_bitset()
-                    .is_none_or(|alive| alive.is_alive(doc))
-                {
-                    let scored = FullTextScoredDoc {
-                        score,
-                        address: DocAddress::new(segment_ord, doc),
-                    };
-                    if heap.len() < self.limit {
-                        heap.push(Reverse(scored));
-                    } else if heap.peek().is_some_and(|worst| scored > worst.0) {
-                        heap.pop();
-                        heap.push(Reverse(scored));
-                    }
+                if heap.len() < self.limit {
+                    heap.push(Reverse(scored));
+                } else if heap.peek().is_some_and(|worst| scored > worst.0) {
+                    heap.pop();
+                    heap.push(Reverse(scored));
                 }
-                if timed_out {
-                    Score::MAX
-                } else if heap.len() < self.limit {
-                    Score::MIN
-                } else {
-                    heap.peek().map(|worst| worst.0.score).unwrap_or(Score::MIN)
-                }
-            })?;
-            timed_out |= Instant::now() >= self.deadline;
+            }
         }
+        let mut top_docs = heap.into_iter().map(|entry| entry.0).collect::<Vec<_>>();
+        top_docs.sort_by(|left, right| right.cmp(left));
         Ok(FullTextCollectorFruit {
             total,
-            top_docs: heap.into_iter().map(|entry| entry.0).collect(),
+            top_docs,
             timed_out,
         })
+    }
+}
+
+impl Collector for FullTextConstantScoreCollector {
+    type Fruit = FullTextCollectorFruit;
+    type Child = FullTextConstantScoreSegmentCollector;
+
+    fn for_segment(
+        &self,
+        segment_local_id: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(FullTextConstantScoreSegmentCollector {
+            segment_ord: segment_local_id,
+            limit: self.limit,
+            deadline: self.deadline,
+            total: 0,
+            top_docs: Vec::with_capacity(self.limit.min(segment.max_doc() as usize)),
+            timed_out: false,
+            checked: 0,
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        false
     }
 
     fn merge_fruits(

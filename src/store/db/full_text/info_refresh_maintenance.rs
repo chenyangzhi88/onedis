@@ -14,7 +14,7 @@ impl Db {
         self.fulltext_maintenance_tick_mode(true)
     }
 
-    fn fulltext_maintenance_tick_mode(&self, force_refresh: bool) -> Result<(), Error> {
+    pub(super) fn fulltext_maintenance_tick_mode(&self, force_refresh: bool) -> Result<(), Error> {
         let snapshots = self.read_all_fulltext_metas()?;
         let mut first_error = None;
         for (index, snapshot) in snapshots {

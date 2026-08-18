@@ -146,10 +146,10 @@ impl Db {
             loop {
                 let (keys, has_more) =
                     self.fulltext_source_keys_page(&meta, cursor.as_deref(), 256)?;
-                for key in keys {
-                    cursor = Some(key.clone());
-                    self.delete_key(&key);
+                if let Some(last) = keys.last() {
+                    cursor = Some(last.clone());
                 }
+                self.delete_keys_internal_batch(&keys)?;
                 if !has_more {
                     break;
                 }

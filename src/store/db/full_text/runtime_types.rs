@@ -6,6 +6,13 @@ pub(super) struct FullTextMutationRecord {
     pub(super) key: String,
 }
 
+#[derive(Clone, Debug, Encode, Decode)]
+pub(super) struct FullTextMutationBatchRecord {
+    pub(super) incarnation: u64,
+    pub(super) kind: FullTextMutationKind,
+    pub(super) keys: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct FullTextRuntimeKey {
     pub(super) db_index: u16,
@@ -47,6 +54,7 @@ pub(super) struct FullTextRuntime {
     pub(super) has_expiring_documents: bool,
     pub(super) expansion_terms: Mutex<HashMap<String, Arc<FullTextExpansionCacheEntry>>>,
     pub(super) last_refresh_at: Instant,
+    pub(super) last_checkpoint_at: Instant,
 }
 
 pub(super) struct FullTextPreparedDocument {

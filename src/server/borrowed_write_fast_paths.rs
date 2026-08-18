@@ -325,65 +325,43 @@ impl Handler {
         &self,
         commands: Vec<BorrowedHsetCommand<'a>>,
     ) -> Vec<u8> {
-        const MAX_HSET_COMMANDS_PER_WRITE: usize = 256;
+        const MAX_HSET_MUTATIONS_PER_WRITE: usize = 256;
 
         let db = self.session.get_db().clone();
         let mut out = Vec::with_capacity(commands.len() * 4);
-        let mut index = 0;
-        while index < commands.len() {
-            let (key_bytes, command_fields) = &commands[index];
+        let mut decoded = Vec::with_capacity(commands.len());
+        let mut positions = Vec::with_capacity(commands.len());
+        for (key_bytes, command_fields) in &commands {
             let Ok(key) = std::str::from_utf8(key_bytes) else {
-                append_error(&mut out, "ERR invalid UTF-8 key");
-                index += 1;
+                positions.push(Err("ERR invalid UTF-8 key"));
                 continue;
             };
-            if command_fields
+            let Some(fields) = command_fields
                 .iter()
-                .any(|(field, _)| std::str::from_utf8(field).is_err())
-            {
-                append_error(&mut out, "ERR invalid UTF-8 hash field");
-                index += 1;
+                .map(|(field, value)| {
+                    std::str::from_utf8(field)
+                        .ok()
+                        .map(|field| (field, *value))
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                positions.push(Err("ERR invalid UTF-8 hash field"));
                 continue;
-            }
-            let mut fields = Vec::new();
-            let mut field_count_by_command = Vec::new();
-            while index < commands.len() && commands[index].0 == *key_bytes {
-                let candidate_fields = &commands[index].1;
-                if !fields.is_empty()
-                    && fields.len() + candidate_fields.len() > MAX_HSET_COMMANDS_PER_WRITE
-                {
-                    break;
-                }
-                let Some(decoded_fields) = candidate_fields
-                    .iter()
-                    .map(|(field, value)| {
-                        std::str::from_utf8(field)
-                            .ok()
-                            .map(|field| (field, *value))
-                    })
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    break;
-                };
-                field_count_by_command.push(decoded_fields.len());
-                fields.extend(decoded_fields);
-                index += 1;
-            }
-
-            match db.hash_set_ordered_bytes_async(key, &fields).await {
-                Ok(added) => {
-                    let mut added = added.into_iter();
-                    for field_count in field_count_by_command {
-                        let count = added.by_ref().take(field_count).filter(|added| *added).count();
-                        append_integer(&mut out, count as i64);
-                    }
-                }
-                Err(error) => {
-                    let error = error.to_string();
-                    for _ in field_count_by_command {
-                        append_error(&mut out, &error);
-                    }
-                }
+            };
+            positions.push(Ok(decoded.len()));
+            decoded.push(crate::store::db::HashSetBatchMutation { key, fields });
+        }
+        let mut replies = Vec::with_capacity(decoded.len());
+        for chunk in decoded.chunks(MAX_HSET_MUTATIONS_PER_WRITE) {
+            replies.extend(db.apply_hash_set_batch_mutations_async(chunk).await);
+        }
+        for position in positions {
+            match position {
+                Err(error) => append_error(&mut out, error),
+                Ok(position) => match &replies[position] {
+                    Ok(added) => append_integer(&mut out, *added as i64),
+                    Err(error) => append_error(&mut out, &error.to_string()),
+                },
             }
         }
         out

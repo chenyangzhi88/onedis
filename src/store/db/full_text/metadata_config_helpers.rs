@@ -539,6 +539,10 @@ impl Db {
         self.fulltext_config_u64("REFRESH_TIMEOUT_MS", DEFAULT_REFRESH_TIMEOUT_MS)
     }
 
+    pub(super) fn fulltext_checkpoint_interval_ms(&self) -> Result<u64, Error> {
+        self.fulltext_config_u64("CHECKPOINT_INTERVAL_MS", DEFAULT_CHECKPOINT_INTERVAL_MS)
+    }
+
     pub(super) fn fulltext_search_refresh_timeout_ms(
         &self,
         search_timeout_ms: u64,

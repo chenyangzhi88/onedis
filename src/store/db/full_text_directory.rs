@@ -5,7 +5,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -73,6 +73,7 @@ struct KvChunkFileHandle {
     len: usize,
     _lease: Arc<KvChunkLease>,
     block_cache: Arc<Mutex<KvBlockCache>>,
+    chunks: Vec<OnceLock<Arc<[u8]>>>,
 }
 
 struct HotFileHandle {
@@ -111,11 +112,11 @@ impl KvBlockCache {
         }
     }
 
-    fn get(&mut self, key: &[u8]) -> Option<Arc<[u8]>> {
-        let value = self.entries.get(key)?.clone();
-        self.order.retain(|existing| existing.as_slice() != key);
-        self.order.push_back(key.to_vec());
-        Some(value)
+    fn get(&self, key: &[u8]) -> Option<Arc<[u8]>> {
+        // Immutable Tantivy chunks do not need an O(cache entries) LRU touch
+        // on every postings read. Insertion order is sufficient for bounded
+        // eviction and keeps the read side constant-time.
+        self.entries.get(key).cloned()
     }
 
     fn insert(&mut self, key: Vec<u8>, value: Arc<[u8]>) {
@@ -555,11 +556,28 @@ impl FileHandle for KvChunkFileHandle {
                 key
             })
             .collect::<Vec<_>>();
-        let mut chunks = if let Ok(mut cache) = self.block_cache.lock() {
-            keys.iter().map(|key| cache.get(key)).collect::<Vec<_>>()
-        } else {
-            vec![None; keys.len()]
-        };
+        let mut chunks = (first_chunk..=last_chunk)
+            .map(|chunk_index| {
+                self.chunks
+                    .get(chunk_index)
+                    .and_then(OnceLock::get)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if chunks.iter().any(Option::is_none)
+            && let Ok(cache) = self.block_cache.lock()
+        {
+            for (offset, key) in keys.iter().enumerate() {
+                if chunks[offset].is_some() {
+                    continue;
+                }
+                if let Some(chunk) = cache.get(key) {
+                    let chunk_index = first_chunk + offset;
+                    let _ = self.chunks[chunk_index].set(chunk.clone());
+                    chunks[offset] = Some(chunk);
+                }
+            }
+        }
         let missing = chunks
             .iter()
             .enumerate()
@@ -580,8 +598,25 @@ impl FileHandle for KvChunkFileHandle {
                 if let Some(cache) = cache.as_mut() {
                     cache.insert(key, chunk.clone());
                 }
+                let chunk_index = first_chunk + chunk_offset;
+                let _ = self.chunks[chunk_index].set(chunk.clone());
                 chunks[chunk_offset] = Some(chunk);
             }
+        }
+        if chunks.len() == 1 {
+            let chunk = chunks.pop().flatten().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "missing fulltext file chunk")
+            })?;
+            let chunk_start = first_chunk * FULLTEXT_FILE_CHUNK_BYTES;
+            let start = range.start.saturating_sub(chunk_start).min(chunk.len());
+            let end = range.end.saturating_sub(chunk_start).min(chunk.len());
+            if start > end || end.saturating_sub(start) != range.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "short fulltext file chunk read",
+                ));
+            }
+            return Ok(OwnedBytes::new(chunk).slice(start..end));
         }
         let mut bytes = Vec::with_capacity(range.len());
         for (chunk_offset, chunk) in chunks.into_iter().enumerate() {
@@ -677,6 +712,9 @@ impl Directory for KvTantivyDirectory {
             len,
             _lease: lease,
             block_cache: self.block_cache.clone(),
+            chunks: (0..len.div_ceil(FULLTEXT_FILE_CHUNK_BYTES))
+                .map(|_| OnceLock::new())
+                .collect(),
         }))
     }
 

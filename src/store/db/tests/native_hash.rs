@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::db::{HashSetBatchMutation, SMALL_HASH_MAX_FIELDS, decode_hash_meta_checked};
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -59,6 +60,7 @@ fn hash_native_ops_use_field_level_storage() {
 fn stale_hash_field_expiry_cleanup_cannot_delete_new_value() {
     let db = test_db();
     db.hash_set("hash", "field", "old").unwrap();
+    db.promote_packed_hash("hash").unwrap();
     let (_, version) = db.hash_expire_ms("hash").unwrap().unwrap();
     let expire_key = hash_field_expire_key(db.db_index, "hash", version, "field");
     let field_key = hash_field_key(db.db_index, "hash", version, "field");
@@ -260,6 +262,85 @@ async fn ordered_hash_set_batch_reports_each_command_and_keeps_last_value() {
 }
 
 #[tokio::test]
+async fn cross_key_hash_set_batch_preserves_pipeline_order_and_isolates_errors() {
+    let db = test_db();
+    db.insert(
+        "plain".to_string(),
+        Structure::String("not-a-hash".to_string()),
+    );
+
+    let mutations = [
+        HashSetBatchMutation {
+            key: "user:a",
+            fields: vec![
+                ("name", b"alice".as_slice()),
+                ("name", b"alicia".as_slice()),
+            ],
+        },
+        HashSetBatchMutation {
+            key: "user:b",
+            fields: vec![("name", b"bob".as_slice())],
+        },
+        HashSetBatchMutation {
+            key: "user:a",
+            fields: vec![("name", b"ally".as_slice()), ("city", b"paris".as_slice())],
+        },
+        HashSetBatchMutation {
+            key: "plain",
+            fields: vec![("field", b"value".as_slice())],
+        },
+    ];
+
+    let replies = db.apply_hash_set_batch_mutations_async(&mutations).await;
+    assert_eq!(replies[0].as_ref().unwrap(), &1);
+    assert_eq!(replies[1].as_ref().unwrap(), &1);
+    assert_eq!(replies[2].as_ref().unwrap(), &1);
+    assert!(replies[3].is_err());
+    assert_eq!(
+        db.hash_get_async("user:a", "name").await.unwrap(),
+        Some("ally".to_string())
+    );
+    assert_eq!(
+        db.hash_get_async("user:a", "city").await.unwrap(),
+        Some("paris".to_string())
+    );
+    assert_eq!(
+        db.hash_get_async("user:b", "name").await.unwrap(),
+        Some("bob".to_string())
+    );
+}
+
+#[tokio::test]
+async fn large_distinct_hash_set_batch_preserves_replies() {
+    let db = test_db();
+    db.insert(
+        "bulk:wrong-type".to_string(),
+        Structure::String("value".to_string()),
+    );
+    let mut keys = (0..31)
+        .map(|index| format!("bulk:{index}"))
+        .collect::<Vec<_>>();
+    keys.push("bulk:wrong-type".to_string());
+    let mutations = keys
+        .iter()
+        .map(|key| HashSetBatchMutation {
+            key,
+            fields: vec![("field", b"value".as_slice())],
+        })
+        .collect::<Vec<_>>();
+
+    let replies = db.apply_hash_set_batch_mutations_async(&mutations).await;
+    assert!(replies[..31].iter().all(|reply| matches!(reply, Ok(1))));
+    assert!(replies[31].is_err());
+    for key in &keys[..31] {
+        assert_eq!(
+            db.hash_get_async(key, "field").await.unwrap(),
+            Some("value".to_string())
+        );
+    }
+}
+
+#[tokio::test]
 async fn hash_set_same_persistent_value_is_a_storage_noop() {
     let db = test_db();
 
@@ -279,6 +360,113 @@ async fn hash_set_same_persistent_value_is_a_storage_noop() {
     assert_eq!(
         db.hash_get_bytes_async("user:noop", "name").await.unwrap(),
         Some(b"alice".to_vec())
+    );
+}
+
+#[tokio::test]
+async fn small_hash_pipeline_uses_one_main_record_and_promotes_at_field_limit() {
+    let db = test_db();
+    let first = (0..SMALL_HASH_MAX_FIELDS)
+        .map(|index| (format!("f{index}"), vec![b'x']))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        db.hash_set_many_bytes_async("compact", &first)
+            .await
+            .unwrap(),
+        SMALL_HASH_MAX_FIELDS
+    );
+    let raw = db.store.get_raw(&db.mk("compact")).unwrap();
+    let meta = decode_hash_meta_checked(&raw).unwrap();
+    assert!(meta.packed);
+    assert_eq!(meta.version, 0);
+    assert!(
+        db.store
+            .scan_prefix_raw(&hash_field_prefix(db.db_index, "compact", 0))
+            .is_empty()
+    );
+
+    assert!(
+        db.hash_set_bytes_async("compact", "overflow", b"y")
+            .await
+            .unwrap()
+    );
+    let raw = db.store.get_raw(&db.mk("compact")).unwrap();
+    let meta = decode_hash_meta_checked(&raw).unwrap();
+    assert!(!meta.packed);
+    assert_ne!(meta.version, 0);
+    assert_eq!(
+        db.hash_len_async("compact").await.unwrap(),
+        SMALL_HASH_MAX_FIELDS + 1
+    );
+}
+
+#[tokio::test]
+async fn field_ttl_promotes_small_hash_before_writing_expiry_records() {
+    let db = test_db();
+    db.hash_set_bytes_async("ttl-compact", "field", b"value")
+        .await
+        .unwrap();
+    let expires_at = now_ms().saturating_add(60_000);
+
+    assert_eq!(
+        db.hash_expire_fields_at_ms_async(
+            "ttl-compact",
+            expires_at,
+            &["field".to_string()],
+            ExpireCondition::Always,
+        )
+        .await
+        .unwrap(),
+        vec![1]
+    );
+    let raw = db.store.get_raw(&db.mk("ttl-compact")).unwrap();
+    let meta = decode_hash_meta_checked(&raw).unwrap();
+    assert!(!meta.packed);
+    assert!(meta.may_have_field_ttl);
+    assert_ne!(meta.version, 0);
+    assert!(db.store.contains_key(&hash_field_expire_key(
+        db.db_index,
+        "ttl-compact",
+        meta.version,
+        "field",
+    )));
+}
+
+#[tokio::test]
+async fn numeric_and_conditional_updates_keep_small_hash_inline() {
+    let db = test_db();
+    db.hash_set_bytes_async("compact-updates", "count", b"1")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.hash_increment_by_async("compact-updates", "count", 2)
+            .await
+            .unwrap(),
+        3
+    );
+    assert!(
+        db.hash_set_nx_bytes_async("compact-updates", "new", b"value")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.hash_set_nx_bytes_async("compact-updates", "new", b"ignored")
+            .await
+            .unwrap()
+    );
+    let raw = db.store.get_raw(&db.mk("compact-updates")).unwrap();
+    let meta = decode_hash_meta_checked(&raw).unwrap();
+    assert!(meta.packed);
+    assert_eq!(meta.version, 0);
+    assert_eq!(
+        db.hash_get("compact-updates", "count").unwrap().as_deref(),
+        Some("3")
+    );
+    assert_eq!(
+        db.hash_get("compact-updates", "new").unwrap().as_deref(),
+        Some("value")
     );
 }
 

@@ -9,6 +9,7 @@ pub type HashRandomFieldsBytes = Vec<HashRandomFieldBytes>;
 enum HashMultiGetPlan {
     Missing(usize),
     Error(String),
+    Packed(Vec<Option<Vec<u8>>>),
     Fields {
         lookup: usize,
         expire_lookup: usize,
@@ -42,6 +43,9 @@ impl Db {
                 Some(raw) => match decode_hash_meta_checked(&raw) {
                     Err(error) => Err(error.to_string()),
                     Ok(meta) if meta.expire_ms > 0 && now >= meta.expire_ms => Ok(0),
+                    Ok(meta) if meta.packed => decode_packed_hash(&raw)
+                        .map(|fields| fields.len())
+                        .ok_or_else(|| "Failed to decode packed hash".to_string()),
                     Ok(meta) if meta.may_have_field_ttl => {
                         Ok(self.hash_live_entries_for_meta_async(key, meta).await.len())
                     }
@@ -105,6 +109,14 @@ impl Db {
         let Some(meta) = self.hash_meta_async(key).await? else {
             return Ok(false);
         };
+        if meta.packed {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .and_then(|raw| decode_packed_hash(&raw))
+                .is_some_and(|fields| fields.contains_key(field)));
+        }
         if meta.may_have_field_ttl
             && !self
                 .hash_field_is_live_async(key, meta.version, field)
@@ -133,6 +145,14 @@ impl Db {
         let Some(meta) = self.hash_meta_async(key).await? else {
             return Ok(0);
         };
+        if meta.packed {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .and_then(|raw| decode_packed_hash(&raw))
+                .map_or(0, |fields| fields.len()));
+        }
         if meta.may_have_field_ttl {
             return Ok(self.hash_live_entries_for_meta_async(key, meta).await.len());
         }
@@ -216,6 +236,18 @@ impl Db {
         let Some(meta) = self.hash_meta_async(key).await? else {
             return Ok(vec![None; fields.len()]);
         };
+        if meta.packed {
+            let packed = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .and_then(|raw| decode_packed_hash(&raw))
+                .unwrap_or_default();
+            return Ok(fields
+                .iter()
+                .map(|field| packed.get(field).cloned())
+                .collect());
+        }
         let field_keys = fields
             .iter()
             .map(|field| hash_field_key(self.db_index, key, meta.version, field))
@@ -282,6 +314,20 @@ impl Db {
                 ));
                 continue;
             };
+            if meta.packed {
+                match decode_packed_hash(&raw) {
+                    Some(packed) => plans.push(HashMultiGetPlan::Packed(
+                        fields
+                            .iter()
+                            .map(|field| packed.get(field).cloned())
+                            .collect(),
+                    )),
+                    None => plans.push(HashMultiGetPlan::Error(
+                        "Failed to decode packed hash".to_string(),
+                    )),
+                }
+                continue;
+            }
             let lookup = field_keys.len();
             field_keys.extend(
                 fields
@@ -311,6 +357,7 @@ impl Db {
             .map(|plan| match plan {
                 HashMultiGetPlan::Missing(count) => Ok(vec![None; count]),
                 HashMultiGetPlan::Error(message) => Err(Error::msg(message)),
+                HashMultiGetPlan::Packed(values) => Ok(values),
                 HashMultiGetPlan::Fields {
                     lookup,
                     expire_lookup,
@@ -530,7 +577,7 @@ impl Db {
             let Some(meta) = self.hash_meta_async(key).await? else {
                 return Ok(None);
             };
-            if !meta.may_have_field_ttl {
+            if !meta.may_have_field_ttl && !meta.packed {
                 let len = self.hash_len_async(key).await?;
                 if len == 0 {
                     return Ok(None);

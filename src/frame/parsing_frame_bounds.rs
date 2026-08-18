@@ -6,6 +6,13 @@ pub(crate) enum FrameScanResult {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub(crate) struct FrameBatchScan {
+    pub(crate) complete_len: usize,
+    pub(crate) command_count: usize,
+    pub(crate) limit_reached: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 enum FrameBoundary {
     Complete(usize),
     Incomplete,
@@ -240,6 +247,72 @@ impl Frame {
             FrameScanResult::Ready(position)
         } else {
             FrameScanResult::Incomplete
+        }
+    }
+
+    pub(crate) fn scan_complete_frames_bounded(
+        bytes: &[u8],
+        max_commands: usize,
+        max_bytes: usize,
+    ) -> Result<FrameBatchScan, FrameScanResult> {
+        let mut position = 0usize;
+        let mut command_count = 0usize;
+        while position < bytes.len() {
+            if bytes[position..].starts_with(b"\r\n") {
+                position += 2;
+                continue;
+            }
+            if command_count >= max_commands || (position >= max_bytes && command_count > 0) {
+                return Ok(FrameBatchScan {
+                    complete_len: position,
+                    command_count,
+                    limit_reached: true,
+                });
+            }
+            match frame_boundary(&bytes[position..], true) {
+                FrameBoundary::Complete(frame_end) => {
+                    if command_count > 0 && position.saturating_add(frame_end) > max_bytes {
+                        return Ok(FrameBatchScan {
+                            complete_len: position,
+                            command_count,
+                            limit_reached: true,
+                        });
+                    }
+                    position += frame_end;
+                    command_count += 1;
+                }
+                FrameBoundary::Incomplete => {
+                    return if command_count > 0 {
+                        Ok(FrameBatchScan {
+                            complete_len: position,
+                            command_count,
+                            limit_reached: false,
+                        })
+                    } else {
+                        Err(FrameScanResult::Incomplete)
+                    };
+                }
+                FrameBoundary::Invalid(message) => {
+                    return if command_count > 0 {
+                        Ok(FrameBatchScan {
+                            complete_len: position,
+                            command_count,
+                            limit_reached: false,
+                        })
+                    } else {
+                        Err(FrameScanResult::Invalid(message))
+                    };
+                }
+            }
+        }
+        if command_count > 0 {
+            Ok(FrameBatchScan {
+                complete_len: position,
+                command_count,
+                limit_reached: command_count >= max_commands || position >= max_bytes,
+            })
+        } else {
+            Err(FrameScanResult::Incomplete)
         }
     }
 }

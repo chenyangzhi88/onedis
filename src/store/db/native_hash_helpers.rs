@@ -49,6 +49,19 @@ impl Db {
         key: &str,
         version: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw(&self.mk(key))
+                .and_then(|raw| decode_packed_hash(&raw))
+                .map(|fields| {
+                    fields
+                        .into_iter()
+                        .map(|(field, value)| (field.into_bytes(), value))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
         let prefix = hash_field_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw(&prefix)
@@ -122,6 +135,9 @@ impl Db {
         version: u64,
         field: &str,
     ) -> bool {
+        if version == 0 {
+            return true;
+        }
         let expire_key = hash_field_expire_key(self.db_index, key, version, field);
         let field_key = hash_field_key(self.db_index, key, version, field);
         for _ in 0..64 {
@@ -161,6 +177,9 @@ impl Db {
         version: u64,
         field: &str,
     ) -> bool {
+        if version == 0 {
+            return true;
+        }
         let expire_key = hash_field_expire_key(self.db_index, key, version, field);
         let field_key = hash_field_key(self.db_index, key, version, field);
         for _ in 0..64 {
@@ -203,6 +222,13 @@ impl Db {
         version: u64,
         field: &str,
     ) -> Option<Vec<u8>> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw(&self.mk(key))
+                .and_then(|raw| decode_packed_hash(&raw))
+                .and_then(|fields| fields.get(field).cloned());
+        }
         if !self.hash_field_is_live(key, version, field) {
             return None;
         }
@@ -215,6 +241,20 @@ impl Db {
         key: &str,
         version: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .and_then(|raw| decode_packed_hash(&raw))
+                .map(|fields| {
+                    fields
+                        .into_iter()
+                        .map(|(field, value)| (field.into_bytes(), value))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
         let prefix = hash_field_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw_async(&prefix)
@@ -226,5 +266,73 @@ impl Db {
                     .map(|field| (field.to_vec(), value))
             })
             .collect()
+    }
+
+    /// Promotes an inline small hash to the versioned field layout. The main-record CAS makes
+    /// promotion safe without requiring callers to hold a structural lock.
+    pub(in crate::store::db) fn promote_packed_hash(&self, key: &str) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        loop {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let meta = decode_hash_meta_checked(raw)?;
+            if !meta.packed {
+                return Ok(());
+            }
+            let fields = decode_packed_hash(raw)
+                .ok_or_else(|| Error::msg("Failed to decode packed hash"))?;
+            let version = self.next_version();
+            let mut batch = WriteBatch::new();
+            (batch.put(&key_bytes, &encode_hash_meta(meta.expire_ms, version)))
+                .expect("write batch append invariant violated");
+            for (field, value) in fields {
+                (batch.put(&hash_field_key(self.db_index, key, version, &field), &value))
+                    .expect("write batch append invariant violated");
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                return Ok(());
+            }
+        }
+    }
+
+    pub(in crate::store::db) async fn promote_packed_hash_async(
+        &self,
+        key: &str,
+    ) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        loop {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let meta = decode_hash_meta_checked(raw)?;
+            if !meta.packed {
+                return Ok(());
+            }
+            let fields = decode_packed_hash(raw)
+                .ok_or_else(|| Error::msg("Failed to decode packed hash"))?;
+            let version = self.next_version_async().await;
+            let mut batch = WriteBatch::new();
+            (batch.put(&key_bytes, &encode_hash_meta(meta.expire_ms, version)))
+                .expect("write batch append invariant violated");
+            for (field, value) in fields {
+                (batch.put(&hash_field_key(self.db_index, key, version, &field), &value))
+                    .expect("write batch append invariant violated");
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+        }
     }
 }

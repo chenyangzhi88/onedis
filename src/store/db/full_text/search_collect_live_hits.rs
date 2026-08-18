@@ -7,6 +7,7 @@ impl Db {
         options: &FullTextSearchOptions,
         mode: FullTextCollectMode,
     ) -> Result<FullTextCollectedHits, Error> {
+        let resolve_started = Instant::now();
         let index = self.resolve_fulltext_index(index)?;
         let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, &index);
         let schema_upgrade = {
@@ -47,6 +48,11 @@ impl Db {
         let consistent = self
             .fulltext_config_string("CONSISTENCY", "CONSISTENT")?
             .eq_ignore_ascii_case("CONSISTENT");
+        global_metrics().record_fulltext_search_stage(
+            FullTextSearchStage::Resolve,
+            elapsed_us(resolve_started),
+        );
+        let refresh_started = Instant::now();
         let caught_up = if consistent {
             let _lifecycle_guard = lifecycle_lock
                 .read()
@@ -62,13 +68,25 @@ impl Db {
         if !caught_up && fail_on_timeout {
             return Err(Error::msg("Timeout limit was reached"));
         }
+        global_metrics().record_fulltext_search_stage(
+            FullTextSearchStage::RefreshWait,
+            elapsed_us(refresh_started),
+        );
         // Refresh publication is serialized separately. Queries only retain a
         // lifecycle read lease, so no durable checkpoint or lifecycle write
         // lock is part of the search critical path.
         let _lifecycle_guard = lifecycle_lock
             .read()
             .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-        let meta = self.read_fulltext_meta_direct(&index)?;
+        let runtime = self
+            .fulltext_runtimes
+            .get(self.db_index, &index)
+            .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
+        let meta = runtime
+            .read()
+            .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+            .search_meta
+            .clone();
         if (options.highlight.is_some() || options.summarize.is_some())
             && (meta.index_options.no_hl || meta.index_options.no_offsets)
         {
@@ -87,7 +105,7 @@ impl Db {
                 && options.filters.is_empty()
                 && options.geo_filters.is_empty()
                 && !options.inorder
-                && matches!(options.scorer, FullTextScorer::Bm25Std)
+                && !matches!(options.scorer, FullTextScorer::DocScore)
                 && meta.index_options.score_field.is_none()
                 && !options.with_scores
                 && !options.explain_score
@@ -101,16 +119,21 @@ impl Db {
         let deadline = query_started
             .checked_add(Duration::from_millis(query_timeout_ms))
             .unwrap_or_else(|| query_started + Duration::from_secs(100 * 365 * 24 * 60 * 60));
-        let runtime = self
-            .fulltext_runtimes
-            .get(self.db_index, &index)
-            .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
+        let plan_started = Instant::now();
         let ast_query = if fulltext_query_has_vector_syntax(query) {
             query.to_string()
         } else {
             substitute_fulltext_params(query, &options.params)?
         };
-        let ast = FullTextQueryParser::new(&ast_query, options.dialect).parse()?;
+        let ast = self.fulltext_runtimes.query_ast(
+            self.db_index,
+            &index,
+            meta.incarnation,
+            options.dialect,
+            &ast_query,
+        )?;
+        global_metrics()
+            .record_fulltext_search_stage(FullTextSearchStage::ParsePlan, elapsed_us(plan_started));
         if contains_fulltext_vector_query(&ast) {
             let hits = self.fulltext_vector_hits(
                 &index,
@@ -131,10 +154,11 @@ impl Db {
             return Ok(FullTextCollectedHits {
                 total: hits.len(),
                 hits,
+                page_offset_applied: false,
             });
         }
         if contains_fulltext_geo_query(&ast) || !options.geo_filters.is_empty() {
-            let mut geo_children = vec![ast.clone()];
+            let mut geo_children = vec![ast.as_ref().clone()];
             geo_children.extend(
                 options
                     .geo_filters
@@ -157,18 +181,18 @@ impl Db {
                 .checked_div(std::mem::size_of::<FullTextSearchHit>().max(1))
                 .unwrap_or(0)
                 .max(result_cap);
-            let candidates = runtime
+            let runtime_guard = runtime
                 .read()
-                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
-                .search_ast(
-                    &geo_ast,
-                    options,
-                    candidate_limit.saturating_add(1),
-                    FullTextSearchDeadline {
-                        at: deadline,
-                        fail_on_timeout,
-                    },
-                )?;
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+            let candidates = runtime_guard.search_ast(
+                &geo_ast,
+                options,
+                candidate_limit.saturating_add(1),
+                FullTextSearchDeadline {
+                    at: deadline,
+                    fail_on_timeout,
+                },
+            )?;
             let candidate_bytes = candidates.iter().fold(0usize, |used, hit| {
                 used.saturating_add(
                     std::mem::size_of::<FullTextSearchHit>().saturating_add(hit.key.len()),
@@ -177,8 +201,33 @@ impl Db {
             if candidates.len() > candidate_limit || candidate_bytes > reader_budget {
                 return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
             }
+            let candidates = candidates
+                .into_iter()
+                .map(|candidate| {
+                    let exact = runtime_guard.fast_geo_matches(&geo_ast, candidate.address)?;
+                    Ok((candidate, exact))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            drop(runtime_guard);
             let mut hits = Vec::new();
-            for candidate in candidates {
+            for (candidate, fast_exact) in candidates {
+                if let Some(exact) = fast_exact {
+                    if !exact {
+                        continue;
+                    }
+                    if let Some(hit) = self.fulltext_live_hit_from_source(
+                        &meta,
+                        options,
+                        candidate.key,
+                        candidate.score,
+                    )? {
+                        hits.push(hit);
+                        if hits.len() > result_cap {
+                            return Err(Error::msg("ERR fulltext result limit exceeded"));
+                        }
+                    }
+                    continue;
+                }
                 let Some(fields) =
                     self.fulltext_filter_fields_from_source(&meta, &candidate.key)?
                 else {
@@ -203,6 +252,7 @@ impl Db {
             return Ok(FullTextCollectedHits {
                 total: hits.len(),
                 hits,
+                page_offset_applied: false,
             });
         }
         let requires_source_validation = fulltext_query_requires_source_validation(&ast, options);
@@ -213,11 +263,8 @@ impl Db {
         let fetch_all = bounded_window.is_none()
             && (matches!(mode, FullTextCollectMode::All)
                 || (options.sort_by.is_some() && !fast_sort)
-                || options.in_keys.is_some()
-                || !options.filters.is_empty()
-                || !options.geo_filters.is_empty()
                 || requires_source_validation
-                || !matches!(options.scorer, FullTextScorer::Bm25Std)
+                || matches!(options.scorer, FullTextScorer::DocScore)
                 || meta.index_options.score_field.is_some());
         let fetch_limit = if let Some(window) = bounded_window {
             Some(window)
@@ -243,19 +290,39 @@ impl Db {
         {
             return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
         }
+        let index_search_started = Instant::now();
+        let page_offset_applied =
+            matches!(mode, FullTextCollectMode::Page) && !fetch_all && bounded_window.is_none();
+        let key_offset = if page_offset_applied {
+            options.offset
+        } else {
+            0
+        };
         let candidate_hits = if fast_sort {
-            runtime_guard.search_sorted(
-                query,
+            runtime_guard.search_sorted_ast(
+                &ast,
                 options,
                 fetch_limit.unwrap_or(0),
+                key_offset,
+                FullTextSearchDeadline {
+                    at: deadline,
+                    fail_on_timeout,
+                },
+            )?
+        } else if page_offset_applied {
+            runtime_guard.search_ast_page_hits(
+                &ast,
+                options,
+                fetch_limit.unwrap_or(0),
+                key_offset,
                 FullTextSearchDeadline {
                     at: deadline,
                     fail_on_timeout,
                 },
             )?
         } else {
-            runtime_guard.search(
-                query,
+            runtime_guard.search_ast_hits(
+                &ast,
                 options,
                 fetch_limit,
                 FullTextSearchDeadline {
@@ -264,6 +331,10 @@ impl Db {
                 },
             )?
         };
+        global_metrics().record_fulltext_search_stage(
+            FullTextSearchStage::IndexSearch,
+            elapsed_us(index_search_started),
+        );
         drop(runtime_guard);
         if fetch_all && candidate_hits.hits.len() > result_cap {
             return Err(Error::msg("ERR fulltext result limit exceeded"));
@@ -276,10 +347,63 @@ impl Db {
         if candidate_bytes > reader_budget {
             return Err(Error::msg("ERR fulltext reader memory limit exceeded"));
         }
+        let candidate_count = if page_offset_applied {
+            candidate_hits.total.min(fetch_limit.unwrap_or(0))
+        } else {
+            candidate_hits.hits.len()
+        };
+        let candidate_total = candidate_hits.total;
+        let candidate_hits = candidate_hits.hits;
+
+        let source_free = options.no_content
+            && options.sort_by.is_none()
+            && !options.with_payloads
+            && !options.with_sort_keys
+            && !requires_source_validation
+            && !matches!(options.scorer, FullTextScorer::DocScore)
+            && meta.index_options.score_field.is_none();
+        if source_free || candidate_hits.is_empty() {
+            let document_score = meta.index_options.score.unwrap_or(1.0) as f32;
+            let live = candidate_hits
+                .into_iter()
+                .map(|hit| {
+                    let score = hit.score * document_score;
+                    FullTextLiveHit {
+                        key: hit.key,
+                        score: if matches!(options.scorer, FullTextScorer::Bm25) {
+                            search_source_scoring::fulltext_legacy_bm25_score(score)
+                        } else {
+                            score
+                        },
+                        fields: Vec::new(),
+                        sort_key: None,
+                        payload: None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            global_metrics().record_fulltext_search_work(
+                candidate_count,
+                0,
+                0,
+                segment_count,
+                fetch_all,
+            );
+            return Ok(FullTextCollectedHits {
+                total: if fetch_all || bounded_window.is_some() {
+                    live.len()
+                } else {
+                    candidate_total
+                },
+                hits: live,
+                page_offset_applied,
+            });
+        }
+
+        let source_started = Instant::now();
         let mut live = Vec::new();
         let mut live_bytes = 0usize;
-        let mut source_candidates = Vec::with_capacity(candidate_hits.hits.len());
-        for hit in candidate_hits.hits {
+        let mut source_candidates = Vec::with_capacity(candidate_hits.len());
+        for hit in candidate_hits {
             if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
                 break;
             }
@@ -310,6 +434,11 @@ impl Db {
             }
             live.push(hit);
         }
+        global_metrics().record_fulltext_search_stage(
+            FullTextSearchStage::SourceLoad,
+            elapsed_us(source_started),
+        );
+        let post_process_started = Instant::now();
         self.fulltext_apply_selected_scorer(
             &meta,
             &ast,
@@ -327,13 +456,25 @@ impl Db {
                     .then_with(|| left.key.cmp(&right.key))
             });
         }
+        global_metrics().record_fulltext_search_stage(
+            FullTextSearchStage::PostProcess,
+            elapsed_us(post_process_started),
+        );
+        global_metrics().record_fulltext_search_work(
+            candidate_count,
+            live.len(),
+            live_bytes,
+            segment_count,
+            fetch_all,
+        );
         Ok(FullTextCollectedHits {
             total: if fetch_all || bounded_window.is_some() {
                 live.len()
             } else {
-                candidate_hits.total
+                candidate_total
             },
             hits: live,
+            page_offset_applied,
         })
     }
 }

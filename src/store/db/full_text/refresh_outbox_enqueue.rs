@@ -32,6 +32,12 @@ impl Db {
                     &encode_record(&record)?,
                 )
                 .map_err(|error| Error::msg(error.to_string()))?;
+            batch
+                .put(
+                    &fulltext_outbox_latest_key(self.db_index, &index_name),
+                    &seq.to_be_bytes(),
+                )
+                .map_err(|error| Error::msg(error.to_string()))?;
         }
         Ok(())
     }

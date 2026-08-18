@@ -15,8 +15,18 @@ impl FullTextRuntime {
         fields: &[(String, String)],
         expires_at_ms: u64,
     ) -> Result<usize, Error> {
-        self.writer
-            .delete_term(Term::from_field_text(self.key_field, key));
+        let prepared = self.prepare_fields_document(key, fields, expires_at_ms)?;
+        let indexed_bytes = prepared.indexed_bytes;
+        self.apply_prepared_document(prepared)?;
+        Ok(indexed_bytes)
+    }
+
+    pub(super) fn prepare_fields_document(
+        &self,
+        key: &str,
+        fields: &[(String, String)],
+        expires_at_ms: u64,
+    ) -> Result<FullTextPreparedDocument, Error> {
         let document_language = self
             .language_field
             .as_ref()
@@ -146,8 +156,25 @@ impl FullTextRuntime {
                 | FullTextFieldKind::Vector => {}
             }
         }
-        self.writer.add_document(doc)?;
-        Ok(indexed_bytes)
+        Ok(FullTextPreparedDocument {
+            key: key.to_string(),
+            document: doc,
+            indexed_bytes,
+            expires_at_ms,
+        })
+    }
+
+    pub(super) fn apply_prepared_document(
+        &mut self,
+        prepared: FullTextPreparedDocument,
+    ) -> Result<(), Error> {
+        if prepared.expires_at_ms > 0 {
+            self.has_expiring_documents = true;
+        }
+        self.writer
+            .delete_term(Term::from_field_text(self.key_field, &prepared.key));
+        self.writer.add_document(prepared.document)?;
+        Ok(())
     }
 
     pub(super) fn delete_hash(&mut self, key: &str) {
@@ -158,6 +185,17 @@ impl FullTextRuntime {
     pub(super) fn publish(&mut self) -> Result<(), Error> {
         self.writer.commit()?;
         self.reader.reload()?;
+        self.has_expiring_documents = self.reader.searcher().search(
+            &RangeQuery::new(
+                Bound::Excluded(Term::from_field_u64(self.expires_at_field, 0)),
+                Bound::Unbounded,
+            ),
+            &Count,
+        )? > 0;
+        self.expansion_terms
+            .lock()
+            .map_err(|_| Error::msg("ERR fulltext expansion cache lock poisoned"))?
+            .clear();
         self.last_refresh_at = Instant::now();
         Ok(())
     }

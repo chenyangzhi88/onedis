@@ -86,7 +86,6 @@ use search_eval_ast::*;
 use search_field_values::*;
 use search_geo_distance::*;
 use search_geoshape_wkt::*;
-use search_source_live_hits::*;
 use source_vector_indexing::*;
 use storage_keys_config::*;
 use text_analysis::*;

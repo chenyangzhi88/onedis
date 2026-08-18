@@ -6,6 +6,7 @@ impl Db {
         options: &FullTextSearchOptions,
         display_terms: &[String],
     ) -> Result<Frame, Error> {
+        let response_started = Instant::now();
         let live = &mut collected.hits;
         if let Some(sort_by) = &options.sort_by {
             live.sort_by(|left, right| compare_fulltext_sort_keys(left, right, sort_by.asc));
@@ -13,14 +14,18 @@ impl Db {
         let mut out = Vec::new();
         out.push(Frame::Integer(collected.total as i64));
         if options.limit == 0 {
+            global_metrics().record_fulltext_search_stage(
+                FullTextSearchStage::Response,
+                elapsed_us(response_started),
+            );
             return Ok(Frame::Array(out));
         }
-        for hit in collected
-            .hits
-            .into_iter()
-            .skip(options.offset)
-            .take(options.limit)
-        {
+        let offset = if collected.page_offset_applied {
+            0
+        } else {
+            options.offset
+        };
+        for hit in collected.hits.into_iter().skip(offset).take(options.limit) {
             out.push(Frame::bulk_string(hit.key));
             if options.with_scores {
                 out.push(Frame::bulk_string(format_fulltext_score(hit.score)));
@@ -68,6 +73,10 @@ impl Db {
                 ));
             }
         }
+        global_metrics().record_fulltext_search_stage(
+            FullTextSearchStage::Response,
+            elapsed_us(response_started),
+        );
         Ok(Frame::Array(out))
     }
 }

@@ -185,11 +185,39 @@ impl Db {
         if vector_bytes > vector_budget {
             return Err(Error::msg("ERR fulltext vector memory limit exceeded"));
         }
+        let expected_type = match meta.source_type {
+            FullTextSourceType::Hash => TYPE_HASH,
+            FullTextSourceType::Json => TYPE_JSON,
+        };
+        let raw_metas = self.store.multi_get_raw(
+            &vector_results
+                .iter()
+                .map(|result| self.mk(&result.id))
+                .collect::<Vec<_>>(),
+        );
+        let now = current_fulltext_millis();
+        let source_free = options.no_content
+            && options.sort_by.is_none()
+            && !options.with_payloads
+            && !options.with_sort_keys
+            && options.geo_filters.is_empty()
+            && !matches!(options.scorer, FullTextScorer::DocScore)
+            && meta.index_options.score_field.is_none();
         let mut live = Vec::new();
         let mut live_bytes = 0usize;
-        for result in vector_results {
+        for (result, raw_meta) in vector_results.into_iter().zip(raw_metas) {
             if fulltext_search_timeout_reached(limits.timeout.at, limits.timeout.fail_on_timeout)? {
                 break;
+            }
+            if raw_meta
+                .as_deref()
+                .and_then(decode_meta_header)
+                .is_none_or(|header| {
+                    header.type_tag != expected_type
+                        || (header.expire_ms != 0 && header.expire_ms <= now)
+                })
+            {
+                continue;
             }
             if allow
                 .as_ref()
@@ -206,9 +234,18 @@ impl Db {
             {
                 continue;
             }
-            if let Some(mut hit) =
+            let hit = if source_free {
+                Some(FullTextLiveHit {
+                    key: result.id,
+                    score: result.score,
+                    fields: Vec::new(),
+                    sort_key: None,
+                    payload: None,
+                })
+            } else {
                 self.fulltext_live_hit_from_source(meta, options, result.id, result.score)?
-            {
+            };
+            if let Some(mut hit) = hit {
                 if live.len() >= limits.result_cap {
                     return Err(Error::msg("ERR fulltext result limit exceeded"));
                 }

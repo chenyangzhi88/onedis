@@ -1,4 +1,36 @@
 use super::*;
+
+enum FullTextPendingSourceAction {
+    Upsert {
+        fields: Vec<(String, String)>,
+        expires_at_ms: u64,
+        json_root: Option<serde_json::Value>,
+    },
+    Delete,
+    Noop,
+}
+
+struct FullTextPendingSourceMutation {
+    seq: u64,
+    key: String,
+    action: FullTextPendingSourceAction,
+}
+
+enum FullTextPreparedRefreshAction {
+    Upsert {
+        document: FullTextPreparedDocument,
+        json_root: Option<serde_json::Value>,
+    },
+    Delete,
+    Noop,
+}
+
+struct FullTextPreparedRefreshMutation {
+    outbox_seq: Option<u64>,
+    key: String,
+    action: FullTextPreparedRefreshAction,
+}
+
 impl Db {
     pub(super) fn fulltext_apply_pending(
         &self,
@@ -14,157 +46,300 @@ impl Db {
         let mut indexed_docs = 0usize;
         let mut indexed_bytes = 0usize;
         let mut checkpoint_state = None;
-        let mut vector_batches = FullTextVectorMutationBatches::new();
-
+        let mut prepared = Vec::new();
+        let mut backfill_progress = None;
+        if matches!(
+            meta.state,
+            FullTextIndexState::Backfilling | FullTextIndexState::Rebuilding
+        ) && policy.max_docs > 0
+            && policy.max_bytes > 0
+            && Instant::now() < deadline
         {
-            let mut runtime = runtime
-                .write()
-                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
-            if matches!(
-                meta.state,
-                FullTextIndexState::Backfilling | FullTextIndexState::Rebuilding
-            ) {
-                let mut published_meta = meta.clone();
-                published_meta.backfill_cursor = runtime.published_backfill_cursor.clone();
-                let BackfillProgress {
-                    finished,
-                    cursor,
-                    docs,
-                    bytes,
-                } = self.fulltext_apply_backfill_batch(
-                    index,
-                    &mut runtime,
-                    &published_meta,
-                    policy,
-                    deadline,
-                )?;
-                changed |= docs > 0;
-                indexed_docs += docs;
-                indexed_bytes += bytes;
-                runtime.published_backfill_cursor = cursor;
-                runtime.backfill_complete = finished;
+            let cursor = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+                .published_backfill_cursor
+                .clone();
+            let (keys, has_more) =
+                self.fulltext_source_keys_page(meta, cursor.as_deref(), policy.max_docs)?;
+            let mut next_cursor = cursor;
+            let mut finished = !has_more;
+            let mut sources = Vec::with_capacity(keys.len());
+            for key in keys {
+                if Instant::now() >= deadline {
+                    finished = false;
+                    break;
+                }
+                let action = match meta.source_type {
+                    FullTextSourceType::Hash => {
+                        let fields = self.hash_get_all(&key)?;
+                        if fields.is_empty() || !fulltext_index_filter_matches(meta, &fields)? {
+                            FullTextPendingSourceAction::Delete
+                        } else {
+                            FullTextPendingSourceAction::Upsert {
+                                fields,
+                                expires_at_ms: self.fulltext_source_expire_ms(&key),
+                                json_root: None,
+                            }
+                        }
+                    }
+                    FullTextSourceType::Json => {
+                        if let Some(root) = self.fulltext_json_root(&key)? {
+                            let fields = self.fulltext_json_fields_from_root(&root, meta)?;
+                            if fulltext_index_filter_matches(meta, &fields)? {
+                                FullTextPendingSourceAction::Upsert {
+                                    fields,
+                                    expires_at_ms: self.fulltext_source_expire_ms(&key),
+                                    json_root: Some(root),
+                                }
+                            } else {
+                                FullTextPendingSourceAction::Delete
+                            }
+                        } else {
+                            FullTextPendingSourceAction::Delete
+                        }
+                    }
+                };
+                sources.push(FullTextPendingSourceMutation {
+                    seq: 0,
+                    key,
+                    action,
+                });
             }
-
-            if indexed_docs < policy.max_docs
-                && indexed_bytes < policy.max_bytes
-                && Instant::now() < deadline
             {
-                let prefix = fulltext_outbox_prefix(self.db_index, index);
-                let start = runtime
-                    .published_outbox_seq
-                    .checked_add(1)
-                    .map(|seq| fulltext_outbox_key(self.db_index, index, seq));
-                let remaining_docs = policy.max_docs.saturating_sub(indexed_docs);
-                for (outbox_key, raw) in start.into_iter().flat_map(|start| {
+                let runtime = runtime
+                    .read()
+                    .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+                for source in sources {
+                    let action = match source.action {
+                        FullTextPendingSourceAction::Upsert {
+                            fields,
+                            expires_at_ms,
+                            json_root,
+                        } => {
+                            let document = runtime.prepare_fields_document(
+                                &source.key,
+                                &fields,
+                                expires_at_ms,
+                            )?;
+                            indexed_bytes = indexed_bytes.saturating_add(document.indexed_bytes);
+                            FullTextPreparedRefreshAction::Upsert {
+                                document,
+                                json_root,
+                            }
+                        }
+                        FullTextPendingSourceAction::Delete => {
+                            FullTextPreparedRefreshAction::Delete
+                        }
+                        FullTextPendingSourceAction::Noop => FullTextPreparedRefreshAction::Noop,
+                    };
+                    indexed_docs = indexed_docs.saturating_add(1);
+                    next_cursor = Some(source.key.clone());
+                    prepared.push(FullTextPreparedRefreshMutation {
+                        outbox_seq: None,
+                        key: source.key,
+                        action,
+                    });
+                    // Source reads stop at the deadline above. Finish analyzing the
+                    // already-staged keys so every refresh makes bounded forward
+                    // progress instead of repeatedly paying the reads and only
+                    // publishing the first document after the deadline expires.
+                    if indexed_bytes >= policy.max_bytes {
+                        finished = false;
+                        break;
+                    }
+                }
+            }
+            backfill_progress = Some((next_cursor, finished));
+        }
+
+        let published_outbox_seq = runtime
+            .read()
+            .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+            .published_outbox_seq;
+        let mut scanned_through = published_outbox_seq;
+        let mut processed_all = true;
+        let mut pending_sources = Vec::new();
+        if indexed_docs < policy.max_docs
+            && indexed_bytes < policy.max_bytes
+            && Instant::now() < deadline
+        {
+            let prefix = fulltext_outbox_prefix(self.db_index, index);
+            let start = published_outbox_seq
+                .checked_add(1)
+                .map(|seq| fulltext_outbox_key(self.db_index, index, seq));
+            let remaining_docs = policy.max_docs.saturating_sub(indexed_docs);
+            let entries = start
+                .into_iter()
+                .flat_map(|start| {
                     self.store.scan_range_raw_limited(
                         &start,
                         prefix_exclusive_upper_bound(&prefix),
                         remaining_docs.max(1),
                     )
-                }) {
-                    let Some(seq) = fulltext_outbox_seq_from_key(self.db_index, index, &outbox_key)
-                    else {
-                        continue;
-                    };
-                    let record = decode_record::<FullTextMutationRecord>(&raw)?;
-                    if record.incarnation != meta.incarnation {
-                        runtime.published_outbox_seq = runtime.published_outbox_seq.max(seq);
-                        continue;
-                    }
-                    match record.kind {
-                        FullTextMutationKind::UpsertKey => {
-                            if !matches!(meta.source_type, FullTextSourceType::Hash) {
-                                runtime.published_outbox_seq =
-                                    runtime.published_outbox_seq.max(seq);
-                                continue;
-                            }
+                })
+                .collect::<Vec<_>>();
+            let mut latest_by_key = HashMap::<String, (u64, FullTextMutationRecord)>::new();
+            for (outbox_key, raw) in entries {
+                let Some(seq) = fulltext_outbox_seq_from_key(self.db_index, index, &outbox_key)
+                else {
+                    continue;
+                };
+                scanned_through = scanned_through.max(seq);
+                let record = decode_record::<FullTextMutationRecord>(&raw)?;
+                if record.incarnation != meta.incarnation {
+                    continue;
+                }
+                latest_by_key.insert(record.key.clone(), (seq, record));
+            }
+            let mut pending = latest_by_key.into_values().collect::<Vec<_>>();
+            pending.sort_by_key(|(seq, _)| *seq);
+            for (seq, record) in pending {
+                if Instant::now() >= deadline {
+                    processed_all = false;
+                    break;
+                }
+                let action = match record.kind {
+                    FullTextMutationKind::UpsertKey => {
+                        if !matches!(meta.source_type, FullTextSourceType::Hash) {
+                            FullTextPendingSourceAction::Noop
+                        } else {
                             let fields = self.hash_get_all(&record.key)?;
                             if fields.is_empty() || !fulltext_index_filter_matches(meta, &fields)? {
-                                runtime.delete_hash(&record.key);
-                                self.fulltext_collect_vector_deletions(
-                                    index,
-                                    meta,
-                                    &record.key,
-                                    &mut vector_batches,
-                                );
+                                FullTextPendingSourceAction::Delete
                             } else {
-                                indexed_bytes += runtime.upsert_hash(
-                                    &record.key,
-                                    &fields,
-                                    self.fulltext_source_expire_ms(&record.key),
-                                )?;
-                                self.fulltext_collect_vector_mutations(
-                                    index,
-                                    meta,
-                                    &record.key,
-                                    None,
-                                    &mut vector_batches,
-                                )?;
+                                FullTextPendingSourceAction::Upsert {
+                                    fields,
+                                    expires_at_ms: self.fulltext_source_expire_ms(&record.key),
+                                    json_root: None,
+                                }
                             }
                         }
-                        FullTextMutationKind::UpsertJson => {
-                            if !matches!(meta.source_type, FullTextSourceType::Json) {
-                                runtime.published_outbox_seq =
-                                    runtime.published_outbox_seq.max(seq);
-                                continue;
-                            }
-                            if let Some(root) = self.fulltext_json_root(&record.key)? {
-                                let fields = self.fulltext_json_fields_from_root(&root, meta)?;
-                                if fulltext_index_filter_matches(meta, &fields)? {
-                                    indexed_bytes += runtime.upsert_fields(
-                                        &record.key,
-                                        &fields,
-                                        self.fulltext_source_expire_ms(&record.key),
-                                    )?;
-                                    self.fulltext_collect_vector_mutations(
-                                        index,
-                                        meta,
-                                        &record.key,
-                                        Some(&root),
-                                        &mut vector_batches,
-                                    )?;
-                                } else {
-                                    runtime.delete_hash(&record.key);
-                                    self.fulltext_collect_vector_deletions(
-                                        index,
-                                        meta,
-                                        &record.key,
-                                        &mut vector_batches,
-                                    );
+                    }
+                    FullTextMutationKind::UpsertJson => {
+                        if !matches!(meta.source_type, FullTextSourceType::Json) {
+                            FullTextPendingSourceAction::Noop
+                        } else if let Some(root) = self.fulltext_json_root(&record.key)? {
+                            let fields = self.fulltext_json_fields_from_root(&root, meta)?;
+                            if fulltext_index_filter_matches(meta, &fields)? {
+                                FullTextPendingSourceAction::Upsert {
+                                    fields,
+                                    expires_at_ms: self.fulltext_source_expire_ms(&record.key),
+                                    json_root: Some(root),
                                 }
                             } else {
-                                runtime.delete_hash(&record.key);
-                                self.fulltext_collect_vector_deletions(
-                                    index,
-                                    meta,
-                                    &record.key,
-                                    &mut vector_batches,
-                                );
+                                FullTextPendingSourceAction::Delete
                             }
-                        }
-                        FullTextMutationKind::DeleteKey => {
-                            runtime.delete_hash(&record.key);
-                            self.fulltext_collect_vector_deletions(
-                                index,
-                                meta,
-                                &record.key,
-                                &mut vector_batches,
-                            );
+                        } else {
+                            FullTextPendingSourceAction::Delete
                         }
                     }
-                    changed = true;
-                    indexed_docs += 1;
-                    runtime.published_outbox_seq = runtime.published_outbox_seq.max(seq);
-                    if indexed_docs >= policy.max_docs
-                        || indexed_bytes >= policy.max_bytes
-                        || Instant::now() >= deadline
-                    {
-                        break;
+                    FullTextMutationKind::DeleteKey => FullTextPendingSourceAction::Delete,
+                };
+                pending_sources.push(FullTextPendingSourceMutation {
+                    seq,
+                    key: record.key,
+                    action,
+                });
+            }
+        }
+
+        prepared.reserve(pending_sources.len());
+        {
+            // Text analysis can be CPU-heavy. A read lease keeps the schema stable
+            // while allowing searches to continue on the last published reader.
+            let runtime = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+            for pending in pending_sources {
+                let action = match pending.action {
+                    FullTextPendingSourceAction::Upsert {
+                        fields,
+                        expires_at_ms,
+                        json_root,
+                    } => {
+                        let document = runtime.prepare_fields_document(
+                            &pending.key,
+                            &fields,
+                            expires_at_ms,
+                        )?;
+                        indexed_bytes = indexed_bytes.saturating_add(document.indexed_bytes);
+                        indexed_docs = indexed_docs.saturating_add(1);
+                        FullTextPreparedRefreshAction::Upsert {
+                            document,
+                            json_root,
+                        }
                     }
+                    FullTextPendingSourceAction::Delete => {
+                        indexed_docs = indexed_docs.saturating_add(1);
+                        FullTextPreparedRefreshAction::Delete
+                    }
+                    FullTextPendingSourceAction::Noop => FullTextPreparedRefreshAction::Noop,
+                };
+                prepared.push(FullTextPreparedRefreshMutation {
+                    outbox_seq: Some(pending.seq),
+                    key: pending.key,
+                    action,
+                });
+                if indexed_docs >= policy.max_docs || indexed_bytes >= policy.max_bytes {
+                    processed_all = false;
+                    break;
                 }
             }
+        }
 
-            self.fulltext_apply_vector_mutations(std::mem::take(&mut vector_batches))?;
+        let mut vector_batches = FullTextVectorMutationBatches::new();
+        for mutation in &prepared {
+            match &mutation.action {
+                FullTextPreparedRefreshAction::Upsert { json_root, .. } => {
+                    self.fulltext_collect_vector_mutations(
+                        index,
+                        meta,
+                        &mutation.key,
+                        json_root.as_ref(),
+                        &mut vector_batches,
+                    )?;
+                }
+                FullTextPreparedRefreshAction::Delete => self.fulltext_collect_vector_deletions(
+                    index,
+                    meta,
+                    &mutation.key,
+                    &mut vector_batches,
+                ),
+                FullTextPreparedRefreshAction::Noop => {}
+            }
+        }
+        {
+            let mut runtime = runtime
+                .write()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+            // Publish vector and text mutations under the same generation lease;
+            // otherwise an EVENTUAL hybrid query could observe a new vector entry
+            // before the matching Tantivy reader is published.
+            self.fulltext_apply_vector_mutations(vector_batches)?;
+            for mutation in prepared {
+                match mutation.action {
+                    FullTextPreparedRefreshAction::Upsert { document, .. } => {
+                        runtime.apply_prepared_document(document)?;
+                        changed = true;
+                    }
+                    FullTextPreparedRefreshAction::Delete => {
+                        runtime.delete_hash(&mutation.key);
+                        changed = true;
+                    }
+                    FullTextPreparedRefreshAction::Noop => {}
+                }
+                if let Some(seq) = mutation.outbox_seq {
+                    runtime.published_outbox_seq = runtime.published_outbox_seq.max(seq);
+                }
+            }
+            if let Some((cursor, finished)) = backfill_progress {
+                runtime.published_backfill_cursor = cursor;
+                runtime.backfill_complete = finished;
+            }
+            if processed_all {
+                runtime.published_outbox_seq = runtime.published_outbox_seq.max(scanned_through);
+            }
             if changed {
                 let published_seq = runtime.published_outbox_seq;
                 runtime.publish_through(published_seq)?;

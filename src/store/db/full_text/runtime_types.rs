@@ -14,6 +14,7 @@ pub(super) struct FullTextRuntimeKey {
 
 pub(super) struct FullTextRuntime {
     pub(super) incarnation: u64,
+    pub(super) search_meta: FullTextIndexMeta,
     pub(super) index: Index,
     pub(super) reader: IndexReader,
     pub(super) writer: IndexWriter,
@@ -43,7 +44,21 @@ pub(super) struct FullTextRuntime {
     pub(super) min_prefix: usize,
     pub(super) max_expansions: usize,
     pub(super) max_prefix_expansions: u32,
+    pub(super) has_expiring_documents: bool,
+    pub(super) expansion_terms: Mutex<HashMap<String, Arc<FullTextExpansionCacheEntry>>>,
     pub(super) last_refresh_at: Instant,
+}
+
+pub(super) struct FullTextPreparedDocument {
+    pub(super) key: String,
+    pub(super) document: TantivyDocument,
+    pub(super) indexed_bytes: usize,
+    pub(super) expires_at_ms: u64,
+}
+
+pub(super) struct FullTextExpansionCacheEntry {
+    pub(super) terms: Vec<(Field, String)>,
+    pub(super) unique_term_count: usize,
 }
 
 pub(super) struct FullTextRuntimeConfig {

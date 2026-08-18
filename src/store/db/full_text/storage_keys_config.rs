@@ -206,6 +206,22 @@ pub(super) fn fulltext_outbox_key(db_index: u16, index: &str, seq: u64) -> Vec<u
     key
 }
 
+pub(super) fn fulltext_outbox_latest_key(db_index: u16, index: &str) -> Vec<u8> {
+    let mut key = fulltext_meta_prefix(db_index);
+    key.extend_from_slice(b"\0outbox_latest\0");
+    key.extend_from_slice(index.as_bytes());
+    key
+}
+
+pub(super) fn fulltext_index_from_outbox_latest_key(db_index: u16, key: &[u8]) -> Option<String> {
+    let prefix = fulltext_meta_prefix(db_index);
+    let rest = key.strip_prefix(prefix.as_slice())?;
+    let index = rest.strip_prefix(b"\0outbox_latest\0")?;
+    (!index.is_empty())
+        .then(|| String::from_utf8(index.to_vec()).ok())
+        .flatten()
+}
+
 pub(super) fn fulltext_outbox_seq_from_key(db_index: u16, index: &str, key: &[u8]) -> Option<u64> {
     let prefix = fulltext_outbox_prefix(db_index, index);
     let rest = key.strip_prefix(prefix.as_slice())?;

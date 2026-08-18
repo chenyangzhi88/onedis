@@ -11,10 +11,15 @@ impl Db {
     }
 
     pub(crate) fn fulltext_maintenance_tick(&self) -> Result<(), Error> {
+        self.fulltext_maintenance_tick_mode(true)
+    }
+
+    fn fulltext_maintenance_tick_mode(&self, force_refresh: bool) -> Result<(), Error> {
         let snapshots = self.read_all_fulltext_metas()?;
         let mut first_error = None;
         for (index, snapshot) in snapshots {
-            if let Err(error) = self.fulltext_maintain_index_snapshot(&index, &snapshot)
+            if let Err(error) =
+                self.fulltext_maintain_index_snapshot_mode(&index, &snapshot, force_refresh)
                 && first_error.is_none()
             {
                 first_error = Some(Error::msg(format!("index {index}: {error}")));
@@ -23,10 +28,20 @@ impl Db {
         first_error.map_or(Ok(()), Err)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn fulltext_maintain_index_snapshot(
         &self,
         index: &str,
         snapshot: &FullTextIndexMeta,
+    ) -> Result<(), Error> {
+        self.fulltext_maintain_index_snapshot_mode(index, snapshot, true)
+    }
+
+    fn fulltext_maintain_index_snapshot_mode(
+        &self,
+        index: &str,
+        snapshot: &FullTextIndexMeta,
+        force_refresh: bool,
     ) -> Result<(), Error> {
         if self.fulltext_index_expired(index, snapshot)
             || matches!(
@@ -66,7 +81,7 @@ impl Db {
             .lock()
             .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
         let started = Instant::now();
-        let result = self.fulltext_refresh_index_mode(index, true, None, true, false);
+        let result = self.fulltext_refresh_index_mode(index, force_refresh, None, true, false);
         global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
         result
     }
@@ -140,7 +155,7 @@ impl Db {
     }
 
     pub(crate) async fn fulltext_maintenance_tick_async(&self) -> Result<(), Error> {
-        self.run_blocking_store_task(|db| db.fulltext_maintenance_tick())
+        self.run_blocking_store_task(|db| db.fulltext_maintenance_tick_mode(false))
             .await
     }
 
@@ -187,6 +202,7 @@ impl Db {
             }
             if batch.count() > 0 {
                 self.store.write_batch_direct(&batch);
+                self.fulltext_observe_committed_outbox_batch(&batch);
                 if refresh_immediately {
                     self.fulltext_request_refresh(&key)?;
                     self.fulltext_request_json_refresh(&key)?;

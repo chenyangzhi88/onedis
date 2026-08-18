@@ -195,6 +195,9 @@ impl Db {
         batch
             .delete(&fulltext_temporary_activity_key(self.db_index, index))
             .map_err(|error| Error::msg(error.to_string()))?;
+        batch
+            .delete(&fulltext_outbox_latest_key(self.db_index, index))
+            .map_err(|error| Error::msg(error.to_string()))?;
         for alias in self.fulltext_aliases_for_index(index)? {
             batch
                 .delete(&fulltext_alias_key(self.db_index, &alias))
@@ -458,6 +461,7 @@ impl Db {
             ));
         }
         self.fulltext_compare_conditions(&conditions, &batch)?;
+        self.fulltext_runtimes.remove_alias(self.db_index, alias);
         Ok(Frame::Ok)
     }
 
@@ -521,6 +525,8 @@ impl Db {
             )
             .map_err(|error| Error::msg(error.to_string()))?;
         self.write_batch_if_not_empty(&batch);
+        self.fulltext_runtimes
+            .set_config_value(self.db_index, &normalized, value.to_string());
         Ok(Frame::Ok)
     }
 

@@ -21,6 +21,27 @@ const DURATION_BUCKETS_US: [u64; 10] = [
     u64::MAX,
 ];
 
+const FULLTEXT_SEARCH_STAGE_NAMES: [&str; 7] = [
+    "resolve",
+    "refresh_wait",
+    "parse_plan",
+    "index_search",
+    "source_load",
+    "post_process",
+    "response",
+];
+
+#[derive(Clone, Copy, Debug)]
+pub enum FullTextSearchStage {
+    Resolve = 0,
+    RefreshWait = 1,
+    ParsePlan = 2,
+    IndexSearch = 3,
+    SourceLoad = 4,
+    PostProcess = 5,
+    Response = 6,
+}
+
 const ERROR_CLASSES: [&str; 9] = [
     "parse_error",
     "wrong_type",
@@ -323,6 +344,17 @@ pub struct OnedisMetrics {
     fulltext_search_duration_sum_us: AtomicU64,
     fulltext_search_duration_count: AtomicU64,
     fulltext_search_duration_buckets: Vec<AtomicU64>,
+    fulltext_search_stage_duration_sum_us: Vec<AtomicU64>,
+    fulltext_search_stage_duration_count: Vec<AtomicU64>,
+    fulltext_search_stage_duration_buckets: Vec<AtomicU64>,
+    fulltext_search_candidates: AtomicU64,
+    fulltext_search_source_docs: AtomicU64,
+    fulltext_search_source_bytes: AtomicU64,
+    fulltext_search_segments: AtomicU64,
+    fulltext_search_expanded_terms: AtomicU64,
+    fulltext_search_fetch_all: AtomicU64,
+    fulltext_query_cache_hits: AtomicU64,
+    fulltext_query_cache_misses: AtomicU64,
     stream_groups: AtomicU64,
     stream_pending_entries: AtomicU64,
     stream_claims: AtomicU64,
@@ -458,6 +490,19 @@ impl OnedisMetrics {
             fulltext_search_duration_sum_us: AtomicU64::new(0),
             fulltext_search_duration_count: AtomicU64::new(0),
             fulltext_search_duration_buckets: zeroed_vec(DURATION_BUCKETS_US.len()),
+            fulltext_search_stage_duration_sum_us: zeroed_vec(FULLTEXT_SEARCH_STAGE_NAMES.len()),
+            fulltext_search_stage_duration_count: zeroed_vec(FULLTEXT_SEARCH_STAGE_NAMES.len()),
+            fulltext_search_stage_duration_buckets: zeroed_vec(
+                FULLTEXT_SEARCH_STAGE_NAMES.len() * DURATION_BUCKETS_US.len(),
+            ),
+            fulltext_search_candidates: AtomicU64::new(0),
+            fulltext_search_source_docs: AtomicU64::new(0),
+            fulltext_search_source_bytes: AtomicU64::new(0),
+            fulltext_search_segments: AtomicU64::new(0),
+            fulltext_search_expanded_terms: AtomicU64::new(0),
+            fulltext_search_fetch_all: AtomicU64::new(0),
+            fulltext_query_cache_hits: AtomicU64::new(0),
+            fulltext_query_cache_misses: AtomicU64::new(0),
             stream_groups: AtomicU64::new(0),
             stream_pending_entries: AtomicU64::new(0),
             stream_claims: AtomicU64::new(0),
@@ -726,6 +771,66 @@ impl OnedisMetrics {
         self.fulltext_search_duration_count
             .fetch_add(1, Ordering::Relaxed);
         observe_duration(elapsed_us, 1, &self.fulltext_search_duration_buckets);
+    }
+
+    pub fn record_fulltext_search_stage(&self, stage: FullTextSearchStage, elapsed_us: u64) {
+        if !self.is_enabled() {
+            return;
+        }
+        let stage = stage as usize;
+        self.fulltext_search_stage_duration_sum_us[stage].fetch_add(elapsed_us, Ordering::Relaxed);
+        self.fulltext_search_stage_duration_count[stage].fetch_add(1, Ordering::Relaxed);
+        let start = stage * DURATION_BUCKETS_US.len();
+        observe_duration(
+            elapsed_us,
+            1,
+            &self.fulltext_search_stage_duration_buckets[start..start + DURATION_BUCKETS_US.len()],
+        );
+    }
+
+    pub fn record_fulltext_search_work(
+        &self,
+        candidates: usize,
+        source_docs: usize,
+        source_bytes: usize,
+        segments: usize,
+        fetch_all: bool,
+    ) {
+        if !self.is_enabled() {
+            return;
+        }
+        for (counter, value) in [
+            (&self.fulltext_search_candidates, candidates),
+            (&self.fulltext_search_source_docs, source_docs),
+            (&self.fulltext_search_source_bytes, source_bytes),
+            (&self.fulltext_search_segments, segments),
+        ] {
+            counter.fetch_add(value as u64, Ordering::Relaxed);
+        }
+        if fetch_all {
+            self.fulltext_search_fetch_all
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_fulltext_expanded_terms(&self, terms: usize) {
+        if self.is_enabled() {
+            self.fulltext_search_expanded_terms
+                .fetch_add(terms as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_fulltext_query_cache(&self, hit: bool) {
+        if !self.is_enabled() {
+            return;
+        }
+        if hit {
+            self.fulltext_query_cache_hits
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.fulltext_query_cache_misses
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn set_stream_snapshot(&self, groups: u64, pending_entries: u64) {
@@ -1175,6 +1280,51 @@ impl OnedisMetrics {
             self.fulltext_search_duration_sum_us.load(Ordering::Relaxed),
             self.fulltext_search_duration_count.load(Ordering::Relaxed),
         );
+        render_labeled_duration_histograms(
+            out,
+            "onedis_fulltext_search_stage_duration_seconds",
+            "stage",
+            &FULLTEXT_SEARCH_STAGE_NAMES,
+            &self.fulltext_search_stage_duration_buckets,
+            &self.fulltext_search_stage_duration_sum_us,
+            &self.fulltext_search_stage_duration_count,
+        );
+        for (name, value) in [
+            (
+                "onedis_fulltext_search_candidates_total",
+                &self.fulltext_search_candidates,
+            ),
+            (
+                "onedis_fulltext_search_source_docs_total",
+                &self.fulltext_search_source_docs,
+            ),
+            (
+                "onedis_fulltext_search_source_bytes_total",
+                &self.fulltext_search_source_bytes,
+            ),
+            (
+                "onedis_fulltext_search_segments_total",
+                &self.fulltext_search_segments,
+            ),
+            (
+                "onedis_fulltext_search_expanded_terms_total",
+                &self.fulltext_search_expanded_terms,
+            ),
+            (
+                "onedis_fulltext_search_fetch_all_total",
+                &self.fulltext_search_fetch_all,
+            ),
+            (
+                "onedis_fulltext_query_cache_hits_total",
+                &self.fulltext_query_cache_hits,
+            ),
+            (
+                "onedis_fulltext_query_cache_misses_total",
+                &self.fulltext_query_cache_misses,
+            ),
+        ] {
+            push_counter(out, name, &value.load(Ordering::Relaxed).to_string());
+        }
         push_gauge(
             out,
             "onedis_stream_groups_total",
@@ -1724,6 +1874,44 @@ fn render_duration_histogram(
     let _ = writeln!(out, "{name}_count {count}");
 }
 
+fn render_labeled_duration_histograms(
+    out: &mut String,
+    name: &str,
+    label_name: &str,
+    label_values: &[&str],
+    buckets: &[AtomicU64],
+    sums_us: &[AtomicU64],
+    counts: &[AtomicU64],
+) {
+    let _ = writeln!(out, "# TYPE {name} histogram");
+    for (label_index, label_value) in label_values.iter().enumerate() {
+        let start = label_index * DURATION_BUCKETS_US.len();
+        let mut cumulative = 0;
+        for (bucket_index, bound_us) in DURATION_BUCKETS_US.iter().enumerate() {
+            cumulative += buckets[start + bucket_index].load(Ordering::Relaxed);
+            let le = if *bound_us == u64::MAX {
+                "+Inf".to_string()
+            } else {
+                format!("{:.6}", *bound_us as f64 / 1_000_000.0)
+            };
+            let _ = writeln!(
+                out,
+                "{name}_bucket{{{label_name}=\"{label_value}\",le=\"{le}\"}} {cumulative}"
+            );
+        }
+        let sum_seconds = sums_us[label_index].load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let count = counts[label_index].load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "{name}_sum{{{label_name}=\"{label_value}\"}} {sum_seconds:.6}"
+        );
+        let _ = writeln!(
+            out,
+            "{name}_count{{{label_name}=\"{label_value}\"}} {count}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1736,6 +1924,8 @@ mod tests {
         metrics.connection_opened();
         metrics.record_command("GET", 250, None, 10_000);
         metrics.record_command("SET", 20_000, Some("wrong_type"), 10_000);
+        metrics.record_fulltext_search_stage(FullTextSearchStage::IndexSearch, 750);
+        metrics.record_fulltext_search_work(10, 2, 128, 3, true);
 
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("onedis_config_databases 16"));
@@ -1749,6 +1939,12 @@ mod tests {
         assert!(rendered.contains("onedis_slow_commands_total{command=\"SET\"} 1"));
         assert!(rendered.contains("onedis_storage_reads_total 0"));
         assert!(rendered.contains("onedis_fulltext_search_total 0"));
+        assert!(rendered.contains(
+            "onedis_fulltext_search_stage_duration_seconds_count{stage=\"index_search\"} 1"
+        ));
+        assert!(rendered.contains("onedis_fulltext_search_candidates_total 10"));
+        assert!(rendered.contains("onedis_fulltext_search_source_docs_total 2"));
+        assert!(rendered.contains("onedis_fulltext_search_fetch_all_total 1"));
         assert!(rendered.contains("onedis_stream_blocked_clients 0"));
     }
 

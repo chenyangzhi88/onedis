@@ -23,6 +23,7 @@ impl Automaton for FullTextLevenshteinDfa {
 }
 
 impl FullTextRuntime {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn build_query(
         &self,
         query_text: &str,
@@ -349,16 +350,17 @@ impl FullTextRuntime {
             .iter()
             .map(|field| self.text_variant_field(*field))
             .collect::<Vec<_>>();
-        self.validate_automaton_expansions(&variant_fields, self.max_expansions, &automaton)?;
-        self.or_field_queries(
-            fields.into_iter().map(|field| {
-                let query_field = self.text_variant_field(field);
-                RegexQuery::from_pattern(&regex, query_field)
-                    .map(|query| self.boost_text_field(Box::new(query) as Box<dyn Query>, field))
-                    .map_err(Error::from)
-            }),
-            _options.scorer,
-        )
+        let expanded = self.expand_automaton_terms(
+            &variant_fields,
+            self.max_expansions,
+            &format!("wildcard:{regex}"),
+            &automaton,
+        )?;
+        if expanded.unique_term_count <= 32 {
+            self.expanded_terms_query(&fields, &expanded, _options.scorer)
+        } else {
+            self.regex_fields_query(&fields, &regex, _options.scorer)
+        }
     }
 
     pub(super) fn plan_prefix_query(
@@ -382,22 +384,17 @@ impl FullTextRuntime {
             .iter()
             .map(|field| self.text_variant_field(*field))
             .collect::<Vec<_>>();
-        self.validate_prefix_term_expansions(
+        let expanded = self.expand_prefix_terms(
             &variant_fields,
             self.max_prefix_expansions as usize,
             &prefix,
         )?;
-        self.or_field_queries(
-            fields.into_iter().map(|field| {
-                let query_field = self.text_variant_field(field);
-                let mut prefix_query =
-                    PhrasePrefixQuery::new(vec![Term::from_field_text(query_field, &prefix)]);
-                prefix_query.set_max_expansions(self.max_prefix_expansions);
-                let query = Box::new(prefix_query) as Box<dyn Query>;
-                Ok(self.boost_text_field(query, field))
-            }),
-            _options.scorer,
-        )
+        if expanded.unique_term_count <= 32 {
+            self.expanded_terms_query(&fields, &expanded, _options.scorer)
+        } else {
+            let regex = fulltext_wildcard_to_regex(&format!("{prefix}*"));
+            self.regex_fields_query(&fields, &regex, _options.scorer)
+        }
     }
 
     pub(super) fn plan_fuzzy_query(
@@ -421,19 +418,13 @@ impl FullTextRuntime {
             .iter()
             .map(|field| self.text_variant_field(*field))
             .collect::<Vec<_>>();
-        self.validate_automaton_expansions(&variant_fields, self.max_expansions, &automaton)?;
-        self.or_field_queries(
-            fields.into_iter().map(|field| {
-                let query_field = self.text_variant_field(field);
-                let query = Box::new(FuzzyTermQuery::new(
-                    Term::from_field_text(query_field, term),
-                    1,
-                    true,
-                )) as Box<dyn Query>;
-                Ok(self.boost_text_field(query, field))
-            }),
-            _options.scorer,
-        )
+        let expanded = self.expand_automaton_terms(
+            &variant_fields,
+            self.max_expansions,
+            &format!("fuzzy:{normalized}"),
+            &automaton,
+        )?;
+        self.expanded_terms_query(&fields, &expanded, _options.scorer)
     }
 
     pub(super) fn plan_tag_query(
@@ -654,13 +645,26 @@ impl FullTextRuntime {
         }
     }
 
-    pub(super) fn validate_prefix_term_expansions(
+    pub(super) fn expand_prefix_terms(
         &self,
         fields: &[Field],
         limit: usize,
         prefix: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<Arc<FullTextExpansionCacheEntry>, Error> {
+        let cache_key = format!(
+            "prefix:{}:{prefix}",
+            fields
+                .iter()
+                .map(|field| field.field_id().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        if let Some(cached) = self.cached_expansion_terms(&cache_key)? {
+            global_metrics().record_fulltext_expanded_terms(cached.unique_term_count);
+            return self.validate_cached_expansion(cached, limit);
+        }
         let searcher = self.reader.searcher();
+        let mut unique = HashSet::new();
         let mut matched = HashSet::new();
         for segment in searcher.segment_readers() {
             for field in fields {
@@ -677,40 +681,181 @@ impl FullTextRuntime {
                     if !term.starts_with(prefix) {
                         break;
                     }
-                    matched.insert(term.to_string());
-                    if matched.len() > limit {
+                    unique.insert(term.to_string());
+                    matched.insert((*field, term.to_string()));
+                    if unique.len() > limit {
+                        let entry = Arc::new(FullTextExpansionCacheEntry {
+                            terms: Vec::new(),
+                            unique_term_count: unique.len(),
+                        });
+                        self.cache_expansion_terms(cache_key, entry)?;
+                        global_metrics().record_fulltext_expanded_terms(unique.len());
                         return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
                     }
                 }
             }
         }
-        Ok(())
+        let entry = Arc::new(FullTextExpansionCacheEntry {
+            terms: matched.into_iter().collect(),
+            unique_term_count: unique.len(),
+        });
+        self.cache_expansion_terms(cache_key, entry.clone())?;
+        global_metrics().record_fulltext_expanded_terms(entry.unique_term_count);
+        Ok(entry)
     }
 
-    pub(super) fn validate_automaton_expansions<A: Automaton>(
+    pub(super) fn expand_automaton_terms<A: Automaton>(
         &self,
         fields: &[Field],
         limit: usize,
+        query_key: &str,
         automaton: &A,
-    ) -> Result<(), Error>
+    ) -> Result<Arc<FullTextExpansionCacheEntry>, Error>
     where
         A::State: Clone,
     {
+        let cache_key = format!(
+            "automaton:{}:{query_key}",
+            fields
+                .iter()
+                .map(|field| field.field_id().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        if let Some(cached) = self.cached_expansion_terms(&cache_key)? {
+            global_metrics().record_fulltext_expanded_terms(cached.unique_term_count);
+            return self.validate_cached_expansion(cached, limit);
+        }
         let searcher = self.reader.searcher();
+        let mut unique = HashSet::new();
         let mut matched = HashSet::new();
         for segment in searcher.segment_readers() {
             for field in fields {
                 let inverted = segment.inverted_index(*field)?;
                 let mut stream = inverted.terms().search(automaton).into_stream()?;
                 while stream.advance() {
-                    matched.insert(stream.key().to_vec());
-                    if matched.len() > limit {
+                    let Ok(term) = std::str::from_utf8(stream.key()) else {
+                        continue;
+                    };
+                    unique.insert(term.to_string());
+                    matched.insert((*field, term.to_string()));
+                    if unique.len() > limit {
+                        let entry = Arc::new(FullTextExpansionCacheEntry {
+                            terms: Vec::new(),
+                            unique_term_count: unique.len(),
+                        });
+                        self.cache_expansion_terms(cache_key, entry)?;
+                        global_metrics().record_fulltext_expanded_terms(unique.len());
                         return Err(Error::msg("ERR fulltext query expansion limit exceeded"));
                     }
                 }
             }
         }
+        let entry = Arc::new(FullTextExpansionCacheEntry {
+            terms: matched.into_iter().collect(),
+            unique_term_count: unique.len(),
+        });
+        self.cache_expansion_terms(cache_key, entry.clone())?;
+        global_metrics().record_fulltext_expanded_terms(entry.unique_term_count);
+        Ok(entry)
+    }
+
+    fn cached_expansion_terms(
+        &self,
+        key: &str,
+    ) -> Result<Option<Arc<FullTextExpansionCacheEntry>>, Error> {
+        Ok(self
+            .expansion_terms
+            .lock()
+            .map_err(|_| Error::msg("ERR fulltext expansion cache lock poisoned"))?
+            .get(key)
+            .cloned())
+    }
+
+    fn cache_expansion_terms(
+        &self,
+        key: String,
+        terms: Arc<FullTextExpansionCacheEntry>,
+    ) -> Result<(), Error> {
+        const MAX_EXPANSION_CACHE_ENTRIES: usize = 1_024;
+        let mut cache = self
+            .expansion_terms
+            .lock()
+            .map_err(|_| Error::msg("ERR fulltext expansion cache lock poisoned"))?;
+        if cache.len() >= MAX_EXPANSION_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, terms);
         Ok(())
+    }
+
+    fn validate_cached_expansion(
+        &self,
+        cached: Arc<FullTextExpansionCacheEntry>,
+        limit: usize,
+    ) -> Result<Arc<FullTextExpansionCacheEntry>, Error> {
+        if cached.unique_term_count > limit {
+            Err(Error::msg("ERR fulltext query expansion limit exceeded"))
+        } else {
+            Ok(cached)
+        }
+    }
+
+    fn expanded_terms_query(
+        &self,
+        fields: &[Field],
+        expanded: &FullTextExpansionCacheEntry,
+        scorer: FullTextScorer,
+    ) -> Result<Box<dyn Query>, Error> {
+        if expanded.terms.is_empty() {
+            return Ok(Box::new(EmptyQuery));
+        }
+        self.or_field_queries(
+            fields.iter().filter_map(|field| {
+                let query_field = self.text_variant_field(*field);
+                let mut queries = expanded
+                    .terms
+                    .iter()
+                    .filter(|(expanded_field, _)| *expanded_field == query_field)
+                    .map(|(_, term)| {
+                        (
+                            Occur::Should,
+                            Box::new(TermQuery::new(
+                                Term::from_field_text(query_field, term),
+                                IndexRecordOption::Basic,
+                            )) as Box<dyn Query>,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if queries.is_empty() {
+                    return None;
+                }
+                let query = if queries.len() == 1 {
+                    queries.pop().expect("one expansion").1
+                } else {
+                    Box::new(BooleanQuery::new(queries)) as Box<dyn Query>
+                };
+                Some(Ok(self.boost_text_field(query, *field)))
+            }),
+            scorer,
+        )
+    }
+
+    fn regex_fields_query(
+        &self,
+        fields: &[Field],
+        regex: &str,
+        scorer: FullTextScorer,
+    ) -> Result<Box<dyn Query>, Error> {
+        self.or_field_queries(
+            fields.iter().map(|field| {
+                let query_field = self.text_variant_field(*field);
+                let query =
+                    Box::new(RegexQuery::from_pattern(regex, query_field)?) as Box<dyn Query>;
+                Ok(self.boost_text_field(query, *field))
+            }),
+            scorer,
+        )
     }
 
     pub(super) fn text_variant_field(&self, field: Field) -> Field {

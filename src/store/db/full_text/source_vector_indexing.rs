@@ -4,39 +4,106 @@ pub(super) type FullTextVectorMutationBatches = HashMap<String, Vec<(String, Opt
 impl Db {
     pub(super) fn fulltext_request_refresh_for_source(
         &self,
-        key: &str,
-        source_type: FullTextSourceType,
+        _key: &str,
+        _source_type: FullTextSourceType,
     ) -> Result<(), Error> {
         // The mutation itself already appended a durable outbox record in the
         // same write batch. Consistent searches only publish pending records
         // into the process-local Tantivy overlay; the maintenance worker owns
         // durable KV checkpoints and outbox retirement. Keep tokenization,
         // segment IO and merge work off the source-write path.
-        let matching_metas = self.fulltext_matching_metas_for_source(key, source_type)?;
-        if matching_metas.is_empty() {
-            return Ok(());
+        // The normal write helpers publish committed outbox markers directly
+        // from their WriteBatch. External writers (currently the TTL sweeper)
+        // use `fulltext_observe_external_source_commit` below.
+        Ok(())
+    }
+
+    pub(in crate::store) fn fulltext_observe_committed_outbox_batch(&self, batch: &WriteBatch) {
+        let mut committed = HashMap::<String, (u64, u64)>::new();
+        for (write_type, key, value) in batch.iter() {
+            if !write_type.is_put_like() || value.len() != std::mem::size_of::<u64>() {
+                continue;
+            }
+            let Some(index) = fulltext_index_from_outbox_latest_key(self.db_index, key) else {
+                continue;
+            };
+            let Some(seq) = value.try_into().ok().map(u64::from_be_bytes) else {
+                continue;
+            };
+            let entry = committed.entry(index).or_default();
+            entry.0 = entry.0.max(seq);
+            entry.1 = entry.1.saturating_add(1);
         }
-        let threshold = self.fulltext_outbox_compact_threshold()?;
-        for (index, meta) in matching_metas {
+        let compact_threshold = self
+            .fulltext_outbox_compact_threshold()
+            .unwrap_or(DEFAULT_OUTBOX_COMPACT_THRESHOLD);
+        for (index, (seq, count)) in committed {
+            self.fulltext_runtimes
+                .note_latest_outbox_seq(self.db_index, &index, seq);
             if self
                 .fulltext_runtimes
                 .outbox_pending(self.db_index, &index)
-                .is_none()
+                .is_some()
             {
-                // The just-committed mutation is already visible to this
-                // recovery scan, so do not increment it a second time.
-                self.fulltext_pending_outbox_count(&index);
-            } else {
                 self.fulltext_runtimes
-                    .add_outbox_pending(self.db_index, &index, 1);
+                    .add_outbox_pending(self.db_index, &index, count);
+            } else {
+                self.fulltext_pending_outbox_count(&index);
             }
+            if self.fulltext_runtimes.note_outbox_mutations(
+                self.db_index,
+                &index,
+                count as usize,
+                compact_threshold,
+            ) && let Err(error) =
+                self.fulltext_compact_outbox_if_needed(&index, compact_threshold)
+            {
+                log::error!("failed to compact committed fulltext outbox {index}: {error}");
+            }
+        }
+    }
+
+    pub(crate) fn fulltext_observe_external_source_commit(
+        &self,
+        key: &str,
+        source_type: FullTextSourceType,
+    ) -> Result<(), Error> {
+        let compact_threshold = self.fulltext_outbox_compact_threshold()?;
+        for (index, _) in self.fulltext_matching_metas_for_source(key, source_type)? {
+            let Some(seq) = self
+                .store
+                .get_raw(&fulltext_outbox_latest_key(self.db_index, &index))
+                .and_then(|raw| raw.try_into().ok())
+                .map(u64::from_be_bytes)
+            else {
+                continue;
+            };
+            let previous = self
+                .fulltext_runtimes
+                .latest_outbox_seq(self.db_index, &index);
+            if previous.is_some_and(|previous| previous >= seq) {
+                continue;
+            }
+            self.fulltext_runtimes
+                .note_latest_outbox_seq(self.db_index, &index, seq);
             if self
                 .fulltext_runtimes
-                .note_outbox_mutation(self.db_index, &index, threshold)
+                .outbox_pending(self.db_index, &index)
+                .is_some()
             {
-                self.fulltext_compact_outbox_if_needed(&index, threshold)?;
+                self.fulltext_runtimes
+                    .add_outbox_pending(self.db_index, &index, 1);
+            } else {
+                self.fulltext_pending_outbox_count(&index);
             }
-            let _ = meta;
+            if self.fulltext_runtimes.note_outbox_mutations(
+                self.db_index,
+                &index,
+                1,
+                compact_threshold,
+            ) {
+                self.fulltext_compact_outbox_if_needed(&index, compact_threshold)?;
+            }
         }
         Ok(())
     }
@@ -132,6 +199,8 @@ impl Db {
             None => CompareCondition::absent(&alias_key),
         });
         self.fulltext_compare_conditions(&conditions, &batch)?;
+        self.fulltext_runtimes
+            .set_alias_target(self.db_index, alias, &index);
         Ok(Frame::Ok)
     }
 
@@ -324,6 +393,13 @@ impl Db {
         json_root: Option<&serde_json::Value>,
         batches: &mut FullTextVectorMutationBatches,
     ) -> Result<(), Error> {
+        if !meta
+            .schema
+            .iter()
+            .any(|field| matches!(field.kind, FullTextFieldKind::Vector))
+        {
+            return Ok(());
+        }
         let hash_fields = matches!(meta.source_type, FullTextSourceType::Hash)
             .then(|| self.hash_get_all_bytes(key))
             .transpose()?;

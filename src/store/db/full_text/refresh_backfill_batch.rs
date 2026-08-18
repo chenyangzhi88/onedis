@@ -135,7 +135,6 @@ impl Db {
                 finished: false,
                 cursor,
                 docs,
-                bytes,
             });
         }
         let (keys, has_more) =
@@ -215,7 +214,6 @@ impl Db {
             finished,
             cursor,
             docs,
-            bytes,
         })
     }
 }

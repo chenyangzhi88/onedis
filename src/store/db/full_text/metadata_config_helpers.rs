@@ -5,6 +5,31 @@ impl Db {
     }
 
     pub(super) fn resolve_fulltext_index(&self, index_or_alias: &str) -> Result<String, Error> {
+        if let Some(runtime) = self.fulltext_runtimes.get(self.db_index, index_or_alias)
+            && runtime.read().is_ok_and(|runtime| {
+                runtime
+                    .search_meta
+                    .index_options
+                    .temporary_seconds
+                    .is_none()
+            })
+        {
+            return Ok(index_or_alias.to_string());
+        }
+        if let Some(index) = self
+            .fulltext_runtimes
+            .alias_target(self.db_index, index_or_alias)
+            && let Some(runtime) = self.fulltext_runtimes.get(self.db_index, &index)
+            && runtime.read().is_ok_and(|runtime| {
+                runtime
+                    .search_meta
+                    .index_options
+                    .temporary_seconds
+                    .is_none()
+            })
+        {
+            return Ok(index);
+        }
         if let Some(raw) = self
             .store
             .get_raw(&fulltext_meta_key(self.db_index, index_or_alias))
@@ -30,6 +55,8 @@ impl Db {
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
             self.fulltext_touch_temporary_index(&alias.index, &meta)?;
+            self.fulltext_runtimes
+                .set_alias_target(self.db_index, index_or_alias, &alias.index);
             return Ok(alias.index);
         }
         Err(Error::msg("ERR fulltext index does not exist"))
@@ -134,9 +161,7 @@ impl Db {
             route.source_type == source_type
                 && route.prefixes.iter().any(|prefix| key.starts_with(prefix))
         }) {
-            let Ok(meta) = self.read_fulltext_meta_direct(&route.index) else {
-                continue;
-            };
+            let meta = route.meta.clone();
             if self.fulltext_index_expired(&route.index, &meta)
                 || matches!(meta.state, FullTextIndexState::Dropping)
             {
@@ -159,7 +184,8 @@ impl Db {
             .map(|(index, meta)| FullTextSourceRoute {
                 index,
                 source_type: meta.source_type,
-                prefixes: meta.prefixes,
+                prefixes: meta.prefixes.clone(),
+                meta,
             })
             .collect::<Vec<_>>();
         self.fulltext_runtimes
@@ -190,11 +216,31 @@ impl Db {
     }
 
     pub(super) fn fulltext_latest_outbox_seq(&self, index: &str) -> Option<u64> {
+        if let Some(seq) = self
+            .fulltext_runtimes
+            .latest_outbox_seq(self.db_index, index)
+        {
+            return (seq > 0).then_some(seq);
+        }
+        if let Some(seq) = self
+            .store
+            .get_raw(&fulltext_outbox_latest_key(self.db_index, index))
+            .and_then(|raw| raw.try_into().ok())
+            .map(u64::from_be_bytes)
+        {
+            self.fulltext_runtimes
+                .note_latest_outbox_seq(self.db_index, index, seq);
+            return Some(seq);
+        }
         let prefix = fulltext_outbox_prefix(self.db_index, index);
-        self.store
+        let latest = self
+            .store
             .scan_range_raw_limited_reverse(&prefix, prefix_exclusive_upper_bound(&prefix), 1)
             .into_iter()
-            .find_map(|(key, _)| fulltext_outbox_seq_from_key(self.db_index, index, &key))
+            .find_map(|(key, _)| fulltext_outbox_seq_from_key(self.db_index, index, &key));
+        self.fulltext_runtimes
+            .note_latest_outbox_seq(self.db_index, index, latest.unwrap_or(0));
+        latest
     }
 
     pub(super) fn fulltext_unpublished_outbox_count(
@@ -394,13 +440,16 @@ impl Db {
     }
 
     pub(super) fn fulltext_config_value(&self, name: &str) -> Result<Option<String>, Error> {
-        self.store
-            .get_raw(&fulltext_config_key(self.db_index, name))
-            .map(|raw| {
-                String::from_utf8(raw)
-                    .map_err(|_| Error::msg("ERR failed to decode fulltext config"))
+        self.fulltext_runtimes
+            .config_value(self.db_index, name, || {
+                self.store
+                    .get_raw(&fulltext_config_key(self.db_index, name))
+                    .map(|raw| {
+                        String::from_utf8(raw)
+                            .map_err(|_| Error::msg("ERR failed to decode fulltext config"))
+                    })
+                    .transpose()
             })
-            .transpose()
     }
 
     pub(super) fn fulltext_effective_search_options(

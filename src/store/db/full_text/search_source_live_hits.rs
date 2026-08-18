@@ -33,6 +33,7 @@ impl Db {
             FullTextSourceType::Json => TYPE_JSON,
         };
         let now = current_fulltext_millis();
+        let projected_hash_fields = fulltext_hash_projection(meta, options);
         let mut live = Vec::with_capacity(candidates.len());
         for (candidate, raw_meta) in candidates.into_iter().zip(raw_metas) {
             let Some(header) = raw_meta.as_deref().and_then(decode_meta_header) else {
@@ -47,16 +48,29 @@ impl Db {
             }
             match meta.source_type {
                 FullTextSourceType::Hash => {
-                    let fields = self
-                        .hash_live_entries_raw(&candidate.key, header.version)
-                        .into_iter()
-                        .filter_map(|(field, value)| {
-                            Some((
-                                String::from_utf8(field).ok()?,
-                                String::from_utf8(value).ok()?,
-                            ))
-                        })
-                        .collect::<Vec<_>>();
+                    let fields = if let Some(projected) = &projected_hash_fields {
+                        projected
+                            .iter()
+                            .filter_map(|(source, output)| {
+                                let value = self.hash_live_field_value(
+                                    &candidate.key,
+                                    header.version,
+                                    source,
+                                )?;
+                                Some((output.clone(), String::from_utf8(value).ok()?))
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        self.hash_live_entries_raw(&candidate.key, header.version)
+                            .into_iter()
+                            .filter_map(|(field, value)| {
+                                Some((
+                                    String::from_utf8(field).ok()?,
+                                    String::from_utf8(value).ok()?,
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                    };
                     if let Some(hit) = self.fulltext_hash_live_hit(
                         meta,
                         options,
@@ -247,6 +261,41 @@ impl Db {
             payload,
         }))
     }
+}
+
+fn fulltext_hash_projection(
+    meta: &FullTextIndexMeta,
+    options: &FullTextSearchOptions,
+) -> Option<Vec<(String, String)>> {
+    let requested = options.return_fields.as_ref()?;
+    if options.no_content
+        || !options.filters.is_empty()
+        || !options.geo_filters.is_empty()
+        || options.sort_by.is_some()
+        || options.summarize.is_some()
+        || options.highlight.is_some()
+        || matches!(options.scorer, FullTextScorer::DocScore)
+        || meta.index_options.score_field.is_some()
+        || options.with_payloads
+    {
+        return None;
+    }
+    let mut projection = Vec::with_capacity(requested.len());
+    for field in requested {
+        let source = meta
+            .schema
+            .iter()
+            .find(|schema| schema.attribute_name() == field.identifier)
+            .map(|schema| schema.name.clone())
+            .unwrap_or_else(|| field.identifier.clone());
+        if !projection
+            .iter()
+            .any(|(_, output)| output == &field.identifier)
+        {
+            projection.push((source, field.identifier.clone()));
+        }
+    }
+    Some(projection)
 }
 
 pub(super) fn fulltext_document_score(

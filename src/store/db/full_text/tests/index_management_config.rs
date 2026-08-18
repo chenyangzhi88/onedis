@@ -420,3 +420,80 @@ fn search_publishes_hot_generation_and_maintenance_checkpoints_it() {
         .unwrap();
     assert_eq!(recovered_hits.hits.len(), 1);
 }
+
+#[test]
+fn search_materializes_only_the_requested_page_and_nocontent_skips_source_fields() {
+    let store = test_store("page-materialization");
+    let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
+    let ttl_manager =
+        crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
+    let db = Db::new(0, store, version_counter, ttl_manager);
+    let mut index_options = FullTextIndexOptions::default();
+    index_options.skip_initial_scan = true;
+    db.fulltext_create(
+        "idx",
+        FullTextCreateOptions {
+            source_type: FullTextSourceType::Hash,
+            prefixes: vec!["doc:".to_string()],
+            schema: vec![
+                text_field("title"),
+                field("price", FullTextFieldKind::Numeric),
+            ],
+            index_options,
+        },
+    )
+    .unwrap();
+    for ordinal in 0..30 {
+        let key = format!("doc:{ordinal:02}");
+        db.hash_set(&key, "title", "common page materialization")
+            .unwrap();
+        db.hash_set(&key, "price", &ordinal.to_string()).unwrap();
+    }
+
+    let mut options = search_options();
+    options.offset = 20;
+    options.limit = 5;
+    let content = db
+        .fulltext_collect_live_hits("idx", "common", &options, FullTextCollectMode::Page)
+        .unwrap();
+    assert_eq!(content.total, 30);
+    assert_eq!(content.hits.len(), 5);
+    assert!(content.page_offset_applied);
+    assert!(content.hits.iter().all(|hit| !hit.fields.is_empty()));
+
+    options.return_fields = Some(vec![FullTextReturnField {
+        identifier: "title".to_string(),
+        alias: Some("headline".to_string()),
+    }]);
+    let projected = db
+        .fulltext_collect_live_hits("idx", "common", &options, FullTextCollectMode::Page)
+        .unwrap();
+    assert!(projected.hits.iter().all(|hit| hit.fields
+        == vec![(
+            "title".to_string(),
+            "common page materialization".to_string()
+        )]));
+
+    options.no_content = true;
+    options.return_fields = None;
+    let no_content = db
+        .fulltext_collect_live_hits("idx", "common", &options, FullTextCollectMode::Page)
+        .unwrap();
+    assert_eq!(no_content.total, 30);
+    assert_eq!(no_content.hits.len(), 5);
+    assert!(no_content.page_offset_applied);
+    assert!(no_content.hits.iter().all(|hit| hit.fields.is_empty()));
+
+    options.filters.push(FullTextSearchNumericFilter {
+        field: "price".to_string(),
+        min: FullTextSearchBound::Inclusive(20.0),
+        max: FullTextSearchBound::Inclusive(29.0),
+    });
+    options.offset = 0;
+    let filtered = db
+        .fulltext_collect_live_hits("idx", "common", &options, FullTextCollectMode::Page)
+        .unwrap();
+    assert_eq!(filtered.total, 10);
+    assert_eq!(filtered.hits.len(), 5);
+    assert!(filtered.page_offset_applied);
+}

@@ -63,16 +63,25 @@ impl Db {
             FullTextHybridCombine::Rrf { window, .. }
             | FullTextHybridCombine::Linear { window, .. } => window,
         };
+        // Both branches only need IDs and scores for fusion. Source fields are
+        // materialized once, after fusion and final pagination.
+        let mut candidate_options = search_options.clone();
+        candidate_options.no_content = true;
+        candidate_options.return_fields = None;
+        candidate_options.highlight = None;
+        candidate_options.summarize = None;
+        candidate_options.with_payloads = false;
+        candidate_options.with_sort_keys = false;
         let text = self.fulltext_collect_live_hits(
             index,
             search_query,
-            &search_options,
+            &candidate_options,
             FullTextCollectMode::Window(window),
         )?;
         let vector = self.fulltext_collect_live_hits(
             index,
             vector_query,
-            &search_options,
+            &candidate_options,
             FullTextCollectMode::Window(window),
         )?;
         let mut combined = combine_fulltext_hybrid_hits(text, vector, &options)?;
@@ -86,6 +95,14 @@ impl Db {
             post_options.in_keys = Some(candidate_keys);
             post_options.offset = 0;
             post_options.limit = combined.hits.len();
+            post_options.no_content = true;
+            post_options.return_fields = None;
+            post_options.highlight = None;
+            post_options.summarize = None;
+            post_options.with_payloads = false;
+            post_options.with_sort_keys = false;
+            post_options.sort_by = None;
+            post_options.scorer = FullTextScorer::Bm25Std;
             let allowed = self.fulltext_collect_live_hits(
                 index,
                 post_filter,
@@ -100,6 +117,54 @@ impl Db {
             combined.hits.retain(|hit| allowed.contains(&hit.key));
             combined.total = combined.hits.len();
         }
+        let total = combined.hits.len();
+        let selected = combined
+            .hits
+            .into_iter()
+            .skip(search_options.offset)
+            .take(search_options.limit)
+            .collect::<Vec<_>>();
+        let hits = if search_options.no_content {
+            selected
+        } else {
+            let resolved = self.resolve_fulltext_index(index)?;
+            let runtime = self
+                .fulltext_runtimes
+                .get(self.db_index, &resolved)
+                .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
+            let meta = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+                .search_meta
+                .clone();
+            let mut materialized = Vec::with_capacity(selected.len());
+            for candidate in selected {
+                let score = candidate.score;
+                let synthetic_fields = candidate.fields;
+                if let Some(mut hit) = self.fulltext_live_hit_from_source(
+                    &meta,
+                    &search_options,
+                    candidate.key,
+                    score,
+                )? {
+                    // Hybrid fusion owns the final score. Source materialization
+                    // must not apply a text scorer or document-score multiplier.
+                    hit.score = score;
+                    for field in synthetic_fields {
+                        if !hit.fields.iter().any(|existing| existing.0 == field.0) {
+                            hit.fields.push(field);
+                        }
+                    }
+                    materialized.push(hit);
+                }
+            }
+            materialized
+        };
+        combined = FullTextCollectedHits {
+            total,
+            hits,
+            page_offset_applied: true,
+        };
         self.fulltext_search_frame(
             combined,
             &search_options,
@@ -253,6 +318,7 @@ fn combine_fulltext_hybrid_hits(
     Ok(FullTextCollectedHits {
         total: combined.len(),
         hits: combined,
+        page_offset_applied: false,
     })
 }
 

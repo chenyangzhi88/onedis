@@ -150,11 +150,32 @@ impl DatabaseManager {
         }
 
         let weak_vector_runtimes = Arc::downgrade(&vector_runtimes);
+        let expire_observer_dbs = dbs.iter().map(Arc::downgrade).collect::<Vec<Weak<Db>>>();
         ttl_manager.set_expire_observer(Arc::new(move |db_index, key, type_tag, version| {
             if type_tag == TYPE_VECTOR
                 && let Some(vector_runtimes) = weak_vector_runtimes.upgrade()
             {
                 vector_runtimes.remove_expired(db_index, key, version);
+            }
+            let Some(db) = expire_observer_dbs
+                .get(db_index as usize)
+                .and_then(Weak::upgrade)
+            else {
+                return;
+            };
+            let result = match type_tag {
+                TYPE_HASH => db.fulltext_observe_external_source_commit(
+                    key,
+                    crate::store::db::FullTextSourceType::Hash,
+                ),
+                TYPE_JSON => db.fulltext_observe_external_source_commit(
+                    key,
+                    crate::store::db::FullTextSourceType::Json,
+                ),
+                _ => Ok(()),
+            };
+            if let Err(err) = result {
+                log::error!("failed to observe committed fulltext expiry for {key}: {err}");
             }
         }));
 

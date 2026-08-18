@@ -148,6 +148,7 @@ pub struct FullTextSortBy {
 pub(super) struct FullTextSearchHit {
     pub(super) key: String,
     pub(super) score: f32,
+    pub(super) address: DocAddress,
 }
 
 pub(super) struct FullTextSearchHits {
@@ -159,6 +160,9 @@ pub(super) struct FullTextSearchHits {
 pub(super) struct FullTextCollectedHits {
     pub(super) total: usize,
     pub(super) hits: Vec<FullTextLiveHit>,
+    /// The collector already selected the requested FT.SEARCH page. Response
+    /// materialization must not apply OFFSET a second time.
+    pub(super) page_offset_applied: bool,
 }
 
 #[derive(Clone, Copy)]

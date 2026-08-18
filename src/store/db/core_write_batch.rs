@@ -18,6 +18,7 @@ impl Db {
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch(batch);
         self.invalidate_zset_length_cache_for_batch(batch);
+        self.fulltext_observe_committed_outbox_batch(batch);
         self.record_or_publish_mutations(batch);
     }
 
@@ -75,6 +76,7 @@ impl Db {
         self.invalidate_list_meta_cache_for_batch(batch);
         self.store.write_batch_async(batch).await;
         self.invalidate_zset_length_cache_for_batch(batch);
+        self.fulltext_observe_committed_outbox_batch(batch);
         if let Some(logical_keys) = logical_keys {
             self.record_or_publish_known_key_mutations(logical_keys);
         } else {
@@ -167,6 +169,7 @@ impl Db {
         {
             Ok(()) => {
                 self.invalidate_zset_length_cache_for_batch(batch);
+                self.fulltext_observe_committed_outbox_batch(batch);
                 self.record_or_publish_mutations_inner(batch, reconcile_vector_runtimes);
                 Ok(true)
             }
@@ -215,6 +218,7 @@ impl Db {
         match self.store.compare_and_write_batch(conditions, batch) {
             Ok(()) => {
                 self.invalidate_zset_length_cache_for_batch(batch);
+                self.fulltext_observe_committed_outbox_batch(batch);
                 self.record_or_publish_mutations_inner(batch, reconcile_vector_runtimes);
                 Ok(true)
             }

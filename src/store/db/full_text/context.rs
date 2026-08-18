@@ -26,18 +26,17 @@ pub(super) use levenshtein_automata::{
 pub(super) use rust_stemmers::{Algorithm as StemmerAlgorithm, Stemmer};
 pub(super) use tantivy::collector::sort_key::{SortByStaticFastValue, SortByString};
 pub(super) use tantivy::{
-    DocAddress, DocId, DocSet, Index, IndexReader, IndexWriter, Order, Score, SegmentOrdinal,
-    SegmentReader, TERMINATED, Term,
+    DocAddress, DocId, Index, IndexReader, IndexWriter, Order, Score, SegmentOrdinal,
+    SegmentReader, Term,
     collector::{Collector, Count, SegmentCollector, TopDocs},
     indexer::LogMergePolicy,
     query::{
-        AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, FuzzyTermQuery, Occur,
-        PhrasePrefixQuery, PhraseQuery, Query, QueryParser, RangeQuery, RegexQuery, Scorer,
-        TermQuery, Weight,
+        AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, EmptyQuery, Occur, PhraseQuery,
+        Query, QueryParser, RangeQuery, RegexQuery, TermQuery, Weight,
     },
     schema::{
         FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TantivyDocument,
-        TextFieldIndexing, TextOptions, Value,
+        TextFieldIndexing, TextOptions,
     },
 };
 pub(super) use tantivy_fst::{Automaton, Regex as FstRegex};
@@ -50,7 +49,7 @@ pub(super) use super::super::{
     logical_main_key_from_raw_key, prefix_exclusive_upper_bound,
 };
 pub(super) use crate::frame::Frame;
-pub(super) use crate::observability::metrics::{elapsed_us, global_metrics};
+pub(super) use crate::observability::metrics::{FullTextSearchStage, elapsed_us, global_metrics};
 pub(super) use crate::store::kv_store::CompareCondition;
 pub(super) use crate::store::ttl::{TYPE_HASH, TYPE_JSON, decode_meta_header};
 

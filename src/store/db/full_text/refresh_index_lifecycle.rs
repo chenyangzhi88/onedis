@@ -33,7 +33,17 @@ impl Db {
             .get_field(FULLTEXT_KEY_FIELD)
             .ok()
             .is_none_or(|field| !schema.get_field_entry(field).is_fast());
-        Ok(missing_expiration || key_is_not_fast)
+        let geo_is_not_fast = meta.schema.iter().enumerate().any(|(offset, field)| {
+            matches!(field.kind, FullTextFieldKind::Geo)
+                && !field.options.noindex
+                && ["lon", "lat"].into_iter().any(|axis| {
+                    schema
+                        .get_field(&format!("{FULLTEXT_GEO_FIELD_PREFIX}{offset}_{axis}"))
+                        .ok()
+                        .is_none_or(|field| !schema.get_field_entry(field).is_fast())
+                })
+        });
+        Ok(missing_expiration || key_is_not_fast || geo_is_not_fast)
     }
 
     pub(super) fn fulltext_refresh_index_inner(
@@ -126,6 +136,9 @@ impl Db {
         deadline: Instant,
     ) -> Result<bool, Error> {
         self.ensure_fulltext_runtime(index)?;
+        if self.fulltext_refresh_progress(index)?.0 {
+            return Ok(true);
+        }
         let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
         let _refresh_guard = refresh_lock
             .lock()
@@ -156,7 +169,6 @@ impl Db {
         &self,
         index: &str,
     ) -> Result<(bool, usize, Option<String>), Error> {
-        let meta = self.read_fulltext_meta_direct(index)?;
         let runtime = self
             .fulltext_runtimes
             .get(self.db_index, index)
@@ -165,17 +177,9 @@ impl Db {
             .read()
             .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
         let published_seq = runtime.published_outbox_seq();
-        let pending = self.fulltext_unpublished_outbox_count(index, published_seq);
-        let latest_is_published = self
-            .fulltext_latest_outbox_seq(index)
-            .is_none_or(|latest| latest <= published_seq);
-        let complete = pending == 0
-            && latest_is_published
-            && runtime.backfill_complete
-            && !matches!(
-                meta.state,
-                FullTextIndexState::Dirty | FullTextIndexState::Dropping
-            );
+        let latest = self.fulltext_latest_outbox_seq(index).unwrap_or(0);
+        let pending = latest.saturating_sub(published_seq).min(usize::MAX as u64) as usize;
+        let complete = pending == 0 && runtime.backfill_complete;
         Ok((complete, pending, runtime.published_backfill_cursor.clone()))
     }
 

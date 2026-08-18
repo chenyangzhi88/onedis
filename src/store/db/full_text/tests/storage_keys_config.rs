@@ -38,6 +38,18 @@ fn storage_key_helpers_round_trip_and_reject_bad_suffixes() {
         fulltext_outbox_seq_from_key(7, "idx", &fulltext_outbox_key(7, "idx", 42)).unwrap(),
         42
     );
+    assert!(
+        fulltext_outbox_latest_key(7, "idx").starts_with(&fulltext_meta_prefix(7)),
+        "the durable latest-outbox watermark belongs to the index metadata namespace"
+    );
+    assert!(
+        fulltext_index_from_meta_key(7, &fulltext_outbox_latest_key(7, "idx")).is_none(),
+        "the watermark must not be mistaken for an index definition"
+    );
+    assert_eq!(
+        fulltext_index_from_outbox_latest_key(7, &fulltext_outbox_latest_key(7, "idx")).as_deref(),
+        Some("idx")
+    );
     let mut bad_outbox = fulltext_outbox_key(7, "idx", 42);
     bad_outbox.push(0);
     assert!(fulltext_outbox_seq_from_key(7, "idx", &bad_outbox).is_none());

@@ -55,11 +55,11 @@ impl FullTextRuntime {
             if matches!(field.kind, FullTextFieldKind::Geo) && !field.options.noindex {
                 let lon = builder.add_f64_field(
                     &format!("{FULLTEXT_GEO_FIELD_PREFIX}{schema_offset}_lon"),
-                    INDEXED,
+                    INDEXED | FAST,
                 );
                 let lat = builder.add_f64_field(
                     &format!("{FULLTEXT_GEO_FIELD_PREFIX}{schema_offset}_lat"),
-                    INDEXED,
+                    INDEXED | FAST,
                 );
                 geo_fields.insert(field.name.clone(), (lon, lat));
                 geo_fields.insert(field.attribute_name().to_string(), (lon, lat));
@@ -180,6 +180,13 @@ impl FullTextRuntime {
         );
         let index = Index::open_or_create(directory.clone(), schema)?;
         let reader = index.reader()?;
+        let has_expiring_documents = reader.searcher().search(
+            &RangeQuery::new(
+                Bound::Excluded(Term::from_field_u64(expires_at_field, 0)),
+                Bound::Unbounded,
+            ),
+            &Count,
+        )? > 0;
         let writer = index.writer(config.writer_heap_bytes)?;
         let mut merge_policy = LogMergePolicy::default();
         merge_policy.set_min_num_segments(config.merge_min_segments);
@@ -194,6 +201,7 @@ impl FullTextRuntime {
         writer.set_merge_policy(Box::new(merge_policy));
         Ok(Self {
             incarnation: meta.incarnation,
+            search_meta: meta.clone(),
             index,
             reader,
             writer,
@@ -226,6 +234,8 @@ impl FullTextRuntime {
             min_prefix: config.min_prefix,
             max_expansions: config.max_expansions,
             max_prefix_expansions: config.max_prefix_expansions,
+            has_expiring_documents,
+            expansion_terms: Mutex::new(HashMap::new()),
             last_refresh_at: Instant::now(),
         })
     }

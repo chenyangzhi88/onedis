@@ -193,6 +193,7 @@ impl FullTextRuntime {
         merge_policy.set_del_docs_ratio_before_merge(config.merge_delete_ratio);
         writer.set_merge_policy(Box::new(merge_policy));
         Ok(Self {
+            incarnation: meta.incarnation,
             index,
             reader,
             writer,

@@ -357,6 +357,7 @@ pub(super) fn fulltext_vector_distance(
     fulltext_vector_distance_prepared(distance, lhs, lhs_norm_squared, rhs)
 }
 
+#[cfg(test)]
 pub(super) fn fulltext_vector_distance_prepared(
     distance: &str,
     lhs: &[f32],

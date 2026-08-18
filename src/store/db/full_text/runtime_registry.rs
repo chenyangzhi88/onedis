@@ -41,6 +41,33 @@ impl FullTextRuntimeRegistry {
         self.outbox_pending.remove(&key);
     }
 
+    pub(super) fn remove_if_incarnation(
+        &self,
+        db_index: u16,
+        index: &str,
+        incarnation: u64,
+    ) -> bool {
+        let key = Self::key(db_index, index);
+        let removed = match self.indexes.entry(key.clone()) {
+            Entry::Occupied(entry) => {
+                let matches = entry
+                    .get()
+                    .read()
+                    .is_ok_and(|runtime| runtime.incarnation == incarnation);
+                if matches {
+                    entry.remove();
+                }
+                matches
+            }
+            Entry::Vacant(_) => false,
+        };
+        if removed {
+            self.outbox_mutations_since_compaction.remove(&key);
+            self.outbox_pending.remove(&key);
+        }
+        removed
+    }
+
     pub(crate) fn remove_db(&self, db_index: u16) {
         self.indexes.retain(|key, _| key.db_index != db_index);
         self.outbox_mutations_since_compaction

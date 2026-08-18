@@ -244,6 +244,10 @@ impl Db {
             pending_segments,
             memtable_docs,
             indexed_segments,
+            delta_hnsw_nodes,
+            exact_tail_docs,
+            rerank_source_docs,
+            rerank_source_vector_bytes,
         ) = self.vector_runtime_stats(index, version);
         Ok(vec![
             ("dim".to_string(), meta.dim.to_string()),
@@ -310,6 +314,23 @@ impl Db {
             ("hnsw_total_nodes".to_string(), total_nodes.to_string()),
             ("hnsw_deleted_nodes".to_string(), deleted_nodes.to_string()),
             ("pending_segments".to_string(), pending_segments.to_string()),
+            (
+                "delta_hnsw_nodes".to_string(),
+                delta_hnsw_nodes.to_string(),
+            ),
+            ("exact_tail_docs".to_string(), exact_tail_docs.to_string()),
+            (
+                "delta_hnsw_min_changes".to_string(),
+                vector_delta_hnsw_min_changes().to_string(),
+            ),
+            (
+                "rerank_source_docs".to_string(),
+                rerank_source_docs.to_string(),
+            ),
+            (
+                "rerank_source_vector_bytes".to_string(),
+                rerank_source_vector_bytes.to_string(),
+            ),
         ])
     }
 
@@ -323,6 +344,10 @@ impl Db {
             pending_segments,
             memtable_docs,
             indexed_segments,
+            delta_hnsw_nodes,
+            exact_tail_docs,
+            rerank_source_docs,
+            rerank_source_vector_bytes,
         ) = self.vector_runtime_stats(index, version);
         Ok(vec![
             ("dim".to_string(), meta.dim.to_string()),
@@ -389,6 +414,23 @@ impl Db {
             ("hnsw_total_nodes".to_string(), total_nodes.to_string()),
             ("hnsw_deleted_nodes".to_string(), deleted_nodes.to_string()),
             ("pending_segments".to_string(), pending_segments.to_string()),
+            (
+                "delta_hnsw_nodes".to_string(),
+                delta_hnsw_nodes.to_string(),
+            ),
+            ("exact_tail_docs".to_string(), exact_tail_docs.to_string()),
+            (
+                "delta_hnsw_min_changes".to_string(),
+                vector_delta_hnsw_min_changes().to_string(),
+            ),
+            (
+                "rerank_source_docs".to_string(),
+                rerank_source_docs.to_string(),
+            ),
+            (
+                "rerank_source_vector_bytes".to_string(),
+                rerank_source_vector_bytes.to_string(),
+            ),
         ])
     }
 

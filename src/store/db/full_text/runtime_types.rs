@@ -13,6 +13,7 @@ pub(super) struct FullTextRuntimeKey {
 }
 
 pub(super) struct FullTextRuntime {
+    pub(super) incarnation: u64,
     pub(super) index: Index,
     pub(super) reader: IndexReader,
     pub(super) writer: IndexWriter,

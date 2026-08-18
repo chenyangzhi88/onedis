@@ -4,9 +4,11 @@ use std::{
     io::Write,
     path::Path,
     sync::{
-        Arc,
+        Arc, Barrier,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
+    time::Duration,
 };
 use tantivy::directory::{
     Directory, TerminatingWrite, WatchCallback,
@@ -169,4 +171,57 @@ fn tiered_directory_publishes_hot_files_before_durable_checkpoint() {
         durable.atomic_read(Path::new("meta.json")).unwrap(),
         br#"{"generation":2}"#
     );
+}
+
+#[test]
+fn tiered_checkpoint_and_file_creation_do_not_deadlock() {
+    const ITERATIONS: usize = 16;
+    let store = test_store();
+    let directory = Arc::new(KvTantivyDirectory::new_tiered(
+        store,
+        11,
+        "idx",
+        2 * 1024 * 1024,
+    ));
+    let (checkpoint_finished_tx, checkpoint_finished_rx) = mpsc::channel();
+    let (writer_finished_tx, writer_finished_rx) = mpsc::channel();
+    let start = Arc::new(Barrier::new(2));
+
+    let checkpoint_directory = directory.clone();
+    let checkpoint_start = start.clone();
+    let checkpoint = std::thread::spawn(move || {
+        checkpoint_start.wait();
+        for iteration in 0..ITERATIONS {
+            checkpoint_directory
+                .atomic_write(
+                    Path::new("meta.json"),
+                    format!("{{\"generation\":{iteration}}}").as_bytes(),
+                )
+                .unwrap();
+            checkpoint_directory.checkpoint().unwrap();
+        }
+        checkpoint_finished_tx.send(()).unwrap();
+    });
+
+    let writer_directory = directory.clone();
+    let writer_start = start;
+    let writer = std::thread::spawn(move || {
+        writer_start.wait();
+        for iteration in 0..ITERATIONS {
+            let path = format!("segment-{iteration}.bin");
+            let mut output = writer_directory.open_write(Path::new(&path)).unwrap();
+            output.write_all(b"segment").unwrap();
+            output.terminate().unwrap();
+        }
+        writer_finished_tx.send(()).unwrap();
+    });
+
+    checkpoint_finished_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("checkpoint worker deadlocked");
+    writer_finished_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("file creation worker deadlocked");
+    checkpoint.join().unwrap();
+    writer.join().unwrap();
 }

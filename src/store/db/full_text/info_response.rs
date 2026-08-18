@@ -42,6 +42,10 @@ impl Db {
 
     pub fn fulltext_info(&self, index: &str) -> Result<Frame, Error> {
         let index = self.resolve_fulltext_index(index)?;
+        let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, &index);
+        let _lifecycle_guard = lifecycle_lock
+            .read()
+            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
         let meta = self.read_fulltext_meta_direct(&index)?;
         let runtime = self.fulltext_runtimes.get(self.db_index, &index);
         let (published_seq, durable_seq, hot_dirty, segment_count, published_docs) = runtime

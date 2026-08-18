@@ -47,10 +47,20 @@ impl Db {
         &self,
         index: &str,
     ) -> Result<(FullTextIndexMeta, Vec<u8>), Error> {
-        let Some(raw) = self.store.get_raw(&fulltext_meta_key(self.db_index, index)) else {
+        let Some(versioned) = self.read_fulltext_meta_versioned_optional(index)? else {
             return Err(Error::msg("ERR fulltext index does not exist"));
         };
-        Ok((decode_fulltext_meta_for_index(index, &raw)?, raw))
+        Ok(versioned)
+    }
+
+    pub(super) fn read_fulltext_meta_versioned_optional(
+        &self,
+        index: &str,
+    ) -> Result<Option<(FullTextIndexMeta, Vec<u8>)>, Error> {
+        let Some(raw) = self.store.get_raw(&fulltext_meta_key(self.db_index, index)) else {
+            return Ok(None);
+        };
+        Ok(Some((decode_fulltext_meta_for_index(index, &raw)?, raw)))
     }
 
     pub(super) fn fulltext_write_meta_cas(

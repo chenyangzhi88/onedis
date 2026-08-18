@@ -27,8 +27,12 @@ fn decode_vector_meta(raw: &[u8]) -> Result<VectorIndexMeta, Error> {
 
 fn decode_vector_hnsw_index(raw: &[u8]) -> Result<VectorHnswIndexBlob, Error> {
     decode_record::<VectorHnswIndexBlob>(raw).or_else(|current_error| {
-        decode_record::<LegacyVectorHnswIndexBlobV1>(raw)
-            .map(VectorHnswIndexBlob::from_legacy)
+        decode_record::<LegacyVectorHnswIndexBlobV2>(raw)
+            .map(VectorHnswIndexBlob::from_legacy_v2)
+            .or_else(|_| {
+                decode_record::<LegacyVectorHnswIndexBlobV1>(raw)
+                    .map(VectorHnswIndexBlob::from_legacy)
+            })
             .map_err(|_| current_error)
     })
 }

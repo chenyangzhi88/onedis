@@ -29,7 +29,7 @@ fn fulltext_vector_indexes_are_internal_and_not_redis_keys() {
     assert_eq!(db.vector_dim(&internal).unwrap(), Some(3));
 
     db.hash_set("doc:1", "vec", "[1,0,0]").unwrap();
-    db.fulltext_refresh_index("idx", true).unwrap();
+    db.fulltext_maintenance_tick().unwrap();
     assert_eq!(db.vector_card(&internal).unwrap(), 1);
 
     db.fulltext_drop_index("idx", false).unwrap();
@@ -334,7 +334,7 @@ fn recreated_index_ignores_late_outbox_records_from_the_dropped_incarnation() {
         })
         .unwrap(),
     );
-    db.fulltext_refresh_index("idx", true).unwrap();
+    db.fulltext_maintenance_tick().unwrap();
 
     let runtime = db.fulltext_runtimes.get(0, "idx").unwrap();
     assert!(

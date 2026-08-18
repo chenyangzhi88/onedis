@@ -1,30 +1,5 @@
 use super::*;
 
-struct RankedFullTextVectorResult(VectorSearchResult);
-
-impl PartialEq for RankedFullTextVectorResult {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.score.to_bits() == other.0.score.to_bits() && self.0.id == other.0.id
-    }
-}
-
-impl Eq for RankedFullTextVectorResult {}
-
-impl PartialOrd for RankedFullTextVectorResult {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RankedFullTextVectorResult {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .score
-            .total_cmp(&other.0.score)
-            .then_with(|| self.0.id.cmp(&other.0.id))
-    }
-}
-
 impl Db {
     pub(super) fn fulltext_vector_hits(
         &self,
@@ -147,6 +122,7 @@ impl Db {
                     with_attrs_json: false,
                     ef: options.vector_ef_runtime,
                     filter_ef: options.vector_filter_ef,
+                    rerank: None,
                     exact: false,
                     offset: 0,
                     limit: None,
@@ -265,81 +241,24 @@ impl Db {
         deadline: Instant,
         fail_on_timeout: bool,
     ) -> Result<Vec<VectorSearchResult>, Error> {
-        let distance = fulltext_vector_attr(
-            vector_field
-                .options
-                .vector
-                .as_ref()
-                .ok_or_else(|| Error::msg("ERR missing VECTOR options"))?,
-            "DISTANCE_METRIC",
-        )?;
-        let mut results = Vec::new();
-        let mut top_k = limit.map(|limit| BinaryHeap::with_capacity(limit.min(4096)));
+        let _ = vector_field;
         let vector_budget =
             self.fulltext_config_usize("MEMORY_BUDGET_VECTOR_HEAP_BYTES", 16_777_216)?;
-        let query_norm_squared = query.iter().map(|value| value * value).sum::<f32>();
-        let mut used = 0usize;
-        self.visit_vector_elements(vector_index, |id, vector| {
-            if fulltext_search_timeout_reached(deadline, fail_on_timeout)? {
-                return Ok(false);
-            }
-            if allow_doc_ids.is_some_and(|allow| !allow.contains(&id)) {
-                return Ok(true);
-            }
-            let score =
-                fulltext_vector_distance_prepared(&distance, query, query_norm_squared, &vector)?;
-            if max_score.is_some_and(|maximum| score > maximum) {
-                return Ok(true);
-            }
-            let result = VectorSearchResult {
-                id,
-                score,
-                attrs: Vec::new(),
-                attrs_json: None,
-            };
-            let result_bytes =
-                std::mem::size_of::<VectorSearchResult>().saturating_add(result.id.len());
-            if let Some(heap) = top_k.as_mut() {
-                if limit == Some(0) {
-                    return Ok(false);
-                }
-                let ranked = RankedFullTextVectorResult(result);
-                if heap.len() >= limit.unwrap_or(0)
-                    && heap.peek().is_some_and(|worst| ranked >= *worst)
-                {
-                    return Ok(true);
-                }
-                if heap.len() >= limit.unwrap_or(0)
-                    && let Some(removed) = heap.pop()
-                {
-                    used = used.saturating_sub(
-                        std::mem::size_of::<VectorSearchResult>()
-                            .saturating_add(removed.0.id.len()),
-                    );
-                }
-                if used.saturating_add(result_bytes) > vector_budget {
-                    return Err(Error::msg("ERR fulltext vector memory limit exceeded"));
-                }
-                used = used.saturating_add(result_bytes);
-                heap.push(ranked);
+        self.vector_exact_distance_results(
+            vector_index,
+            query,
+            allow_doc_ids,
+            limit,
+            max_score,
+            vector_budget,
+            || Ok(!fulltext_search_timeout_reached(deadline, fail_on_timeout)?),
+        )
+        .map_err(|error| {
+            if error.to_string() == "ERR vector search memory budget exceeded" {
+                Error::msg("ERR fulltext vector memory limit exceeded")
             } else {
-                if used.saturating_add(result_bytes) > vector_budget {
-                    return Err(Error::msg("ERR fulltext vector memory limit exceeded"));
-                }
-                used = used.saturating_add(result_bytes);
-                results.push(result);
+                error
             }
-            Ok(true)
-        })?;
-        if let Some(heap) = top_k {
-            results = heap.into_iter().map(|ranked| ranked.0).collect();
-        }
-        results.sort_by(|left, right| {
-            left.score
-                .partial_cmp(&right.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        Ok(results)
+        })
     }
 }

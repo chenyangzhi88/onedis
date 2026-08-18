@@ -335,6 +335,12 @@ pub struct OnedisMetrics {
     vector_hnsw_nodes: AtomicU64,
     vector_hnsw_deleted_nodes: AtomicU64,
     vector_writes: AtomicU64,
+    vector_write_point_reads: AtomicU64,
+    vector_write_conditions: AtomicU64,
+    vector_write_batch_entries: AtomicU64,
+    vector_write_batch_bytes: AtomicU64,
+    vector_write_lock_wait_us: AtomicU64,
+    vector_write_mutation_records: AtomicU64,
     vector_search_total: AtomicU64,
     vector_search_errors: AtomicU64,
     vector_search_duration_sum_us: AtomicU64,
@@ -345,8 +351,24 @@ pub struct OnedisMetrics {
     vector_search_filtered: AtomicU64,
     vector_search_ann_rounds: AtomicU64,
     vector_search_ann_candidates: AtomicU64,
+    vector_search_graphs: AtomicU64,
+    vector_search_distance_calculations: AtomicU64,
+    vector_search_rerank_docs: AtomicU64,
+    vector_search_exact_tail_docs: AtomicU64,
+    vector_search_kv_doc_reads: AtomicU64,
+    vector_search_kv_doc_bytes: AtomicU64,
+    vector_search_memtable_scanned_docs: AtomicU64,
+    vector_search_ef_budget: AtomicU64,
+    vector_search_candidates_before_dedup: AtomicU64,
+    vector_search_candidates_after_dedup: AtomicU64,
+    vector_search_filter_exact_first: AtomicU64,
+    vector_search_filter_filtered_ann: AtomicU64,
+    vector_search_filter_ann_first: AtomicU64,
     vector_segments_persisted: AtomicU64,
     vector_compactions: AtomicU64,
+    vector_delta_builds: AtomicU64,
+    vector_delta_nodes_built: AtomicU64,
+    vector_mutation_checkpoints: AtomicU64,
     lua_eval_total: AtomicU64,
     lua_eval_errors: AtomicU64,
     lua_eval_duration_sum_us: AtomicU64,
@@ -448,6 +470,12 @@ impl OnedisMetrics {
             vector_hnsw_nodes: AtomicU64::new(0),
             vector_hnsw_deleted_nodes: AtomicU64::new(0),
             vector_writes: AtomicU64::new(0),
+            vector_write_point_reads: AtomicU64::new(0),
+            vector_write_conditions: AtomicU64::new(0),
+            vector_write_batch_entries: AtomicU64::new(0),
+            vector_write_batch_bytes: AtomicU64::new(0),
+            vector_write_lock_wait_us: AtomicU64::new(0),
+            vector_write_mutation_records: AtomicU64::new(0),
             vector_search_total: AtomicU64::new(0),
             vector_search_errors: AtomicU64::new(0),
             vector_search_duration_sum_us: AtomicU64::new(0),
@@ -458,8 +486,24 @@ impl OnedisMetrics {
             vector_search_filtered: AtomicU64::new(0),
             vector_search_ann_rounds: AtomicU64::new(0),
             vector_search_ann_candidates: AtomicU64::new(0),
+            vector_search_graphs: AtomicU64::new(0),
+            vector_search_distance_calculations: AtomicU64::new(0),
+            vector_search_rerank_docs: AtomicU64::new(0),
+            vector_search_exact_tail_docs: AtomicU64::new(0),
+            vector_search_kv_doc_reads: AtomicU64::new(0),
+            vector_search_kv_doc_bytes: AtomicU64::new(0),
+            vector_search_memtable_scanned_docs: AtomicU64::new(0),
+            vector_search_ef_budget: AtomicU64::new(0),
+            vector_search_candidates_before_dedup: AtomicU64::new(0),
+            vector_search_candidates_after_dedup: AtomicU64::new(0),
+            vector_search_filter_exact_first: AtomicU64::new(0),
+            vector_search_filter_filtered_ann: AtomicU64::new(0),
+            vector_search_filter_ann_first: AtomicU64::new(0),
             vector_segments_persisted: AtomicU64::new(0),
             vector_compactions: AtomicU64::new(0),
+            vector_delta_builds: AtomicU64::new(0),
+            vector_delta_nodes_built: AtomicU64::new(0),
+            vector_mutation_checkpoints: AtomicU64::new(0),
             lua_eval_total: AtomicU64::new(0),
             lua_eval_errors: AtomicU64::new(0),
             lua_eval_duration_sum_us: AtomicU64::new(0),
@@ -759,6 +803,29 @@ impl OnedisMetrics {
         self.vector_writes.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_vector_write_work(
+        &self,
+        point_reads: usize,
+        conditions: usize,
+        batch_entries: usize,
+        batch_bytes: usize,
+        lock_wait_us: u64,
+    ) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.vector_write_point_reads
+            .fetch_add(point_reads as u64, Ordering::Relaxed);
+        self.vector_write_conditions
+            .fetch_add(conditions as u64, Ordering::Relaxed);
+        self.vector_write_batch_entries
+            .fetch_add(batch_entries as u64, Ordering::Relaxed);
+        self.vector_write_batch_bytes
+            .fetch_add(batch_bytes as u64, Ordering::Relaxed);
+        self.vector_write_lock_wait_us
+            .fetch_add(lock_wait_us, Ordering::Relaxed);
+    }
+
     pub fn record_vector_search(&self, elapsed_us: u64, failed: bool) {
         if !self.is_enabled() {
             return;
@@ -799,6 +866,95 @@ impl OnedisMetrics {
             .fetch_add(candidates as u64, Ordering::Relaxed);
     }
 
+    pub fn record_vector_search_graphs(&self, graphs: usize) {
+        if self.is_enabled() {
+            self.vector_search_graphs
+                .fetch_add(graphs as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_write_mutation_records(&self, count: usize) {
+        if self.is_enabled() {
+            self.vector_write_mutation_records
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_search_ef_budget(&self, ef: usize) {
+        if self.is_enabled() {
+            self.vector_search_ef_budget
+                .fetch_add(ef as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_candidate_dedup(&self, before: usize, after: usize) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.vector_search_candidates_before_dedup
+            .fetch_add(before as u64, Ordering::Relaxed);
+        self.vector_search_candidates_after_dedup
+            .fetch_add(after as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_vector_memtable_scan(&self, docs: usize) {
+        if self.is_enabled() {
+            self.vector_search_memtable_scanned_docs
+                .fetch_add(docs as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_filter_mode(&self, exact_first: bool, filtered_ann: bool) {
+        if !self.is_enabled() {
+            return;
+        }
+        if exact_first {
+            self.vector_search_filter_exact_first
+                .fetch_add(1, Ordering::Relaxed);
+        } else if filtered_ann {
+            self.vector_search_filter_filtered_ann
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.vector_search_filter_ann_first
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_distance_calculations(&self, count: usize) {
+        if self.is_enabled() {
+            self.vector_search_distance_calculations
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_rerank_docs(&self, count: usize) {
+        if self.is_enabled() {
+            self.vector_search_rerank_docs
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_exact_tail_docs(&self, count: usize) {
+        if self.is_enabled() {
+            self.vector_search_exact_tail_docs
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_kv_doc_reads(&self, count: usize) {
+        if self.is_enabled() {
+            self.vector_search_kv_doc_reads
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_kv_doc_bytes(&self, count: usize) {
+        if self.is_enabled() {
+            self.vector_search_kv_doc_bytes
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
     pub fn record_vector_segments_persisted(&self, count: usize) {
         if self.is_enabled() {
             self.vector_segments_persisted
@@ -809,6 +965,22 @@ impl OnedisMetrics {
     pub fn record_vector_compaction(&self) {
         if self.is_enabled() {
             self.vector_compactions.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_vector_delta_build(&self, nodes: usize) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.vector_delta_builds.fetch_add(1, Ordering::Relaxed);
+        self.vector_delta_nodes_built
+            .fetch_add(nodes as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_vector_mutation_checkpoint(&self) {
+        if self.is_enabled() {
+            self.vector_mutation_checkpoints
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1075,6 +1247,34 @@ impl OnedisMetrics {
             "onedis_vector_writes_total",
             &self.vector_writes.load(Ordering::Relaxed).to_string(),
         );
+        for (name, value) in [
+            (
+                "onedis_vector_write_point_reads_total",
+                &self.vector_write_point_reads,
+            ),
+            (
+                "onedis_vector_write_conditions_total",
+                &self.vector_write_conditions,
+            ),
+            (
+                "onedis_vector_write_batch_entries_total",
+                &self.vector_write_batch_entries,
+            ),
+            (
+                "onedis_vector_write_batch_bytes_total",
+                &self.vector_write_batch_bytes,
+            ),
+            (
+                "onedis_vector_write_lock_wait_microseconds_total",
+                &self.vector_write_lock_wait_us,
+            ),
+            (
+                "onedis_vector_write_mutation_records_total",
+                &self.vector_write_mutation_records,
+            ),
+        ] {
+            push_counter(out, name, &value.load(Ordering::Relaxed).to_string());
+        }
         push_counter(
             out,
             "onedis_vector_search_total",
@@ -1125,6 +1325,62 @@ impl OnedisMetrics {
                 .load(Ordering::Relaxed)
                 .to_string(),
         );
+        for (name, value) in [
+            (
+                "onedis_vector_search_graphs_total",
+                &self.vector_search_graphs,
+            ),
+            (
+                "onedis_vector_search_distance_calculations_total",
+                &self.vector_search_distance_calculations,
+            ),
+            (
+                "onedis_vector_search_rerank_docs_total",
+                &self.vector_search_rerank_docs,
+            ),
+            (
+                "onedis_vector_search_exact_tail_docs_total",
+                &self.vector_search_exact_tail_docs,
+            ),
+            (
+                "onedis_vector_search_kv_doc_reads_total",
+                &self.vector_search_kv_doc_reads,
+            ),
+            (
+                "onedis_vector_search_kv_doc_bytes_total",
+                &self.vector_search_kv_doc_bytes,
+            ),
+            (
+                "onedis_vector_search_memtable_scanned_docs_total",
+                &self.vector_search_memtable_scanned_docs,
+            ),
+            (
+                "onedis_vector_search_ef_budget_total",
+                &self.vector_search_ef_budget,
+            ),
+            (
+                "onedis_vector_search_candidates_before_dedup_total",
+                &self.vector_search_candidates_before_dedup,
+            ),
+            (
+                "onedis_vector_search_candidates_after_dedup_total",
+                &self.vector_search_candidates_after_dedup,
+            ),
+            (
+                "onedis_vector_search_filter_exact_first_total",
+                &self.vector_search_filter_exact_first,
+            ),
+            (
+                "onedis_vector_search_filter_filtered_ann_total",
+                &self.vector_search_filter_filtered_ann,
+            ),
+            (
+                "onedis_vector_search_filter_ann_first_total",
+                &self.vector_search_filter_ann_first,
+            ),
+        ] {
+            push_counter(out, name, &value.load(Ordering::Relaxed).to_string());
+        }
         push_counter(
             out,
             "onedis_vector_segments_persisted_total",
@@ -1137,6 +1393,27 @@ impl OnedisMetrics {
             out,
             "onedis_vector_compactions_total",
             &self.vector_compactions.load(Ordering::Relaxed).to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_delta_builds_total",
+            &self.vector_delta_builds.load(Ordering::Relaxed).to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_delta_nodes_built_total",
+            &self
+                .vector_delta_nodes_built
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        push_counter(
+            out,
+            "onedis_vector_mutation_checkpoints_total",
+            &self
+                .vector_mutation_checkpoints
+                .load(Ordering::Relaxed)
+                .to_string(),
         );
         render_duration_histogram(
             out,

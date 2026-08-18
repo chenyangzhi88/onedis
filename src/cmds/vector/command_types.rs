@@ -18,6 +18,7 @@ pub struct VSim {
     pub count: usize,
     pub ef: Option<usize>,
     pub filter_ef: Option<usize>,
+    pub rerank: Option<usize>,
     pub filter: Option<String>,
     pub epsilon: Option<f32>,
     pub truth: bool,

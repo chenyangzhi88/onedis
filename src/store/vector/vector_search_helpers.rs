@@ -1,4 +1,74 @@
 impl Db {
+    pub(super) fn vector_exact_distance_results<F>(
+        &self,
+        index: &str,
+        query: &[f32],
+        allow_doc_ids: Option<&HashSet<String>>,
+        limit: Option<usize>,
+        max_score: Option<f32>,
+        memory_budget: usize,
+        mut should_continue: F,
+    ) -> Result<Vec<VectorSearchResult>, Error>
+    where
+        F: FnMut() -> Result<bool, Error>,
+    {
+        let (_, _, meta) = self.read_vector_meta(index)?;
+        validate_vector(query, meta.dim as usize)?;
+        validate_vector_for_distance(query, meta.distance)?;
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        let query_norm_squared = vector_norm_squared(query);
+        let mut top_k = limit
+            .map(|limit| TopKVectorResults::new(limit, memory_budget))
+            .transpose()?;
+        let mut unbounded = Vec::new();
+        let mut unbounded_bytes = 0usize;
+        let mut scanned = 0usize;
+        self.visit_vector_elements(index, |id, vector| {
+            if !should_continue()? {
+                return Ok(false);
+            }
+            scanned = scanned.saturating_add(1);
+            if allow_doc_ids.is_some_and(|allow| !allow.contains(&id)) {
+                return Ok(true);
+            }
+            let score = distance_score_prepared(
+                meta.distance,
+                query,
+                query_norm_squared,
+                &vector,
+            )?;
+            if max_score.is_some_and(|maximum| score > maximum) {
+                return Ok(true);
+            }
+            let result = VectorSearchResult {
+                id,
+                score,
+                attrs: Vec::new(),
+                attrs_json: None,
+            };
+            if let Some(top_k) = top_k.as_mut() {
+                top_k.push(result)?;
+            } else {
+                let bytes = estimated_vector_result_bytes(&result);
+                if unbounded_bytes.saturating_add(bytes) > memory_budget {
+                    return Err(Error::msg("ERR vector search memory budget exceeded"));
+                }
+                unbounded_bytes = unbounded_bytes.saturating_add(bytes);
+                unbounded.push(result);
+            }
+            Ok(true)
+        })?;
+        global_metrics().record_vector_kv_doc_reads(scanned);
+        if let Some(top_k) = top_k {
+            Ok(top_k.into_sorted())
+        } else {
+            sort_and_limit_results(&mut unbounded, usize::MAX);
+            Ok(unbounded)
+        }
+    }
+
     fn vector_should_use_exact(&self, context: &VectorSearchContext<'_>) -> Result<bool, Error> {
         let runtime = self
             .vector_runtimes
@@ -7,16 +77,24 @@ impl Db {
         let runtime = runtime
             .read()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?;
+        let total_count = runtime.len();
         let candidate_count = context
             .allow_doc_ids
             .map(HashSet::len)
-            .unwrap_or_else(|| runtime.len());
+            .unwrap_or(total_count);
         drop(runtime);
 
         // HNSW is a nearest-neighbour index, not an exhaustive iterator.  If
         // the caller requests the whole candidate population, plan an exact
         // bounded scan up front so COUNT retains its result-count semantics.
         if context.options.k >= candidate_count && candidate_count <= vector_exact_scan_limit() {
+            return Ok(true);
+        }
+
+        if context.allow_doc_ids.is_some()
+            && candidate_count <= vector_exact_scan_limit()
+            && candidate_count.saturating_mul(20) <= total_count
+        {
             return Ok(true);
         }
 
@@ -36,11 +114,7 @@ impl Db {
         &self,
         context: &VectorSearchContext<'_>,
     ) -> Result<Vec<VectorSearchResult>, Error> {
-        self.ensure_vector_search_segments_loaded(
-            context.index,
-            context.version,
-            context.meta,
-        )?;
+        self.ensure_vector_search_segments_loaded(context.index, context.version, context.meta)?;
         let runtime = self
             .vector_runtimes
             .get(self.db_index, context.index, context.version)
@@ -61,20 +135,20 @@ impl Db {
         if context.options.k > max_candidates_by_memory {
             return Err(Error::msg("ERR vector search memory budget exceeded"));
         }
-        let quantized_overfetch = match context.meta.quantization {
-            VectorQuantization::F32 => 1,
-            VectorQuantization::Q8 => 4,
-            VectorQuantization::Binary => 32,
-        };
-        let candidate_multiplier = if filtered {
-            quantized_overfetch.max(4)
+        // A size-proportional K-way split assumes nearest neighbours are
+        // distributed like segment sizes, which is not generally true. Keep
+        // one query-level budget, but give lossy quantized graphs a bounded
+        // 2x competition window so one segment can contribute more than its
+        // initial proportional share. This is still independent of fan-out.
+        let default_candidate_limit = if context.meta.quantization == VectorQuantization::F32 {
+            context.options.k
         } else {
-            quantized_overfetch
+            context.options.k.saturating_mul(2)
         };
         let mut candidate_limit = context
             .options
-            .k
-            .saturating_mul(candidate_multiplier)
+            .rerank
+            .unwrap_or(default_candidate_limit)
             .max(if filtered { 16 } else { 1 })
             .min(live_count)
             .max(1);
@@ -102,16 +176,20 @@ impl Db {
             .options
             .ef
             .unwrap_or(context.meta.ef_runtime as usize)
-            .max(candidate_limit)
             .max(context.options.k);
 
         loop {
-            let candidates = search_snapshot.search(
+            let mut candidates = search_snapshot.search_with_base_limit(
                 context.query,
                 candidate_limit,
                 ef,
                 context.allow_doc_ids,
             )?;
+            if context.options.rerank.is_some()
+                && context.meta.quantization != VectorQuantization::F32
+            {
+                candidates = self.vector_rerank_candidates_from_documents(context, candidates)?;
+            }
             global_metrics().record_vector_ann_round(candidates.len());
             let mut results = self.vector_results_from_runtime_candidates(context, candidates)?;
             sort_and_limit_results(&mut results, context.options.k);
@@ -143,6 +221,50 @@ impl Db {
         }
     }
 
+    fn vector_rerank_candidates_from_documents(
+        &self,
+        context: &VectorSearchContext<'_>,
+        candidates: Vec<VectorCandidate>,
+    ) -> Result<Vec<VectorCandidate>, Error> {
+        let keys = candidates
+            .iter()
+            .map(|candidate| {
+                vector_doc_key(
+                    self.key_layout,
+                    self.db_index,
+                    context.index,
+                    context.version,
+                    &candidate.id,
+                )
+            })
+            .collect::<Vec<_>>();
+        let raws = self.store.multi_get_raw(&keys);
+        let mut reranked = Vec::with_capacity(candidates.len());
+        let mut bytes = 0usize;
+        for (mut candidate, raw) in candidates.into_iter().zip(raws) {
+            let Some(raw) = raw else {
+                continue;
+            };
+            bytes = bytes.saturating_add(raw.len());
+            let doc = decode_record::<VectorDocRecord>(&raw)?;
+            if doc.deleted || doc.doc_version != candidate.doc_version {
+                continue;
+            }
+            candidate.distance = distance_score_prepared(
+                context.meta.distance,
+                context.query,
+                context.query_norm_squared,
+                &doc.vector,
+            )?;
+            candidate.source_position = None;
+            reranked.push(candidate);
+        }
+        global_metrics().record_vector_kv_doc_reads(keys.len());
+        global_metrics().record_vector_kv_doc_bytes(bytes);
+        global_metrics().record_vector_rerank_docs(reranked.len());
+        Ok(reranked)
+    }
+
     fn vector_results_from_runtime_candidates(
         &self,
         context: &VectorSearchContext<'_>,
@@ -150,8 +272,7 @@ impl Db {
     ) -> Result<Vec<VectorSearchResult>, Error> {
         let mut results =
             TopKVectorResults::new(context.options.k, vector_search_memory_budget_bytes())?;
-        if context.meta.quantization == VectorQuantization::F32
-            && context.filters.is_empty()
+        if context.filters.is_empty()
             && context.options.with_attrs.is_empty()
             && !context.options.with_attrs_json
         {
@@ -177,10 +298,13 @@ impl Db {
                 )
             })
             .collect::<Vec<_>>();
+        global_metrics().record_vector_kv_doc_reads(keys.len());
+        let mut kv_doc_bytes = 0usize;
         for (candidate, raw) in candidates.into_iter().zip(self.store.multi_get_raw(&keys)) {
             let Some(raw) = raw else {
                 continue;
             };
+            kv_doc_bytes = kv_doc_bytes.saturating_add(raw.len());
             let doc = decode_record::<VectorDocRecord>(&raw)?;
             if doc.deleted || doc.doc_version != candidate.doc_version {
                 continue;
@@ -199,6 +323,7 @@ impl Db {
                 results.push(result)?;
             }
         }
+        global_metrics().record_vector_kv_doc_bytes(kv_doc_bytes);
         Ok(results.into_sorted())
     }
 
@@ -216,6 +341,20 @@ impl Db {
         if scan_count > scan_limit {
             return Err(Error::msg("ERR vector exact scan limit exceeded"));
         }
+        if context.filters.is_empty()
+            && context.options.with_attrs.is_empty()
+            && !context.options.with_attrs_json
+        {
+            return self.vector_exact_distance_results(
+                context.index,
+                context.query,
+                context.allow_doc_ids,
+                Some(context.options.k),
+                None,
+                vector_search_memory_budget_bytes(),
+                || Ok(true),
+            );
+        }
         match context.allow_doc_ids {
             Some(allow_doc_ids) => {
                 let ids = allow_doc_ids.iter().collect::<Vec<_>>();
@@ -231,10 +370,13 @@ impl Db {
                         )
                     })
                     .collect::<Vec<_>>();
+                global_metrics().record_vector_kv_doc_reads(keys.len());
+                let mut kv_doc_bytes = 0usize;
                 for (id, raw) in ids.into_iter().zip(self.store.multi_get_raw(&keys)) {
                     let Some(raw) = raw else {
                         continue;
                     };
+                    kv_doc_bytes = kv_doc_bytes.saturating_add(raw.len());
                     let doc = decode_record::<VectorDocRecord>(&raw)?;
                     if doc.deleted {
                         continue;
@@ -253,6 +395,7 @@ impl Db {
                         results.push(result)?;
                     }
                 }
+                global_metrics().record_vector_kv_doc_bytes(kv_doc_bytes);
             }
             None => {
                 let prefix = vector_doc_prefix(
@@ -261,7 +404,12 @@ impl Db {
                     context.index,
                     context.version,
                 );
-                for (_, raw) in self.store.scan_prefix_raw(&prefix) {
+                let rows = self.store.scan_prefix_raw(&prefix);
+                global_metrics().record_vector_kv_doc_reads(rows.len());
+                global_metrics().record_vector_kv_doc_bytes(
+                    rows.iter().map(|(_, raw)| raw.len()).sum(),
+                );
+                for (_, raw) in rows {
                     let doc = decode_record::<VectorDocRecord>(&raw)?;
                     if doc.deleted {
                         continue;
@@ -296,12 +444,26 @@ impl Db {
         &self,
         index: &str,
         version: u64,
-    ) -> (usize, usize, usize, usize, usize, usize) {
+    ) -> (
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) {
         self.vector_runtimes
             .get(self.db_index, index, version)
             .and_then(|runtime| {
                 runtime.read().ok().map(|runtime| {
                     let (segments, total, deleted) = runtime.segment_stats();
+                    let (delta_nodes, exact_tail_docs) = runtime.delta_stats();
+                    let (rerank_source_docs, rerank_source_vector_bytes) =
+                        runtime.rerank_source_stats();
                     let pending = runtime
                         .segments
                         .iter()
@@ -314,6 +476,10 @@ impl Db {
                         pending,
                         runtime.memtable_len(),
                         segments.saturating_sub(pending),
+                        delta_nodes,
+                        exact_tail_docs,
+                        rerank_source_docs,
+                        rerank_source_vector_bytes,
                     )
                 })
             })

@@ -131,6 +131,27 @@ impl Db {
         conditions: &[CompareCondition],
         batch: &WriteBatch,
     ) -> Result<bool, Error> {
+        self.compare_and_write_batch_if_not_empty_async_inner(conditions, batch, true)
+            .await
+    }
+
+    /// Async counterpart used by vector commands which publish their exact
+    /// runtime delta after the durable conditional batch succeeds.
+    pub(in crate::store::db) async fn compare_and_write_vector_batch_if_not_empty_async(
+        &self,
+        conditions: &[CompareCondition],
+        batch: &WriteBatch,
+    ) -> Result<bool, Error> {
+        self.compare_and_write_batch_if_not_empty_async_inner(conditions, batch, false)
+            .await
+    }
+
+    async fn compare_and_write_batch_if_not_empty_async_inner(
+        &self,
+        conditions: &[CompareCondition],
+        batch: &WriteBatch,
+        reconcile_vector_runtimes: bool,
+    ) -> Result<bool, Error> {
         if batch.count() == 0 {
             return Ok(true);
         }
@@ -146,7 +167,7 @@ impl Db {
         {
             Ok(()) => {
                 self.invalidate_zset_length_cache_for_batch(batch);
-                self.record_or_publish_mutations(batch);
+                self.record_or_publish_mutations_inner(batch, reconcile_vector_runtimes);
                 Ok(true)
             }
             Err(Status::ConditionFailed(_) | Status::WriteConflict(_)) => Ok(false),
@@ -159,6 +180,30 @@ impl Db {
         conditions: &[CompareCondition],
         batch: &WriteBatch,
     ) -> Result<bool, Error> {
+        self.compare_and_write_batch_if_not_empty_inner(conditions, batch, true)
+    }
+
+    /// Commit a batch for a vector operation that updates its runtime explicitly.
+    ///
+    /// Generic keyspace writes must reconcile vector runtimes because DEL,
+    /// RENAME, expiry and transactions can invalidate an index behind the
+    /// vector API. Native vector mutations already hold the collection write
+    /// lock and publish the exact runtime delta after the durable commit, so a
+    /// second registry-wide reconciliation is redundant.
+    pub(in crate::store::db) fn compare_and_write_vector_batch_if_not_empty(
+        &self,
+        conditions: &[CompareCondition],
+        batch: &WriteBatch,
+    ) -> Result<bool, Error> {
+        self.compare_and_write_batch_if_not_empty_inner(conditions, batch, false)
+    }
+
+    fn compare_and_write_batch_if_not_empty_inner(
+        &self,
+        conditions: &[CompareCondition],
+        batch: &WriteBatch,
+        reconcile_vector_runtimes: bool,
+    ) -> Result<bool, Error> {
         if batch.count() == 0 {
             return Ok(true);
         }
@@ -170,7 +215,7 @@ impl Db {
         match self.store.compare_and_write_batch(conditions, batch) {
             Ok(()) => {
                 self.invalidate_zset_length_cache_for_batch(batch);
-                self.record_or_publish_mutations(batch);
+                self.record_or_publish_mutations_inner(batch, reconcile_vector_runtimes);
                 Ok(true)
             }
             Err(Status::ConditionFailed(_) | Status::WriteConflict(_)) => Ok(false),
@@ -179,7 +224,18 @@ impl Db {
     }
 
     pub(in crate::store::db) fn record_or_publish_mutations(&self, batch: &WriteBatch) {
-        if !self.store.is_transactional() && self.vector_runtimes.has_active_runtimes() {
+        self.record_or_publish_mutations_inner(batch, true);
+    }
+
+    fn record_or_publish_mutations_inner(
+        &self,
+        batch: &WriteBatch,
+        reconcile_vector_runtimes: bool,
+    ) {
+        if reconcile_vector_runtimes
+            && !self.store.is_transactional()
+            && self.vector_runtimes.has_active_runtimes()
+        {
             self.reconcile_vector_runtimes_for_batch(batch);
         }
         // This check runs after a non-transactional write. A watch registered

@@ -1,4 +1,10 @@
 impl Db {
+    fn record_public_vector_mutation(&self, index: &str, internal: bool) {
+        if !internal {
+            self.record_external_key_mutation(self.db_index, index.as_bytes().to_vec());
+        }
+    }
+
     pub(in crate::store::db) fn reconcile_vector_runtime_index(&self, db_index: u16, index: &str) {
         let store = self.store.non_transactional_view().for_db_index(db_index);
         let current_version = store
@@ -42,7 +48,17 @@ impl Db {
     fn read_vector_meta_observed(
         &self,
         index: &str,
-    ) -> Result<(u64, u64, VectorIndexMeta, Vec<u8>, Vec<u8>), Error> {
+    ) -> Result<
+        (
+            u64,
+            u64,
+            VectorIndexMeta,
+            Vec<u8>,
+            Vec<u8>,
+            Option<Vec<u8>>,
+        ),
+        Error,
+    > {
         let internal = is_internal_fulltext_vector_index(index);
         if !internal {
             self.expire_if_needed(index);
@@ -67,7 +83,16 @@ impl Db {
         )) else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
-        let meta = decode_vector_meta(&meta_raw)?;
+        let mut meta = decode_vector_meta(&meta_raw)?;
+        let state_raw = self.store.get_raw(&vector_mutable_state_key(
+            self.key_layout,
+            self.db_index,
+            index,
+            header.version,
+        ));
+        if let Some(raw) = state_raw.as_deref() {
+            decode_record::<VectorMutableState>(raw)?.apply_to(&mut meta);
+        }
         validate_vector_meta_config(&meta)?;
         if meta.internal != internal {
             return Err(Error::msg("ERR invalid vector index ownership"));
@@ -78,11 +103,12 @@ impl Db {
             meta,
             raw.to_vec(),
             meta_raw.to_vec(),
+            state_raw,
         ))
     }
 
     fn read_vector_meta(&self, index: &str) -> Result<(u64, u64, VectorIndexMeta), Error> {
-        let (expire_ms, version, meta, _, _) = self.read_vector_meta_observed(index)?;
+        let (expire_ms, version, meta, _, _, _) = self.read_vector_meta_observed(index)?;
         Ok((expire_ms, version, meta))
     }
 
@@ -105,13 +131,94 @@ impl Db {
     ) -> Result<(), Error> {
         let marker_key = self.vector_marker_key(index, internal);
         let meta_key = vector_meta_key(self.key_layout, self.db_index, index, version);
-        if self.compare_and_write_batch_if_not_empty(
+        if self.compare_and_write_vector_batch_if_not_empty(
             &[
                 CompareCondition::exists_with(&marker_key, expected_marker),
                 CompareCondition::exists_with(&meta_key, expected_meta),
             ],
             batch,
         )? {
+            Ok(())
+        } else {
+            Err(Error::msg("ERR vector index changed during write"))
+        }
+    }
+
+    async fn commit_vector_batch_if_marker_unchanged_async(
+        &self,
+        index: &str,
+        internal: bool,
+        version: u64,
+        expected_marker: &[u8],
+        expected_meta: &[u8],
+        batch: &WriteBatch,
+    ) -> Result<(), Error> {
+        let marker_key = self.vector_marker_key(index, internal);
+        let meta_key = vector_meta_key(self.key_layout, self.db_index, index, version);
+        if self
+            .compare_and_write_vector_batch_if_not_empty_async(
+                &[
+                    CompareCondition::exists_with(&marker_key, expected_marker),
+                    CompareCondition::exists_with(&meta_key, expected_meta),
+                ],
+                batch,
+            )
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(Error::msg("ERR vector index changed during write"))
+        }
+    }
+
+    fn commit_vector_batch_with_state_if_unchanged(
+        &self,
+        index: &str,
+        internal: bool,
+        version: u64,
+        expected_marker: &[u8],
+        expected_meta: &[u8],
+        expected_state: Option<Vec<u8>>,
+        batch: &WriteBatch,
+    ) -> Result<(), Error> {
+        let marker_key = self.vector_marker_key(index, internal);
+        let meta_key = vector_meta_key(self.key_layout, self.db_index, index, version);
+        let state_key = vector_mutable_state_key(self.key_layout, self.db_index, index, version);
+        if self.compare_and_write_vector_batch_if_not_empty(
+            &[
+                CompareCondition::exists_with(&marker_key, expected_marker),
+                CompareCondition::exists_with(&meta_key, expected_meta),
+                CompareCondition::with_expected(&state_key, expected_state),
+            ],
+            batch,
+        )? {
+            Ok(())
+        } else {
+            Err(Error::msg("ERR vector index changed during write"))
+        }
+    }
+
+    async fn commit_vector_state_batch_if_unchanged_async(
+        &self,
+        index: &str,
+        internal: bool,
+        version: u64,
+        expected_marker: &[u8],
+        expected_state: Option<Vec<u8>>,
+        batch: &WriteBatch,
+    ) -> Result<(), Error> {
+        let marker_key = self.vector_marker_key(index, internal);
+        let state_key = vector_mutable_state_key(self.key_layout, self.db_index, index, version);
+        if self
+            .compare_and_write_vector_batch_if_not_empty_async(
+                &[
+                    CompareCondition::exists_with(&marker_key, expected_marker),
+                    CompareCondition::with_expected(&state_key, expected_state),
+                ],
+                batch,
+            )
+            .await?
+        {
             Ok(())
         } else {
             Err(Error::msg("ERR vector index changed during write"))
@@ -132,9 +239,7 @@ impl Db {
             return Ok(());
         }
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
+        let _guard = write_lock.blocking_lock();
         self.ensure_vector_runtime_unlocked(index, version, meta)
     }
 
@@ -163,14 +268,9 @@ impl Db {
         let (current_versions, tail_docs) =
             self.load_vector_version_state(index, version, meta)?;
         let mut runtime = VectorRuntime::with_segments(
-            meta.dim as usize,
-            meta.distance,
-            meta.m as usize,
-            meta.ef_construction as usize,
-            meta.initial_cap as usize,
+            VectorRuntimeConfig::from(meta),
             next_segment_id,
             segments,
-            meta.quantization,
         );
         runtime.restore_version_state(current_versions, tail_docs);
         // Publish only after recovery is complete. A concurrent reader can no
@@ -216,7 +316,16 @@ impl Db {
         );
         let mutations = self.store.scan_prefix_raw(&mutation_prefix);
         let mut expected_version = checkpoint_through.saturating_add(1);
-        let mut latest_tail = HashMap::<String, u64>::new();
+        // A checkpoint may advance beyond the latest immutable segment. Keep
+        // every checkpointed version newer than the segment snapshot in the
+        // recoverable mutable tail even when its individual journal record has
+        // already been reclaimed.
+        let mut latest_tail = current_versions
+            .iter()
+            .filter_map(|(id, version)| {
+                (*version > meta.snapshot_doc_version).then(|| (id.clone(), *version))
+            })
+            .collect::<HashMap<String, u64>>();
         let mut complete = checkpoint_through < meta.next_doc_version;
         for (key, raw) in mutations {
             let mutation = decode_record::<VectorVersionMutation>(&raw)?;
@@ -433,42 +542,48 @@ impl Db {
             .vector_runtimes
             .get(self.db_index, index, version)
             .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
-        let missing = {
+        let (missing_sources, missing_indexes) = {
             let runtime = runtime
                 .read()
                 .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?;
-            runtime
+            let missing_sources = runtime
                 .segments
                 .iter()
-                .filter_map(|segment| {
-                    if segment.meta.index_key.is_empty() && segment.source.is_none() {
-                        Some((segment.meta.clone(), true))
-                    } else if !segment.meta.index_key.is_empty() && segment.index.is_none() {
-                        Some((segment.meta.clone(), false))
-                    } else {
-                        None
-                    }
+                .filter(|segment| {
+                    segment.source.is_none()
+                        && segment.meta.index_key.is_empty()
                 })
-                .collect::<Vec<_>>()
+                .map(|segment| segment.meta.clone())
+                .collect::<Vec<_>>();
+            let missing_indexes = runtime
+                .segments
+                .iter()
+                .filter(|segment| !segment.meta.index_key.is_empty() && segment.index.is_none())
+                .map(|segment| segment.meta.clone())
+                .collect::<Vec<_>>();
+            (missing_sources, missing_indexes)
         };
-        if missing.is_empty() {
+        if missing_sources.is_empty() && missing_indexes.is_empty() {
             return Ok(());
         }
-        let mut loaded_sources = Vec::new();
-        let mut loaded_indexes = Vec::new();
-        for (segment, source_needed) in missing {
-            if source_needed {
-                loaded_sources.push((
+        let loaded_sources = missing_sources
+            .iter()
+            .map(|segment| {
+                Ok((
                     segment.segment_id,
                     self.decode_vector_segment_source(&segment, meta)?,
-                ));
-            } else {
-                loaded_indexes.push((
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let loaded_indexes = missing_indexes
+            .iter()
+            .map(|segment| {
+                Ok((
                     segment.segment_id,
                     self.decode_vector_segment_index(&segment, meta)?,
-                ));
-            }
-        }
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         let mut runtime = runtime
             .write()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?;
@@ -528,6 +643,25 @@ impl Db {
         &self,
         index: &str,
     ) -> Result<(u64, u64, VectorIndexMeta), Error> {
+        let (expire_ms, version, meta, _, _, _) =
+            self.read_vector_meta_observed_async(index).await?;
+        Ok((expire_ms, version, meta))
+    }
+
+    async fn read_vector_meta_observed_async(
+        &self,
+        index: &str,
+    ) -> Result<
+        (
+            u64,
+            u64,
+            VectorIndexMeta,
+            Vec<u8>,
+            Vec<u8>,
+            Option<Vec<u8>>,
+        ),
+        Error,
+    > {
         let internal = is_internal_fulltext_vector_index(index);
         if !internal {
             self.expire_if_needed_async(index).await;
@@ -556,11 +690,30 @@ impl Db {
         else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
-        let meta = decode_vector_meta(&meta_raw)?;
+        let mut meta = decode_vector_meta(&meta_raw)?;
+        let state_raw = self
+            .store
+            .get_raw_async(&vector_mutable_state_key(
+                self.key_layout,
+                self.db_index,
+                index,
+                header.version,
+            ))
+            .await;
+        if let Some(raw) = state_raw.as_deref() {
+            decode_record::<VectorMutableState>(raw)?.apply_to(&mut meta);
+        }
         validate_vector_meta_config(&meta)?;
         if meta.internal != internal {
             return Err(Error::msg("ERR invalid vector index ownership"));
         }
-        Ok((header.expire_ms, header.version, meta))
+        Ok((
+            header.expire_ms,
+            header.version,
+            meta,
+            raw.to_vec(),
+            meta_raw.to_vec(),
+            state_raw,
+        ))
     }
 }

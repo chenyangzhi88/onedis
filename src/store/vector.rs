@@ -1,9 +1,10 @@
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet},
     hash::{BuildHasher, Hash, Hasher},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, OnceLock, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -15,6 +16,7 @@ use common::types::write_batch::WriteBatch;
 use dashmap::DashMap;
 use hnsw_rs::prelude::{DistCosine, DistL2, Distance, Hnsw};
 use serde_json::Value as JsonValue;
+use tokio::sync::Mutex;
 
 use super::{
     CompareCondition, Db, KeyEncodingLayout, Structure, TYPE_VECTOR, VECTOR_DOC_NAMESPACE,
@@ -24,9 +26,9 @@ use super::{
 };
 use crate::observability::metrics::{elapsed_us, global_metrics};
 
-const DEFAULT_VECTOR_SEGMENT_MAX_DOCS: u64 = 1024;
+const DEFAULT_VECTOR_SEGMENT_MAX_DOCS: u64 = 4096;
 const DEFAULT_VECTOR_LSM_MAX_SEGMENT_DOCS: u64 = 1024 * 4 * 4 * 4 * 4;
-const VECTOR_LSM_MERGE_FACTOR: usize = 4;
+const VECTOR_LSM_MERGE_FACTOR: usize = 2;
 const DEFAULT_HNSW_M: u32 = 16;
 const DEFAULT_HNSW_EF_CONSTRUCTION: u32 = 200;
 const DEFAULT_HNSW_EF_RUNTIME: u32 = 64;
@@ -37,6 +39,33 @@ const MAX_VECTOR_HNSW_EF: usize = 1_000_000;
 const MAX_VECTOR_PROJECTION_CELLS: usize = 16 * 1024 * 1024;
 const DEFAULT_VECTOR_SEARCH_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_VECTOR_EXACT_SCAN_LIMIT: usize = 1_000_000;
+const DEFAULT_VECTOR_MUTATION_CHECKPOINT_INTERVAL: u64 = 1024;
+const DEFAULT_VECTOR_DELTA_HNSW_MIN_CHANGES: usize = 128;
+
+#[derive(Default)]
+struct VectorVisitedScratch {
+    marks: Vec<u32>,
+    generation: u32,
+}
+
+impl VectorVisitedScratch {
+    fn begin(&mut self, nodes: usize) -> u32 {
+        if self.generation == u32::MAX {
+            self.marks.fill(0);
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
+        if self.marks.len() < nodes {
+            self.marks.resize(nodes, 0);
+        }
+        self.generation
+    }
+}
+
+thread_local! {
+    static VECTOR_HNSW_VISITED: RefCell<VectorVisitedScratch> = RefCell::default();
+}
 
 include!("vector/types_runtime.rs");
 

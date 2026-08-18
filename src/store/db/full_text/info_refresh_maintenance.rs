@@ -11,33 +11,132 @@ impl Db {
     }
 
     pub(crate) fn fulltext_maintenance_tick(&self) -> Result<(), Error> {
-        let indexes = self
-            .read_all_fulltext_metas()?
-            .into_iter()
-            .map(|(index, meta)| (index, meta.state))
-            .collect::<Vec<_>>();
-        for (index, state) in indexes {
-            let meta = self.read_fulltext_meta_direct(&index)?;
-            if self.fulltext_index_expired(&index, &meta) {
-                self.fulltext_purge_index(&index, &meta)?;
-                continue;
-            }
-            match state {
-                FullTextIndexState::Creating => {
-                    self.fulltext_recover_creating_index(&index)?;
-                }
-                FullTextIndexState::Dropping => {
-                    self.fulltext_purge_index(&index, &meta)?;
-                }
-                FullTextIndexState::Dirty
-                | FullTextIndexState::Backfilling
-                | FullTextIndexState::Rebuilding
-                | FullTextIndexState::Ready => {
-                    self.fulltext_refresh_index(&index, true)?;
-                }
+        let snapshots = self.read_all_fulltext_metas()?;
+        let mut first_error = None;
+        for (index, snapshot) in snapshots {
+            if let Err(error) = self.fulltext_maintain_index_snapshot(&index, &snapshot)
+                && first_error.is_none()
+            {
+                first_error = Some(Error::msg(format!("index {index}: {error}")));
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
+    }
+
+    pub(super) fn fulltext_maintain_index_snapshot(
+        &self,
+        index: &str,
+        snapshot: &FullTextIndexMeta,
+    ) -> Result<(), Error> {
+        if self.fulltext_index_expired(index, snapshot)
+            || matches!(
+                snapshot.state,
+                FullTextIndexState::Creating
+                    | FullTextIndexState::Dirty
+                    | FullTextIndexState::Dropping
+            )
+        {
+            return self.fulltext_maintain_index_exclusive(index, snapshot.incarnation);
+        }
+
+        let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, index);
+        let _lifecycle_guard = lifecycle_lock
+            .read()
+            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+        let Some((meta, _)) = self.read_fulltext_meta_versioned_optional(index)? else {
+            return Ok(());
+        };
+        if meta.incarnation != snapshot.incarnation
+            || self.fulltext_index_expired(index, &meta)
+            || !matches!(
+                meta.state,
+                FullTextIndexState::Backfilling
+                    | FullTextIndexState::Rebuilding
+                    | FullTextIndexState::Ready
+            )
+        {
+            return Ok(());
+        }
+        if self.fulltext_runtime_schema_needs_rebuild(index)? {
+            drop(_lifecycle_guard);
+            return self.fulltext_rebuild_index_snapshot(index, snapshot.incarnation);
+        }
+        let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
+        let _refresh_guard = refresh_lock
+            .lock()
+            .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
+        let started = Instant::now();
+        let result = self.fulltext_refresh_index_mode(index, true, None, true, false);
+        global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
+        result
+    }
+
+    fn fulltext_maintain_index_exclusive(
+        &self,
+        index: &str,
+        expected_incarnation: u64,
+    ) -> Result<(), Error> {
+        let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, index);
+        let _lifecycle_guard = lifecycle_lock
+            .write()
+            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+        let Some((meta, expected_raw)) = self.read_fulltext_meta_versioned_optional(index)? else {
+            return Ok(());
+        };
+        if meta.incarnation != expected_incarnation {
+            return Ok(());
+        }
+        if self.fulltext_index_expired(index, &meta)
+            || matches!(meta.state, FullTextIndexState::Dropping)
+        {
+            return self.fulltext_purge_index_inner(index, &meta, &expected_raw);
+        }
+        match meta.state {
+            FullTextIndexState::Creating => self.fulltext_recover_creating_index_inner(index),
+            FullTextIndexState::Dirty => {
+                let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
+                let _refresh_guard = refresh_lock
+                    .lock()
+                    .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
+                let started = Instant::now();
+                let result = self.fulltext_refresh_index_mode(index, true, None, true, true);
+                global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
+                result
+            }
+            FullTextIndexState::Backfilling
+            | FullTextIndexState::Rebuilding
+            | FullTextIndexState::Ready
+            | FullTextIndexState::Dropping => Ok(()),
+        }
+    }
+
+    fn fulltext_rebuild_index_snapshot(
+        &self,
+        index: &str,
+        expected_incarnation: u64,
+    ) -> Result<(), Error> {
+        let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, index);
+        let _lifecycle_guard = lifecycle_lock
+            .write()
+            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+        let Some((meta, _)) = self.read_fulltext_meta_versioned_optional(index)? else {
+            return Ok(());
+        };
+        if meta.incarnation != expected_incarnation
+            || !matches!(
+                meta.state,
+                FullTextIndexState::Backfilling
+                    | FullTextIndexState::Rebuilding
+                    | FullTextIndexState::Ready
+            )
+            || !self.fulltext_runtime_schema_needs_rebuild(index)?
+        {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let result = self.fulltext_rebuild_index(index);
+        global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
+        result
     }
 
     pub(crate) async fn fulltext_maintenance_tick_async(&self) -> Result<(), Error> {

@@ -52,6 +52,17 @@ impl Db {
             .unwrap_or_default();
         let mut indexed_allow_doc_ids =
             self.indexed_filter_doc_ids(index, version, &meta, &filters)?;
+        // High-selectivity indexed predicates are cheaper as ANN-first: avoid
+        // materializing and hashing most of the collection, then validate the
+        // bounded ANN candidates from their documents. Low/medium selectivity
+        // keeps the indexed allow-set and can switch to an exact filtered scan.
+        if external_allow_doc_ids.is_none()
+            && indexed_allow_doc_ids.as_ref().is_some_and(|ids| {
+                ids.len().saturating_mul(2) >= meta.doc_count as usize
+            })
+        {
+            indexed_allow_doc_ids = None;
+        }
         if let (Some(indexed), Some(external)) =
             (indexed_allow_doc_ids.as_mut(), external_allow_doc_ids.as_ref())
         {
@@ -78,6 +89,9 @@ impl Db {
         };
         global_metrics()
             .record_vector_search_plan(use_exact, !filters.is_empty() || allow_doc_ids.is_some());
+        if !filters.is_empty() || external_allow_doc_ids.is_some() {
+            global_metrics().record_vector_filter_mode(use_exact, allow_doc_ids.is_some());
+        }
         let results = if use_exact {
             self.vector_exact_results(&context)?
         } else {
@@ -92,6 +106,18 @@ impl Db {
         query: &[f32],
         options: VectorSearchOptions,
     ) -> Result<Vec<VectorSearchResult>, Error> {
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            )
+        }) {
+            // The command runtime is multi-threaded. `block_in_place` lets
+            // Tokio replace this worker while the CPU-heavy graph traversal
+            // runs, without paying a spawn_blocking queue and join round-trip
+            // for every short VSIM request.
+            return tokio::task::block_in_place(|| self.vector_search(index, query, options));
+        }
         let index = index.to_string();
         let query = query.to_vec();
         self.run_blocking_store_task(move |db| db.vector_search(&index, &query, options))
@@ -116,6 +142,16 @@ impl Db {
         query: &[f32],
         options: VectorSearchOptions,
     ) -> Result<Vec<VectorSearchResult>, Error> {
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            )
+        }) {
+            return tokio::task::block_in_place(|| {
+                self.vector_search_stored(index, query, options)
+            });
+        }
         let index = index.to_string();
         let query = query.to_vec();
         self.run_blocking_store_task(move |db| db.vector_search_stored(&index, &query, options))

@@ -49,6 +49,22 @@ fn vector_lsm_max_segment_docs(base_segment_docs: u64) -> u64 {
         )
 }
 
+fn vector_mutation_checkpoint_interval() -> u64 {
+    std::env::var("ONEDIS_VECTOR_MUTATION_CHECKPOINT_INTERVAL")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_VECTOR_MUTATION_CHECKPOINT_INTERVAL)
+}
+
+fn vector_delta_hnsw_min_changes() -> usize {
+    std::env::var("ONEDIS_VECTOR_DELTA_HNSW_MIN_CHANGES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_VECTOR_DELTA_HNSW_MIN_CHANGES)
+}
+
 fn normalize_hnsw_m(value: Option<usize>) -> Result<usize, Error> {
     let m = value.unwrap_or(DEFAULT_HNSW_M as usize);
     if m == 0 || m > 256 {
@@ -197,19 +213,25 @@ fn validate_vector_for_distance(vector: &[f32], distance: VectorDistance) -> Res
 }
 
 fn vector_search_memory_budget_bytes() -> usize {
-    std::env::var("ONEDIS_VECTOR_SEARCH_MEMORY_BUDGET_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_VECTOR_SEARCH_MEMORY_BUDGET_BYTES)
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("ONEDIS_VECTOR_SEARCH_MEMORY_BUDGET_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_VECTOR_SEARCH_MEMORY_BUDGET_BYTES)
+    })
 }
 
 fn vector_exact_scan_limit() -> usize {
-    std::env::var("ONEDIS_VECTOR_EXACT_SCAN_LIMIT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_VECTOR_EXACT_SCAN_LIMIT)
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("ONEDIS_VECTOR_EXACT_SCAN_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_VECTOR_EXACT_SCAN_LIMIT)
+    })
 }
 
 fn parse_attrs(attrs_json: &str) -> Result<JsonValue, Error> {

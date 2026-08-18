@@ -9,7 +9,13 @@ impl Db {
     ) -> Result<FullTextCollectedHits, Error> {
         let index = self.resolve_fulltext_index(index)?;
         let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, &index);
-        if self.fulltext_runtime_schema_needs_rebuild(&index)? {
+        let schema_upgrade = {
+            let _lifecycle_guard = lifecycle_lock
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+            self.fulltext_runtime_schema_needs_rebuild(&index)?
+        };
+        if schema_upgrade {
             let _lifecycle_guard = lifecycle_lock
                 .write()
                 .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;

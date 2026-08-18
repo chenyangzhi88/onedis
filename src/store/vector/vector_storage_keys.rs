@@ -19,6 +19,17 @@ fn vector_meta_key(
     key
 }
 
+fn vector_mutable_state_key(
+    layout: KeyEncodingLayout,
+    db_index: u16,
+    index: &str,
+    version: u64,
+) -> Vec<u8> {
+    let mut key = vector_prefix(layout, db_index, &VECTOR_META_NAMESPACE, index, version);
+    key.extend_from_slice(b"state");
+    key
+}
+
 pub(super) fn vector_internal_marker_key(
     layout: KeyEncodingLayout,
     db_index: u16,

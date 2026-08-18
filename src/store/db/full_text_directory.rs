@@ -37,6 +37,7 @@ pub struct KvTantivyDirectory {
     index: String,
     watchers: Arc<WatchCallbackList>,
     writes: Arc<Mutex<()>>,
+    checkpoints: Arc<Mutex<()>>,
     reservations: Arc<Mutex<HashSet<PathBuf>>>,
     chunk_leases: Arc<Mutex<HashMap<Vec<u8>, Weak<KvChunkLease>>>>,
     hot: Option<Arc<Mutex<HotDirectoryState>>>,
@@ -48,6 +49,7 @@ struct HotDirectoryState {
     files: HashMap<PathBuf, Arc<[u8]>>,
     deleted: HashSet<PathBuf>,
     dirty: bool,
+    revision: u64,
 }
 
 struct KvBlockCache {
@@ -188,6 +190,7 @@ impl KvTantivyDirectory {
             index: index.to_string(),
             watchers: Arc::new(WatchCallbackList::default()),
             writes: Arc::new(Mutex::new(())),
+            checkpoints: Arc::new(Mutex::new(())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             chunk_leases: Arc::new(Mutex::new(HashMap::new())),
             hot: tiered.then(|| Arc::new(Mutex::new(HotDirectoryState::default()))),
@@ -295,6 +298,7 @@ impl KvTantivyDirectory {
                 .insert(path.to_path_buf(), Arc::<[u8]>::from(data));
             hot.deleted.remove(path);
             hot.dirty = true;
+            hot.revision = hot.revision.wrapping_add(1);
             drop(hot);
             if let Ok(mut reservations) = self.reservations.lock() {
                 reservations.remove(path);
@@ -366,53 +370,92 @@ impl KvTantivyDirectory {
                 .map_err(|err| io::Error::other(err.to_string()))?;
             return Ok(false);
         };
-        let _guard = self
-            .writes
+        // Only checkpoints must be serialized for durable manifest/version
+        // accounting. Ordinary tiered writes remain free to publish into the
+        // hot overlay while this snapshot is being flushed and fsynced.
+        let _checkpoint_guard = self
+            .checkpoints
             .lock()
-            .map_err(|_| io::Error::other("fulltext directory write lock poisoned"))?;
-        let mut hot = hot
-            .lock()
-            .map_err(|_| io::Error::other("fulltext hot directory lock poisoned"))?;
-        if !hot.dirty {
-            return Ok(false);
-        }
-
+            .map_err(|_| io::Error::other("fulltext directory checkpoint lock poisoned"))?;
         let meta_path = Path::new("meta.json");
         let lock_paths = [
             Path::new(".tantivy-writer.lock"),
             Path::new(".tantivy-meta.lock"),
         ];
-        let files = hot
-            .files
-            .iter()
-            .filter(|(path, _)| {
-                path.as_path() != meta_path && !lock_paths.contains(&path.as_path())
-            })
-            .map(|(path, data)| (path.clone(), data.clone()))
-            .collect::<Vec<_>>();
-        for (path, data) in files {
-            self.put_file_durable(&path, &data, false)?;
-        }
-        if let Some(meta) = hot.files.get(meta_path).cloned() {
-            self.put_file_durable(meta_path, &meta, false)?;
-        }
+        let (files, meta, deleted, snapshot_revision) = {
+            let hot = hot
+                .lock()
+                .map_err(|_| io::Error::other("fulltext hot directory lock poisoned"))?;
+            if !hot.dirty {
+                return Ok(false);
+            }
+            let files = hot
+                .files
+                .iter()
+                .filter(|(path, _)| {
+                    path.as_path() != meta_path && !lock_paths.contains(&path.as_path())
+                })
+                .map(|(path, data)| (path.clone(), data.clone()))
+                .collect::<Vec<_>>();
+            let meta = hot.files.get(meta_path).cloned();
+            let deleted = hot
+                .deleted
+                .iter()
+                .filter(|path| !lock_paths.contains(&path.as_path()))
+                .cloned()
+                .collect::<Vec<_>>();
+            (files, meta, deleted, hot.revision)
+        };
 
-        let deleted = hot
-            .deleted
-            .iter()
-            .filter(|path| !lock_paths.contains(&path.as_path()))
-            .cloned()
-            .collect::<Vec<_>>();
-        for path in deleted {
-            self.delete_durable_if_present(&path)?;
+        for (path, data) in &files {
+            self.put_file_durable(path, data.as_ref(), false)?;
+        }
+        if let Some(meta) = meta.as_ref() {
+            self.put_file_durable(meta_path, meta.as_ref(), false)?;
+        }
+        for path in &deleted {
+            self.delete_durable_if_present(path)?;
         }
         self.store
             .sync_wal()
             .map_err(|err| io::Error::other(err.to_string()))?;
-        hot.files
-            .retain(|path, _| lock_paths.contains(&path.as_path()));
-        hot.deleted.clear();
-        hot.dirty = false;
+
+        let mut hot = hot
+            .lock()
+            .map_err(|_| io::Error::other("fulltext hot directory lock poisoned"))?;
+        for (path, snapshot) in &files {
+            if hot
+                .files
+                .get(path)
+                .is_some_and(|current| Arc::ptr_eq(current, snapshot))
+            {
+                hot.files.remove(path);
+            }
+        }
+        if let Some(snapshot) = meta.as_ref()
+            && hot
+                .files
+                .get(meta_path)
+                .is_some_and(|current| Arc::ptr_eq(current, snapshot))
+        {
+            hot.files.remove(meta_path);
+        }
+        // A delete can be recreated and deleted again while the snapshot is
+        // on disk. A set alone cannot distinguish that newer tombstone, so
+        // clear snapshot tombstones only if no hot mutation raced this flush.
+        if hot.revision == snapshot_revision {
+            for path in deleted {
+                hot.deleted.remove(&path);
+            }
+        }
+        hot.dirty = hot
+            .files
+            .keys()
+            .any(|path| !lock_paths.contains(&path.as_path()))
+            || hot
+                .deleted
+                .iter()
+                .any(|path| !lock_paths.contains(&path.as_path()));
         Ok(true)
     }
 
@@ -658,6 +701,7 @@ impl Directory for KvTantivyDirectory {
             }
             hot.deleted.insert(path.to_path_buf());
             hot.dirty = true;
+            hot.revision = hot.revision.wrapping_add(1);
             return Ok(());
         }
         let Some((version, len)) = self.manifest(path) else {
@@ -711,6 +755,12 @@ impl Directory for KvTantivyDirectory {
     }
 
     fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
+        let _guard = self.writes.lock().map_err(|_| {
+            OpenWriteError::wrap_io_error(
+                io::Error::other("fulltext directory write lock poisoned"),
+                path.to_path_buf(),
+            )
+        })?;
         let manifest_key = self.manifest_key(path);
         let reservation_key = self.reservation_key(path);
         let mut reservations = self.reservations.lock().map_err(|_| {

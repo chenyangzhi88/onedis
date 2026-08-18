@@ -16,45 +16,6 @@ impl Db {
         }
     }
 
-    pub(super) fn fulltext_refresh_index(&self, index: &str, force: bool) -> Result<(), Error> {
-        let started = Instant::now();
-        let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, index);
-        let schema_upgrade = self.fulltext_runtime_schema_needs_rebuild(index)?;
-        let dirty = self
-            .read_fulltext_meta_direct(index)
-            .is_ok_and(|meta| matches!(meta.state, FullTextIndexState::Dirty));
-        let result = if schema_upgrade {
-            let _lifecycle_guard = lifecycle_lock
-                .write()
-                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-            if self.fulltext_runtime_schema_needs_rebuild(index)? {
-                self.fulltext_rebuild_index(index)
-            } else {
-                self.fulltext_refresh_index_inner(index, force, None)
-            }
-        } else if dirty {
-            let _lifecycle_guard = lifecycle_lock
-                .write()
-                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-            let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
-            let _refresh_guard = refresh_lock
-                .lock()
-                .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
-            self.fulltext_refresh_index_inner(index, force, None)
-        } else {
-            let _lifecycle_guard = lifecycle_lock
-                .read()
-                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-            let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
-            let _refresh_guard = refresh_lock
-                .lock()
-                .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
-            self.fulltext_refresh_index_mode(index, force, None, true, false)
-        };
-        global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
-        result
-    }
-
     pub(super) fn fulltext_runtime_schema_needs_rebuild(&self, index: &str) -> Result<bool, Error> {
         if self.fulltext_runtimes.get(self.db_index, index).is_some() {
             return Ok(false);
@@ -93,7 +54,7 @@ impl Db {
         self.fulltext_refresh_index_mode(index, force, external_deadline, false, false)
     }
 
-    fn fulltext_refresh_index_mode(
+    pub(super) fn fulltext_refresh_index_mode(
         &self,
         index: &str,
         force: bool,
@@ -147,8 +108,13 @@ impl Db {
             durable_checkpoint,
         );
         if let Err(err) = result {
-            self.fulltext_mark_dirty(index)?;
-            self.fulltext_runtimes.remove(self.db_index, index);
+            if self.fulltext_mark_dirty_if_incarnation(index, meta.incarnation)? {
+                self.fulltext_runtimes.remove_if_incarnation(
+                    self.db_index,
+                    index,
+                    meta.incarnation,
+                );
+            }
             return Err(err);
         }
         Ok(())
@@ -269,11 +235,7 @@ impl Db {
         self.fulltext_refresh_index_inner(index, true, None)
     }
 
-    pub(super) fn fulltext_recover_creating_index(&self, index: &str) -> Result<(), Error> {
-        let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, index);
-        let _lifecycle_guard = lifecycle_lock
-            .write()
-            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+    pub(super) fn fulltext_recover_creating_index_inner(&self, index: &str) -> Result<(), Error> {
         let (mut meta, expected_raw) = self.read_fulltext_meta_versioned(index)?;
         if !matches!(meta.state, FullTextIndexState::Creating) {
             return Ok(());
@@ -333,12 +295,23 @@ impl Db {
         Ok(())
     }
 
-    pub(super) fn fulltext_mark_dirty(&self, index: &str) -> Result<(), Error> {
-        let (mut meta, expected_meta_raw) = self.read_fulltext_meta_versioned(index)?;
+    pub(super) fn fulltext_mark_dirty_if_incarnation(
+        &self,
+        index: &str,
+        incarnation: u64,
+    ) -> Result<bool, Error> {
+        let Some((mut meta, expected_meta_raw)) =
+            self.read_fulltext_meta_versioned_optional(index)?
+        else {
+            return Ok(false);
+        };
+        if meta.incarnation != incarnation {
+            return Ok(false);
+        }
         meta.state = FullTextIndexState::Dirty;
         let mut batch = WriteBatch::new();
         self.fulltext_write_meta_cas(index, &expected_meta_raw, &mut meta, &mut batch)?;
-        Ok(())
+        Ok(true)
     }
 
     pub(super) fn fulltext_dirty_repair_allowed(&self, index: &str) -> Result<bool, Error> {

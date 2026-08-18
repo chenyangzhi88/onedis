@@ -75,34 +75,107 @@ impl Distance<u8> for DistQ8 {
         }
         let lhs_scale = f32::from_le_bytes(lhs[..4].try_into().unwrap_or([0; 4]));
         let rhs_scale = f32::from_le_bytes(rhs[..4].try_into().unwrap_or([0; 4]));
-        if self.cosine {
-            let mut dot = 0.0f64;
-            let mut lhs_norm = 0.0f64;
-            let mut rhs_norm = 0.0f64;
-            for (&lhs, &rhs) in lhs[4..].iter().zip(&rhs[4..]) {
-                let lhs = f64::from((lhs as i8) as f32 * lhs_scale);
-                let rhs = f64::from((rhs as i8) as f32 * rhs_scale);
-                dot += lhs * rhs;
-                lhs_norm += lhs * lhs;
-                rhs_norm += rhs * rhs;
-            }
-            if lhs_norm == 0.0 || rhs_norm == 0.0 {
-                return 1.0;
-            }
-            return (1.0 - (dot / (lhs_norm * rhs_norm).sqrt()).clamp(-1.0, 1.0)) as f32;
-        }
-        lhs[4..]
-            .iter()
-            .zip(&rhs[4..])
-            .map(|(&lhs, &rhs)| {
-                let lhs = (lhs as i8) as f32 * lhs_scale;
-                let rhs = (rhs as i8) as f32 * rhs_scale;
-                let delta = lhs - rhs;
-                delta * delta
-            })
-            .sum::<f32>()
-            .sqrt()
+        let lhs_values = &lhs[4..];
+        let rhs_values = &rhs[4..];
+        q8_distance(
+            lhs_scale,
+            lhs_values,
+            q8_norm_squared(lhs_values),
+            rhs_scale,
+            rhs_values,
+            q8_norm_squared(rhs_values),
+            self.cosine,
+        )
     }
+}
+
+fn q8_norm_squared(values: &[u8]) -> u32 {
+    q8_dot(values, values).max(0) as u32
+}
+
+fn q8_dot(lhs: &[u8], rhs: &[u8]) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: feature detection above guarantees AVX2 support and the
+        // helper performs only unaligned loads inside the supplied slices.
+        return unsafe { q8_dot_avx2(lhs, rhs) };
+    }
+    q8_dot_scalar(lhs, rhs)
+}
+
+fn q8_dot_scalar(lhs: &[u8], rhs: &[u8]) -> i64 {
+    lhs.iter().zip(rhs).fold(0i64, |dot, (lhs, rhs)| {
+        dot + i64::from(*lhs as i8) * i64::from(*rhs as i8)
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn q8_dot_avx2(lhs: &[u8], rhs: &[u8]) -> i64 {
+    use std::arch::x86_64::*;
+
+    let common = lhs.len().min(rhs.len());
+    let vectorized = common / 32 * 32;
+    let mut accumulator = _mm256_setzero_si256();
+    let mut offset = 0usize;
+    while offset < vectorized {
+        // SAFETY: offset is bounded by vectorized <= common and unaligned
+        // loads accept byte-aligned pointers.
+        let left = unsafe { _mm256_loadu_si256(lhs.as_ptr().add(offset).cast()) };
+        let right = unsafe { _mm256_loadu_si256(rhs.as_ptr().add(offset).cast()) };
+        let left_low = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(left));
+        let right_low = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(right));
+        let left_high = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(left, 1));
+        let right_high = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(right, 1));
+        accumulator = _mm256_add_epi32(
+            accumulator,
+            _mm256_madd_epi16(left_low, right_low),
+        );
+        accumulator = _mm256_add_epi32(
+            accumulator,
+            _mm256_madd_epi16(left_high, right_high),
+        );
+        offset += 32;
+    }
+    let mut lanes = [0i32; 8];
+    // SAFETY: lanes has exactly the 32 bytes required by the store.
+    unsafe { _mm256_storeu_si256(lanes.as_mut_ptr().cast(), accumulator) };
+    let mut dot = lanes.into_iter().map(i64::from).sum::<i64>();
+    dot += q8_dot_scalar(&lhs[vectorized..common], &rhs[vectorized..common]);
+    dot
+}
+
+fn q8_distance(
+    lhs_scale: f32,
+    lhs: &[u8],
+    lhs_norm_squared: u32,
+    rhs_scale: f32,
+    rhs: &[u8],
+    rhs_norm_squared: u32,
+    cosine: bool,
+) -> f32 {
+    if lhs.len() != rhs.len() || lhs.is_empty() {
+        return f32::MAX;
+    }
+    let dot = q8_dot(lhs, rhs) as f64;
+    if cosine {
+        if lhs_norm_squared == 0 || rhs_norm_squared == 0 {
+            return 1.0;
+        }
+        // Both scales are positive and cancel from cosine similarity. Keep the
+        // accumulation integral until the final division.
+        let denominator =
+            (f64::from(lhs_norm_squared) * f64::from(rhs_norm_squared)).sqrt();
+        return (1.0 - (dot / denominator).clamp(-1.0, 1.0)) as f32;
+    }
+    // Sum((a*sa-b*sb)^2) can be recovered from the two cached norms and the
+    // integer dot product, avoiding a floating-point loop over every edge.
+    let lhs_scale = f64::from(lhs_scale);
+    let rhs_scale = f64::from(rhs_scale);
+    let squared = lhs_scale * lhs_scale * f64::from(lhs_norm_squared)
+        + rhs_scale * rhs_scale * f64::from(rhs_norm_squared)
+        - 2.0 * lhs_scale * rhs_scale * dot;
+    squared.max(0.0).sqrt() as f32
 }
 
 #[derive(Clone, Copy)]
@@ -218,12 +291,14 @@ fn hnsw_payload_distance(
                 scale: right_scale,
                 values: right_values,
             },
-        ) => DistQ8 {
-            cosine: distance == VectorDistance::Cosine,
-        }
-        .eval(
-            &q8_snapshot_bytes(*left_scale, left_values),
-            &q8_snapshot_bytes(*right_scale, right_values),
+        ) => q8_distance(
+            *left_scale,
+            left_values,
+            q8_norm_squared(left_values),
+            *right_scale,
+            right_values,
+            q8_norm_squared(right_values),
+            distance == VectorDistance::Cosine,
         ),
         (
             HnswSnapshotVector::Binary {
@@ -477,6 +552,7 @@ impl HnswGraph {
                     // the public IP score, this makes candidates from segments
                     // with different MIPS radii directly comparable.
                     distance: distance_score(self.distance, query, &node.vector).ok()?,
+                    source_position: None,
                 })
             })
             .take(limit)
@@ -663,6 +739,33 @@ impl VectorHnswIndexBlob {
         )
     }
 
+    fn from_legacy_v2(legacy: LegacyVectorHnswIndexBlobV2) -> Self {
+        let q8_norms = legacy
+            .vectors
+            .iter()
+            .map(|vector| match vector {
+                HnswSnapshotVector::Q8 { values, .. } => q8_norm_squared(values),
+                _ => 0,
+            })
+            .collect();
+        Self {
+            dim: legacy.dim,
+            distance: legacy.distance,
+            m: legacy.m,
+            ef_construction: legacy.ef_construction,
+            quantization: legacy.quantization,
+            entry_point: legacy.entry_point,
+            max_layer: legacy.max_layer,
+            ids: legacy.ids,
+            doc_versions: legacy.doc_versions,
+            vectors: legacy.vectors,
+            q8_norms,
+            node_layer_offsets: legacy.node_layer_offsets,
+            layer_neighbor_offsets: legacy.layer_neighbor_offsets,
+            neighbors: legacy.neighbors,
+        }
+    }
+
     fn from_node_parts(
         dim: u32,
         distance: VectorDistance,
@@ -691,6 +794,13 @@ impl VectorHnswIndexBlob {
             }
             node_layer_offsets.push((layer_neighbor_offsets.len() - 1) as u32);
         }
+        let q8_norms = vectors
+            .iter()
+            .map(|vector| match vector {
+                HnswSnapshotVector::Q8 { values, .. } => q8_norm_squared(values),
+                _ => 0,
+            })
+            .collect();
         Self {
             dim,
             distance,
@@ -702,6 +812,7 @@ impl VectorHnswIndexBlob {
             ids,
             doc_versions,
             vectors,
+            q8_norms,
             node_layer_offsets,
             layer_neighbor_offsets,
             neighbors,
@@ -747,6 +858,7 @@ impl VectorHnswIndexBlob {
             || self.ids.len() > MAX_VECTOR_INITIAL_CAP
             || self.ids.len() != self.doc_versions.len()
             || self.ids.len() != self.vectors.len()
+            || self.ids.len() != self.q8_norms.len()
             || self.node_layer_offsets.len() != self.ids.len().saturating_add(1)
             || self.node_layer_offsets.first().copied() != Some(0)
             || self.layer_neighbor_offsets.first().copied() != Some(0)
@@ -796,7 +908,12 @@ impl VectorHnswIndexBlob {
                 (
                     HnswSnapshotVector::Q8 { scale, values },
                     VectorQuantization::Q8,
-                ) => scale.is_finite() && *scale > 0.0 && values.len() == payload_dim,
+                ) => {
+                    scale.is_finite()
+                        && *scale > 0.0
+                        && values.len() == payload_dim
+                        && self.q8_norms[node_id] == q8_norm_squared(values)
+                }
                 (
                     HnswSnapshotVector::Binary { dimensions, bits },
                     VectorQuantization::Binary,
@@ -819,12 +936,33 @@ impl VectorHnswIndexBlob {
         &self,
         node: u32,
         query: &HnswSnapshotVector,
+        query_q8_norm: u32,
     ) -> Result<f32, Error> {
         let vector = self
             .vectors
             .get(node as usize)
             .ok_or_else(|| Error::msg("ERR invalid persisted HNSW node"))?;
-        hnsw_payload_distance(self.distance, query, vector)
+        match (query, vector) {
+            (
+                HnswSnapshotVector::Q8 {
+                    scale: query_scale,
+                    values: query_values,
+                },
+                HnswSnapshotVector::Q8 {
+                    scale: vector_scale,
+                    values: vector_values,
+                },
+            ) => Ok(q8_distance(
+                *query_scale,
+                query_values,
+                query_q8_norm,
+                *vector_scale,
+                vector_values,
+                self.q8_norms[node as usize],
+                self.distance == VectorDistance::Cosine,
+            )),
+            _ => hnsw_payload_distance(self.distance, query, vector),
+        }
     }
 
     fn links(
@@ -907,15 +1045,23 @@ impl VectorHnswIndexBlob {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let query_q8_norm = match query_payload {
+            HnswSnapshotVector::Q8 { values, .. } => q8_norm_squared(values),
+            _ => 0,
+        };
         let mut current = self.entry_point;
-        let mut current_distance = self.node_distance(current, query_payload)?;
+        let mut current_distance =
+            self.node_distance(current, query_payload, query_q8_norm)?;
+        let mut distance_calculations = 1usize;
 
         for layer in (1..=self.max_layer as usize).rev() {
             loop {
                 let mut improved = false;
                 let neighbors = self.node_layer(current as usize, layer);
                 for &neighbor in neighbors {
-                    let distance = self.node_distance(neighbor, query_payload)?;
+                    distance_calculations = distance_calculations.saturating_add(1);
+                    let distance =
+                        self.node_distance(neighbor, query_payload, query_q8_norm)?;
                     if distance < current_distance {
                         current = neighbor;
                         current_distance = distance;
@@ -933,46 +1079,50 @@ impl VectorHnswIndexBlob {
             node: current,
             distance: current_distance,
         };
-        let mut candidates = BinaryHeap::new();
-        candidates.push(std::cmp::Reverse(start));
-        let mut nearest = BinaryHeap::new();
-        nearest.push(start);
-        let mut visited = HashSet::with_capacity(ef.saturating_mul(2).min(self.node_count()));
-        visited.insert(current);
+        let mut nearest = VECTOR_HNSW_VISITED.with(|scratch| -> Result<Vec<_>, Error> {
+            let mut scratch = scratch.borrow_mut();
+            let generation = scratch.begin(self.node_count());
+            scratch.marks[current as usize] = generation;
+            let mut candidates = BinaryHeap::new();
+            candidates.push(std::cmp::Reverse(start));
+            let mut nearest = BinaryHeap::new();
+            nearest.push(start);
 
-        while let Some(std::cmp::Reverse(candidate)) = candidates.pop() {
-            if nearest.len() >= ef
-                && nearest
-                    .peek()
-                    .is_some_and(|worst| candidate.distance > worst.distance)
-            {
-                break;
-            }
-            let neighbors = self.node_layer(candidate.node as usize, 0);
-            for &neighbor in neighbors {
-                if !visited.insert(neighbor) {
-                    continue;
-                }
-                let distance = self.node_distance(neighbor, query_payload)?;
-                let item = HnswSearchQueueItem {
-                    node: neighbor,
-                    distance,
-                };
-                if nearest.len() < ef
-                    || nearest
+            while let Some(std::cmp::Reverse(candidate)) = candidates.pop() {
+                if nearest.len() >= ef
+                    && nearest
                         .peek()
-                        .is_some_and(|worst| item.distance < worst.distance)
+                        .is_some_and(|worst| candidate.distance > worst.distance)
                 {
-                    candidates.push(std::cmp::Reverse(item));
-                    nearest.push(item);
-                    if nearest.len() > ef {
-                        nearest.pop();
+                    break;
+                }
+                let neighbors = self.node_layer(candidate.node as usize, 0);
+                for &neighbor in neighbors {
+                    if scratch.marks[neighbor as usize] == generation {
+                        continue;
+                    }
+                    scratch.marks[neighbor as usize] = generation;
+                    distance_calculations = distance_calculations.saturating_add(1);
+                    let distance = self.node_distance(neighbor, query_payload, query_q8_norm)?;
+                    let item = HnswSearchQueueItem {
+                        node: neighbor,
+                        distance,
+                    };
+                    if nearest.len() < ef
+                        || nearest
+                            .peek()
+                            .is_some_and(|worst| item.distance < worst.distance)
+                    {
+                        candidates.push(std::cmp::Reverse(item));
+                        nearest.push(item);
+                        if nearest.len() > ef {
+                            nearest.pop();
+                        }
                     }
                 }
             }
-        }
-
-        let mut nearest = nearest.into_vec();
+            Ok(nearest.into_vec())
+        })?;
         nearest.sort_by(|left, right| {
             left.distance
                 .total_cmp(&right.distance)
@@ -1001,11 +1151,13 @@ impl VectorHnswIndexBlob {
                     &self.vectors[node],
                     item.distance,
                 )?,
+                source_position: Some(node),
             });
             if output.len() >= limit {
                 break;
             }
         }
+        global_metrics().record_vector_distance_calculations(distance_calculations);
         Ok(output)
     }
 }

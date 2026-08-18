@@ -16,6 +16,11 @@ struct VectorRuntime {
     /// per-document KV records; keeping them here would defeat the LSM memory
     /// bound.
     current_versions: Arc<DashMap<String, u64>>,
+    /// Ephemeral HNSW over the current mutable tail. It is rebuilt by
+    /// maintenance and never participates in the durable write transaction.
+    /// Documents newer than `delta_index_through` remain an exact-scan tail.
+    delta_index: Option<Arc<VectorHnswIndexBlob>>,
+    delta_index_through: u64,
     config: VectorRuntimeConfig,
 }
 
@@ -23,6 +28,8 @@ struct VectorRuntimeSearchSnapshot {
     segments: Vec<VectorSegmentRuntime>,
     memtable: Vec<Arc<VectorDocRecord>>,
     current_versions: Arc<DashMap<String, u64>>,
+    delta_index: Option<Arc<VectorHnswIndexBlob>>,
+    delta_index_through: u64,
     config: VectorRuntimeConfig,
 }
 
@@ -69,53 +76,33 @@ impl VectorSearchEntry for VectorSegmentEntry {
 
 impl VectorRuntime {
     fn new(
-        dim: usize,
-        distance: VectorDistance,
-        m: usize,
-        ef_construction: usize,
-        initial_cap: usize,
+        config: VectorRuntimeConfig,
         next_segment_id: u64,
-        quantization: VectorQuantization,
     ) -> Self {
         Self {
             memtable: HashMap::new(),
             segments: Vec::new(),
             next_segment_id,
             current_versions: Arc::new(DashMap::new()),
-            config: VectorRuntimeConfig {
-                dim,
-                distance,
-                m,
-                ef_construction,
-                initial_cap,
-                quantization,
-            },
+            delta_index: None,
+            delta_index_through: 0,
+            config,
         }
     }
 
     fn with_segments(
-        dim: usize,
-        distance: VectorDistance,
-        m: usize,
-        ef_construction: usize,
-        initial_cap: usize,
+        config: VectorRuntimeConfig,
         next_segment_id: u64,
         segments: Vec<VectorSegmentRuntime>,
-        quantization: VectorQuantization,
     ) -> Self {
         Self {
             memtable: HashMap::new(),
             segments,
             next_segment_id,
             current_versions: Arc::new(DashMap::new()),
-            config: VectorRuntimeConfig {
-                dim,
-                distance,
-                m,
-                ef_construction,
-                initial_cap,
-                quantization,
-            },
+            delta_index: None,
+            delta_index_through: 0,
+            config,
         }
     }
 
@@ -185,6 +172,8 @@ impl VectorRuntime {
             .into_iter()
             .map(|doc| (doc.id.clone(), Arc::new(doc)))
             .collect();
+        self.delta_index = None;
+        self.delta_index_through = 0;
     }
 
     fn len(&self) -> usize {
@@ -226,6 +215,40 @@ impl VectorRuntime {
             .sum::<usize>()
             .saturating_add(self.memtable.values().filter(|doc| doc.deleted).count());
         (self.segments.len(), total_nodes, deleted_nodes)
+    }
+
+    fn delta_stats(&self) -> (usize, usize) {
+        let delta_nodes = self.delta_index.as_ref().map_or(0, |index| index.node_count());
+        let exact_tail_docs = self
+            .memtable
+            .values()
+            .filter(|doc| {
+                doc.doc_version > self.delta_index_through
+                    && !doc.deleted
+                    && self.is_current(&doc.id, doc.doc_version)
+            })
+            .count();
+        (delta_nodes, exact_tail_docs)
+    }
+
+    fn rerank_source_stats(&self) -> (usize, usize) {
+        let sources = self
+            .segments
+            .iter()
+            .filter_map(|segment| segment.source.as_ref())
+            ;
+        sources.fold((0usize, 0usize), |(docs, bytes), source| {
+            let source_docs = source.entries.len();
+            let source_bytes = source
+                .entries
+                .iter()
+                .map(|entry| entry.vector.len().saturating_mul(std::mem::size_of::<f32>()))
+                .sum::<usize>();
+            (
+                docs.saturating_add(source_docs),
+                bytes.saturating_add(source_bytes),
+            )
+        })
     }
 
     fn memtable_batch(&self, limit: usize, force: bool) -> Option<Vec<VectorDocRecord>> {
@@ -274,6 +297,11 @@ impl VectorRuntime {
     }
 
     fn acknowledge_memtable(&mut self, entries: &[VectorDocRecord]) {
+        let flushed_through = entries
+            .iter()
+            .map(|doc| doc.doc_version)
+            .max()
+            .unwrap_or(0);
         for doc in entries {
             if self
                 .memtable
@@ -283,6 +311,27 @@ impl VectorRuntime {
                 self.memtable.remove(&doc.id);
             }
         }
+        if self.delta_index_through > 0 && flushed_through >= self.delta_index_through {
+            self.delta_index = None;
+            self.delta_index_through = 0;
+        }
+    }
+
+    fn publish_delta_index(
+        &mut self,
+        expected_previous_through: u64,
+        through: u64,
+        index: Option<Arc<VectorHnswIndexBlob>>,
+    ) -> bool {
+        if self.delta_index_through != expected_previous_through {
+            return false;
+        }
+        // The memtable is already the durable delta source of truth. Keep the
+        // packed graph resident, and reconstruct an aligned FP32 view only
+        // for an explicit RERANK query.
+        self.delta_index = index;
+        self.delta_index_through = through;
+        true
     }
 
     fn cache_segment_source(&mut self, segment_id: u64, source: Arc<VectorSegmentBlob>) {
@@ -318,8 +367,8 @@ impl VectorRuntime {
         {
             segment.meta.index_key = index_key;
             segment.index = Some(index);
-            // Indexed search no longer needs the FP32 source resident.  It is
-            // reloaded only when this segment participates in compaction.
+            // Indexed source blobs are loaded on demand only for an explicit
+            // FP32 rerank query. Keeping them resident doubles vector memory.
             segment.source = None;
         }
     }
@@ -362,6 +411,13 @@ impl VectorRuntime {
     }
 
     fn links(&self, id: &str) -> Option<Vec<Vec<(String, f32)>>> {
+        if let Some(layers) = self
+            .delta_index
+            .as_ref()
+            .and_then(|index| index.links(id, &self.current_versions))
+        {
+            return Some(layers);
+        }
         if let Some(layers) = self
             .segments
             .iter()
@@ -434,7 +490,9 @@ impl VectorRuntime {
             segments: self.segments.clone(),
             memtable: self.memtable.values().cloned().collect(),
             current_versions: Arc::clone(&self.current_versions),
-            config: self.config,
+            delta_index: self.delta_index.clone(),
+            delta_index_through: self.delta_index_through,
+            config: self.config.clone(),
         }
     }
 
@@ -484,12 +542,29 @@ impl VectorRuntimeSearchSnapshot {
                     query_norm_squared,
                     entry.vector(),
                 )?,
+                source_position: None,
             });
         }
         Ok(output)
     }
 
+    #[cfg(test)]
     fn search(
+        &self,
+        query: &[f32],
+        candidate_limit: usize,
+        ef: usize,
+        allow_doc_ids: Option<&HashSet<String>>,
+    ) -> Result<Vec<VectorCandidate>, Error> {
+        self.search_with_base_limit(
+            query,
+            candidate_limit,
+            ef,
+            allow_doc_ids,
+        )
+    }
+
+    fn search_with_base_limit(
         &self,
         query: &[f32],
         candidate_limit: usize,
@@ -503,16 +578,41 @@ impl VectorRuntimeSearchSnapshot {
             query,
             self.config.quantization,
         );
+        let indexed_node_counts = self
+            .segments
+            .iter()
+            .filter_map(|segment| segment.index.as_ref())
+            .map(|index| index.node_count())
+            .chain(self.delta_index.iter().map(|index| index.node_count()))
+            .collect::<Vec<_>>();
+        let indexed_nodes = indexed_node_counts.iter().sum::<usize>();
+        let minimum_fanout = indexed_node_counts.len().min(indexed_nodes);
+        let candidate_budget = candidate_limit
+            .max(minimum_fanout)
+            .min(indexed_nodes.max(1));
+        let candidate_budgets =
+            distribute_vector_budget(&indexed_node_counts, candidate_budget);
+        let ef_budgets = distribute_vector_budget(
+            &indexed_node_counts,
+            ef.max(candidate_budget).min(indexed_nodes.max(1)),
+        );
+        global_metrics().record_vector_search_ef_budget(ef_budgets.iter().sum());
+        let mut graph_position = 0usize;
+        global_metrics().record_vector_search_graphs(indexed_node_counts.len());
         for segment in &self.segments {
             let mut segment_candidates = if let Some(index) = &segment.index {
-                index.search_prepared(
+                let segment_limit = candidate_budgets[graph_position];
+                let segment_ef = ef_budgets[graph_position].max(segment_limit);
+                graph_position += 1;
+                let candidates = index.search_prepared(
                     query,
                     &query_payload,
-                    candidate_limit.min(index.node_count()),
-                    ef,
+                    segment_limit,
+                    segment_ef,
                     allow_doc_ids,
                     &self.current_versions,
-                )?
+                )?;
+                candidates
             } else {
                 let source = segment.source.as_ref().ok_or_else(|| {
                     Error::msg("ERR vector source segment is not loaded")
@@ -531,14 +631,75 @@ impl VectorRuntimeSearchSnapshot {
             });
             segment_candidates.truncate(candidate_limit);
             candidates.extend(segment_candidates);
+            if candidates.len() > candidate_limit.saturating_mul(2) {
+                candidates = reduce_vector_candidates(candidates, candidate_limit)?;
+            }
         }
 
+        if let Some(index) = &self.delta_index {
+            let delta_limit = candidate_budgets[graph_position];
+            let delta_ef = ef_budgets[graph_position].max(delta_limit);
+            let delta_candidates = index.search_prepared(
+                query,
+                &query_payload,
+                delta_limit,
+                delta_ef,
+                allow_doc_ids,
+                &self.current_versions,
+            )?;
+            candidates.extend(delta_candidates);
+            if candidates.len() > candidate_limit.saturating_mul(2) {
+                candidates = reduce_vector_candidates(candidates, candidate_limit)?;
+            }
+        }
+
+        let exact_tail_docs = self
+            .memtable
+            .iter()
+            .filter(|doc| doc.doc_version > self.delta_index_through)
+            .count();
+        global_metrics().record_vector_exact_tail_docs(exact_tail_docs);
+        global_metrics().record_vector_memtable_scan(exact_tail_docs);
         candidates.extend(self.brute_force_entries(
-            self.memtable.iter().map(Arc::as_ref),
+            self.memtable
+                .iter()
+                .map(Arc::as_ref)
+                .filter(|doc| doc.doc_version > self.delta_index_through),
             query,
             query_norm_squared,
             allow_doc_ids,
         )?);
         reduce_vector_candidates(candidates, candidate_limit)
     }
+}
+
+fn distribute_vector_budget(node_counts: &[usize], requested: usize) -> Vec<usize> {
+    let total_nodes = node_counts.iter().sum::<usize>();
+    if total_nodes == 0 {
+        return vec![0; node_counts.len()];
+    }
+    let active = node_counts.iter().filter(|count| **count > 0).count();
+    let mut remaining_budget = requested.max(active).min(total_nodes);
+    let mut remaining_nodes = total_nodes;
+    let mut remaining_graphs = active;
+    let mut budgets = Vec::with_capacity(node_counts.len());
+    for &nodes in node_counts {
+        if nodes == 0 {
+            budgets.push(0);
+            continue;
+        }
+        let reserve = remaining_graphs.saturating_sub(1);
+        let proportional = remaining_budget
+            .saturating_mul(nodes)
+            .div_ceil(remaining_nodes.max(1));
+        let budget = proportional
+            .max(1)
+            .min(nodes)
+            .min(remaining_budget.saturating_sub(reserve).max(1));
+        budgets.push(budget);
+        remaining_budget = remaining_budget.saturating_sub(budget);
+        remaining_nodes = remaining_nodes.saturating_sub(nodes);
+        remaining_graphs = remaining_graphs.saturating_sub(1);
+    }
+    budgets
 }

@@ -124,10 +124,8 @@ impl Db {
         attrs_json: Option<String>,
     ) -> Result<bool, Error> {
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (expire_ms, version, meta, expected_marker, expected_meta) = match self
+        let _guard = write_lock.blocking_lock();
+        let (_expire_ms, version, meta, expected_marker, expected_meta, _expected_state) = match self
             .read_vector_meta_observed(index)
         {
             Ok(value) => value,
@@ -146,7 +144,9 @@ impl Db {
         let new_attrs_json = attrs_json.unwrap_or_else(|| "{}".to_string());
         let new_attrs = parse_attrs(&new_attrs_json)?;
         validate_attrs_against_schema(&meta.schema, &new_attrs)?;
-        let old_attrs = parse_attrs(&doc.attrs_json)?;
+        let old_attrs = (!meta.schema.is_empty())
+            .then(|| parse_attrs(&doc.attrs_json))
+            .transpose()?;
         let mut batch = WriteBatch::new();
         let attr_context = VectorAttrIndexContext {
             layout: self.key_layout,
@@ -156,19 +156,16 @@ impl Db {
             schema: &meta.schema,
             doc_id: &doc.id,
         };
-        delete_attr_index_entries_to_batch(&mut batch, &attr_context, &old_attrs)?;
-        put_attr_index_entries_to_batch(&mut batch, &attr_context, doc.doc_version, &new_attrs)?;
+        if let Some(old_attrs) = old_attrs.as_ref() {
+            delete_attr_index_entries_to_batch(&mut batch, &attr_context, old_attrs)?;
+            put_attr_index_entries_to_batch(
+                &mut batch,
+                &attr_context,
+                doc.doc_version,
+                &new_attrs,
+            )?;
+        }
         doc.attrs_json = new_attrs_json.clone();
-        put_vector_marker_to_batch(
-            &mut batch,
-            self.key_layout,
-            self.db_index,
-            index,
-            expire_ms,
-            version,
-            meta.dim,
-            meta.internal,
-        )?;
         batch.put(&key, &encode_record(&doc)?)?;
         self.commit_vector_batch_if_marker_unchanged(
             index,
@@ -178,6 +175,7 @@ impl Db {
             &expected_meta,
             &batch,
         )?;
+        self.record_public_vector_mutation(index, meta.internal);
         self.vector_runtimes
             .set_attrs(self.db_index, index, version, id, new_attrs_json);
         Ok(true)
@@ -190,9 +188,75 @@ impl Db {
         attrs_json: Option<String>,
     ) -> Result<bool, Error> {
         let _key_write_guard = self.set_write_lock(index).lock().await;
-        let index = index.to_string();
-        let id = id.to_string();
-        self.run_blocking_store_task(move |db| db.vector_set_attrs(&index, &id, attrs_json))
-            .await
+        let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
+        let lock_started = Instant::now();
+        let _vector_write_guard = write_lock.lock().await;
+        let lock_wait_us = elapsed_us(lock_started);
+        let (_expire_ms, version, meta, expected_marker, expected_meta, _expected_state) =
+            match self.read_vector_meta_observed_async(index).await {
+                Ok(value) => value,
+                Err(err) if err.to_string() == "ERR vector index does not exist" => {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
+            };
+        self.ensure_vector_runtime_unlocked(index, version, &meta)?;
+        let key = vector_doc_key(self.key_layout, self.db_index, index, version, id);
+        let Some(raw) = self.store.get_raw_async(&key).await else {
+            return Ok(false);
+        };
+        let mut doc = decode_record::<VectorDocRecord>(&raw)?;
+        if doc.deleted {
+            return Ok(false);
+        }
+        let new_attrs_json = attrs_json.unwrap_or_else(|| "{}".to_string());
+        let new_attrs = parse_attrs(&new_attrs_json)?;
+        validate_attrs_against_schema(&meta.schema, &new_attrs)?;
+        let old_attrs = (!meta.schema.is_empty())
+            .then(|| parse_attrs(&doc.attrs_json))
+            .transpose()?;
+        let mut batch = WriteBatch::new();
+        let attr_context = VectorAttrIndexContext {
+            layout: self.key_layout,
+            db_index: self.db_index,
+            index,
+            version,
+            schema: &meta.schema,
+            doc_id: &doc.id,
+        };
+        if let Some(old_attrs) = old_attrs.as_ref() {
+            delete_attr_index_entries_to_batch(&mut batch, &attr_context, old_attrs)?;
+            put_attr_index_entries_to_batch(
+                &mut batch,
+                &attr_context,
+                doc.doc_version,
+                &new_attrs,
+            )?;
+        }
+        doc.attrs_json = new_attrs_json.clone();
+        batch.put(&key, &encode_record(&doc)?)?;
+        let batch_bytes = batch.iter().fold(0usize, |bytes, (_, key, value)| {
+            bytes.saturating_add(key.len()).saturating_add(value.len())
+        });
+        global_metrics().record_vector_write_work(
+            4,
+            2,
+            batch.count() as usize,
+            batch_bytes,
+            lock_wait_us,
+        );
+        self.commit_vector_batch_if_marker_unchanged_async(
+            index,
+            meta.internal,
+            version,
+            &expected_marker,
+            &expected_meta,
+            &batch,
+        )
+        .await?;
+        self.record_public_vector_mutation(index, meta.internal);
+        self.vector_runtimes
+            .set_attrs(self.db_index, index, version, id, new_attrs_json);
+        Ok(true)
     }
 }

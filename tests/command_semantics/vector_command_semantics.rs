@@ -96,7 +96,10 @@ async fn apply_async(db: &Db, args: &[&str]) -> Frame {
 }
 
 fn assert_integer(frame: Frame, expected: i64) {
-    assert!(matches!(frame, Frame::Integer(value) if value == expected));
+    let Frame::Integer(actual) = frame else {
+        panic!("expected integer {expected}, got a different frame type");
+    };
+    assert_eq!(actual, expected);
 }
 
 fn bulk_string(frame: &Frame) -> String {
@@ -259,6 +262,19 @@ fn redis_vector_set_autocommit_persists_multiple_elements() {
     );
 
     assert_integer(apply(&db, &["VCARD", "products"]), 2);
+    assert_integer(
+        apply_autocommit(
+            &db,
+            &["VSETATTR", "products", "p2", r#"{"kind":"featured"}"#],
+        ),
+        1,
+    );
+    assert!(matches!(
+        apply(&db, &["VGETATTR", "products", "p2"]),
+        Frame::BulkString(value) if value == br#"{"kind":"featured"}"#
+    ));
+    assert_integer(apply_autocommit(&db, &["VREM", "products", "p1"]), 1);
+    assert_integer(apply(&db, &["VCARD", "products"]), 1);
     assert!(matches!(
         apply(&db, &["VEMB", "products", "p2"]),
         Frame::Array(values) if values.len() == 3
@@ -570,6 +586,11 @@ fn redis_vector_set_parser_and_missing_key_edges_are_deterministic() {
         &["VSIM", "v", "VALUES", "1", "1", "FILTER"][..],
         &["VSIM", "v", "VALUES", "1", "1", "EPSILON", "inf"][..],
         &["VSIM", "v", "VALUES", "1", "1", "FILTER-EF", "bad"][..],
+        &["VSIM", "v", "VALUES", "1", "1", "RERANK"][..],
+        &["VSIM", "v", "VALUES", "1", "1", "RERANK", "0"][..],
+        &[
+            "VSIM", "v", "VALUES", "1", "1", "RERANK", "5", "COUNT", "10",
+        ][..],
         &["VSIM", "v", "VALUES", "1", "1", "BADOPT"][..],
         &["VREM", "v"][..],
         &["VCARD"][..],
@@ -764,6 +785,13 @@ fn redis_vector_set_advanced_options_cover_reduce_fp32_epsilon_and_attr_clear() 
         apply(&db, &["VSIM", "advanced", "ELE", "a", "FILTER-EF", "10"]),
         Frame::Array(_)
     ));
+    assert!(matches!(
+        apply(
+            &db,
+            &["VSIM", "advanced", "ELE", "a", "COUNT", "2", "RERANK", "2"]
+        ),
+        Frame::Array(_)
+    ));
 
     let duplicates = apply(&db, &["VRANDMEMBER", "advanced", "-3"]);
     assert!(matches!(duplicates, Frame::Array(values) if values.len() == 3));
@@ -865,6 +893,7 @@ fn vector_store_create_schema_search_drop_rebuild_and_compact_paths() {
                 with_attrs_json: false,
                 ef: Some(8),
                 filter_ef: None,
+                rerank: None,
                 exact: false,
                 offset: 0,
                 limit: Some(2),
@@ -890,6 +919,7 @@ fn vector_store_create_schema_search_drop_rebuild_and_compact_paths() {
                 with_attrs_json: false,
                 ef: None,
                 filter_ef: None,
+                rerank: None,
                 exact: false,
                 offset: 1,
                 limit: Some(1),
@@ -960,6 +990,7 @@ async fn vector_store_async_create_add_search_rebuild_compact_and_drop_paths() {
                 with_attrs_json: false,
                 ef: Some(4),
                 filter_ef: None,
+                rerank: None,
                 exact: false,
                 offset: 0,
                 limit: None,

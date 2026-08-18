@@ -3,6 +3,9 @@ struct VectorCandidate {
     id: String,
     doc_version: u64,
     distance: f32,
+    /// Position in the immutable source aligned with a persisted HNSW node.
+    /// Consumed by runtime FP32 reranking before candidates leave a segment.
+    source_position: Option<usize>,
 }
 
 struct VectorSearchContext<'a> {

@@ -23,11 +23,11 @@ pub enum VectorDistance {
 pub enum VectorQuantization {
     /// Keep the HNSW input in full precision.
     F32,
-    /// Symmetric per-vector signed 8-bit quantization.  Search results are
-    /// always reranked with the original persisted FP32 vector.
+    /// Symmetric per-vector signed 8-bit quantization. Search uses the packed
+    /// payload directly unless the caller explicitly requests FP32 reranking.
     Q8,
-    /// One-bit sign quantization for candidate generation, followed by exact
-    /// FP32 reranking.
+    /// One-bit sign quantization for candidate generation. Exact FP32
+    /// reranking is opt-in through the search options.
     Binary,
 }
 
@@ -56,6 +56,9 @@ pub struct VectorSearchOptions {
     pub with_attrs_json: bool,
     pub ef: Option<usize>,
     pub filter_ef: Option<usize>,
+    /// Number of globally budgeted ANN candidates to rescore with FP32.
+    /// `None` keeps the Redis-compatible pure quantized ANN path.
+    pub rerank: Option<usize>,
     pub exact: bool,
     pub offset: usize,
     pub limit: Option<usize>,

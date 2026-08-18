@@ -56,13 +56,8 @@ impl VectorRuntimeRegistry {
         self.insert_runtime(
             Self::key(db_index, index, version),
             Arc::new(RwLock::new(VectorRuntime::new(
-                config.dim,
-                config.distance,
-                config.m,
-                config.ef_construction,
-                config.initial_cap,
+                config,
                 1,
-                config.quantization,
             ))),
         );
     }
@@ -123,13 +118,8 @@ impl VectorRuntimeRegistry {
             dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 let runtime = Arc::new(RwLock::new(VectorRuntime::new(
-                    config.dim,
-                    config.distance,
-                    config.m,
-                    config.ef_construction,
-                    config.initial_cap,
+                    config,
                     1,
-                    config.quantization,
                 )));
                 self.active_runtimes.fetch_add(1, AtomicOrdering::Release);
                 entry.insert(runtime.clone());
@@ -142,6 +132,22 @@ impl VectorRuntimeRegistry {
             .upsert_with_attrs(entry.id, entry.doc_version, entry.vector, entry.attrs_json)?;
         self.mark_dirty(db_index, index, version);
         Ok(())
+    }
+
+    fn config(
+        &self,
+        db_index: u16,
+        index: &str,
+        version: u64,
+    ) -> Result<Option<VectorRuntimeConfig>, Error> {
+        self.get(db_index, index, version)
+            .map(|runtime| {
+                runtime
+                    .read()
+                    .map(|runtime| runtime.config.clone())
+                    .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))
+            })
+            .transpose()
     }
 
     fn mark_deleted(

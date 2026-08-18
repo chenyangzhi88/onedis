@@ -220,6 +220,7 @@ fn reduce_vector_candidates(
     candidates: Vec<VectorCandidate>,
     limit: usize,
 ) -> Result<Vec<VectorCandidate>, Error> {
+    let candidates_before_dedup = candidates.len();
     let mut latest_by_id = HashMap::<String, (u64, f32)>::new();
     for candidate in candidates {
         match latest_by_id.entry(candidate.id) {
@@ -242,8 +243,10 @@ fn reduce_vector_candidates(
             id,
             doc_version,
             distance,
+            source_position: None,
         })
         .collect::<Vec<_>>();
+    global_metrics().record_vector_candidate_dedup(candidates_before_dedup, candidates.len());
     let compare = |left: &VectorCandidate, right: &VectorCandidate| {
         left.distance
             .total_cmp(&right.distance)

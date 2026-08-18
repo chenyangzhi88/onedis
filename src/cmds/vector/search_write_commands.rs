@@ -99,10 +99,8 @@ impl VAdd {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        // The server's async command path already runs the complete HNSW
-        // mutation on its blocking worker pool.  That gives CAS the same
-        // event-loop isolation Redis obtains by moving candidate collection
-        // off-thread, without exposing a half-built graph to readers.
+        // The async write path commits only KV/state changes. HNSW graph
+        // construction remains a background maintenance operation.
         let _cas = self.cas;
         let added = db
             .vector_add_autocreate_async(
@@ -143,6 +141,7 @@ impl VSim {
         let mut count = 10usize;
         let mut ef = None;
         let mut filter_ef = None;
+        let mut rerank = None;
         let mut filter = None;
         let mut epsilon = None;
         let mut truth = false;
@@ -189,6 +188,14 @@ impl VSim {
                     filter_ef = Some(value);
                     idx += 2;
                 }
+                "RERANK" => {
+                    let value = parse_usize_arg(&frame, idx + 1, "ERR invalid vector RERANK")?;
+                    if value < count {
+                        return Err(Error::msg("ERR vector RERANK must be at least COUNT"));
+                    }
+                    rerank = Some(value);
+                    idx += 2;
+                }
                 "TRUTH" => {
                     truth = true;
                     idx += 1;
@@ -200,6 +207,9 @@ impl VSim {
                 _ => return Err(Error::msg("ERR syntax error")),
             }
         }
+        if rerank.is_some_and(|value| value < count) {
+            return Err(Error::msg("ERR vector RERANK must be at least COUNT"));
+        }
         let response_multiplier = 1 + usize::from(with_scores) + usize::from(with_attrs);
         validate_vector_response_count(count, response_multiplier)?;
         Ok(Self {
@@ -210,6 +220,7 @@ impl VSim {
             count,
             ef,
             filter_ef,
+            rerank,
             filter,
             epsilon,
             truth,
@@ -238,6 +249,7 @@ impl VSim {
             with_attrs_json: self.with_attrs,
             ef: self.ef,
             filter_ef: self.filter_ef,
+            rerank: self.rerank,
             exact: self.truth,
             offset: 0,
             limit: Some(self.count),
@@ -275,6 +287,7 @@ impl VSim {
             with_attrs_json: self.with_attrs,
             ef: self.ef,
             filter_ef: self.filter_ef,
+            rerank: self.rerank,
             exact: self.truth,
             offset: 0,
             limit: Some(self.count),

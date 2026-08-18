@@ -2,10 +2,8 @@ impl Db {
     pub fn vector_drop(&self, index: &str) -> Result<usize, Error> {
         global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (_, version, meta, expected_marker, expected_meta) =
+        let _guard = write_lock.blocking_lock();
+        let (_, version, meta, expected_marker, expected_meta, _expected_state) =
             self.read_vector_meta_observed(index)?;
         let mut batch = WriteBatch::new();
         if meta.internal {
@@ -50,10 +48,8 @@ impl Db {
     pub fn vector_rebuild(&self, index: &str) -> Result<(), Error> {
         global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (expire_ms, version, mut meta, expected_marker, expected_meta) =
+        let _guard = write_lock.blocking_lock();
+        let (expire_ms, version, mut meta, expected_marker, expected_meta, _expected_state) =
             self.read_vector_meta_observed(index)?;
         let mut batch = WriteBatch::new();
         delete_vector_segments_to_batch(
@@ -259,10 +255,8 @@ impl Db {
         force: bool,
     ) -> Result<bool, Error> {
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (_, version, mut meta, expected_marker, expected_meta) =
+        let _guard = write_lock.blocking_lock();
+        let (_, version, mut meta, expected_marker, expected_meta, _expected_state) =
             self.read_vector_meta_observed(index)?;
         if version != expected_version {
             return Err(Error::msg("ERR vector index changed during write"));
@@ -287,9 +281,7 @@ impl Db {
     ) -> Result<bool, Error> {
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let (meta, original_segment, source) = {
-            let _guard = write_lock
-                .lock()
-                .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
+            let _guard = write_lock.blocking_lock();
             let (_, version, meta) = self.read_vector_meta(index)?;
             if version != expected_version {
                 return Err(Error::msg("ERR vector index changed during write"));
@@ -336,10 +328,8 @@ impl Db {
         let persisted = Arc::new(Self::build_vector_hnsw_index(source.as_ref(), &meta)?);
         let encoded_index = encode_record(persisted.as_ref())?;
 
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (_, version, current_meta, expected_marker, expected_meta) =
+        let _guard = write_lock.blocking_lock();
+        let (_, version, current_meta, expected_marker, expected_meta, _expected_state) =
             self.read_vector_meta_observed(index)?;
         if version != expected_version {
             return Err(Error::msg("ERR vector index changed during write"));
@@ -378,7 +368,7 @@ impl Db {
             ),
             CompareCondition::exists_with(&segment_key, &original_segment_raw),
         ];
-        if !self.compare_and_write_batch_if_not_empty(&conditions, &batch)? {
+        if !self.compare_and_write_vector_batch_if_not_empty(&conditions, &batch)? {
             return Ok(false);
         }
         if let Some(runtime) = self.vector_runtimes.get(self.db_index, index, version) {
@@ -390,7 +380,7 @@ impl Db {
         Ok(true)
     }
 
-    /// Snapshot four immutable same-level sources under the write lock, build
+    /// Snapshot a same-level merge group under the write lock, build
     /// their replacement outside it, then CAS all source metadata at publish.
     fn merge_one_vector_segment_group(
         &self,
@@ -399,9 +389,7 @@ impl Db {
     ) -> Result<bool, Error> {
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
         let (build_meta, selected, removed, source, replacement_level, segment_id) = {
-            let _guard = write_lock
-                .lock()
-                .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
+            let _guard = write_lock.blocking_lock();
             let (_, version, meta) = self.read_vector_meta(index)?;
             if version != expected_version {
                 return Err(Error::msg("ERR vector index changed during write"));
@@ -518,10 +506,8 @@ impl Db {
             .map(|index| encode_record(index.as_ref()))
             .transpose()?;
 
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (_, version, mut meta, expected_marker, expected_meta) =
+        let _guard = write_lock.blocking_lock();
+        let (_, version, mut meta, expected_marker, expected_meta, _expected_state) =
             self.read_vector_meta_observed(index)?;
         if version != expected_version || meta.next_segment_id.max(1) != segment_id {
             return Err(Error::msg("ERR vector index changed during write"));
@@ -601,7 +587,7 @@ impl Db {
             Some(replacement)
         };
 
-        if !self.compare_and_write_batch_if_not_empty(&conditions, &batch)? {
+        if !self.compare_and_write_vector_batch_if_not_empty(&conditions, &batch)? {
             return Ok(false);
         }
         if let Some(runtime) = self.vector_runtimes.get(self.db_index, index, version) {
@@ -618,6 +604,87 @@ impl Db {
         Ok(true)
     }
 
+    /// Build an ephemeral HNSW for the mutable LSM tail without adding graph
+    /// maintenance to VADD/VDEL latency. Newer writes remain visible through
+    /// the exact tail and superseded nodes are rejected by current_versions.
+    fn build_vector_delta_index(
+        &self,
+        index: &str,
+        expected_version: u64,
+    ) -> Result<bool, Error> {
+        let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
+        let (meta, previous_through, through, source) = {
+            let _guard = write_lock.blocking_lock();
+            let (_, version, meta) = self.read_vector_meta(index)?;
+            if version != expected_version {
+                return Err(Error::msg("ERR vector index changed during write"));
+            }
+            let runtime = self
+                .vector_runtimes
+                .get(self.db_index, index, version)
+                .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
+            let runtime = runtime
+                .read()
+                .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?;
+            let previous_through = runtime.delta_index_through;
+            let changed = runtime
+                .memtable
+                .values()
+                .filter(|doc| doc.doc_version > previous_through)
+                .count();
+            if changed < vector_delta_hnsw_min_changes() {
+                return Ok(false);
+            }
+            let through = runtime
+                .memtable
+                .values()
+                .map(|doc| doc.doc_version)
+                .max()
+                .unwrap_or(previous_through);
+            let mut entries = runtime
+                .memtable
+                .values()
+                .filter(|doc| {
+                    !doc.deleted && runtime.is_current(&doc.id, doc.doc_version)
+                })
+                .map(|doc| VectorSegmentEntry::from(doc.as_ref()))
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| {
+                left.doc_version
+                    .cmp(&right.doc_version)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            (
+                meta,
+                previous_through,
+                through,
+                Arc::new(VectorSegmentBlob { entries }),
+            )
+        };
+
+        let delta_index = (!source.entries.is_empty())
+            .then(|| Self::build_vector_hnsw_index(source.as_ref(), &meta))
+            .transpose()?
+            .map(Arc::new);
+        let _guard = write_lock.blocking_lock();
+        let (_, version, current_meta) = self.read_vector_meta(index)?;
+        if version != expected_version || VectorRuntimeConfig::from(&current_meta) != VectorRuntimeConfig::from(&meta) {
+            return Err(Error::msg("ERR vector index changed during write"));
+        }
+        let runtime = self
+            .vector_runtimes
+            .get(self.db_index, index, version)
+            .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
+        let published = runtime
+            .write()
+            .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
+            .publish_delta_index(previous_through, through, delta_index);
+        if published {
+            global_metrics().record_vector_delta_build(source.entries.len());
+        }
+        Ok(published)
+    }
+
     fn compacted_segment_level(base: u64, count: usize) -> u32 {
         let mut level = 0u32;
         let mut level_size = base.max(1);
@@ -631,13 +698,97 @@ impl Db {
         level
     }
 
+    fn checkpoint_vector_mutations(
+        &self,
+        index: &str,
+        expected_version: u64,
+        force: bool,
+    ) -> Result<bool, Error> {
+        let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
+        let _guard = write_lock.blocking_lock();
+        let (_, version, meta, expected_marker, expected_meta, _expected_state) =
+            self.read_vector_meta_observed(index)?;
+        if version != expected_version || meta.algorithm != VectorIndexAlgorithm::Hnsw {
+            return Ok(false);
+        }
+        let checkpoint_key = vector_version_checkpoint_key(
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+        );
+        let previous_checkpoint = self
+            .store
+            .get_raw(&checkpoint_key)
+            .map(|raw| decode_record::<VectorVersionCheckpoint>(&raw))
+            .transpose()?;
+        let checkpoint_through = previous_checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.through_doc_version);
+        let through_doc_version = meta.next_doc_version.saturating_sub(1);
+        // Checkpointing rewrites the complete latest-version directory. Grow
+        // the journal interval with the previous directory size so sequential
+        // ingestion produces logarithmically many checkpoints instead of
+        // rewriting an O(N) map every fixed 1,024 documents.
+        let checkpoint_interval = vector_mutation_checkpoint_interval().max(
+            previous_checkpoint
+                .as_ref()
+                .map_or(0, |checkpoint| checkpoint.current_versions.len() as u64),
+        );
+        if through_doc_version <= checkpoint_through
+            || (!force
+                && through_doc_version.saturating_sub(checkpoint_through)
+                    < checkpoint_interval)
+        {
+            return Ok(false);
+        }
+        let runtime = self
+            .vector_runtimes
+            .get(self.db_index, index, version)
+            .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
+        let mut current_versions = runtime
+            .read()
+            .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
+            .current_versions
+            .iter()
+            .map(|entry| (entry.key().clone(), *entry.value()))
+            .collect::<Vec<_>>();
+        current_versions.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mutation_prefix = vector_version_mutation_prefix(
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+        );
+        let mutation_upper = super::prefix_exclusive_upper_bound(&mutation_prefix)
+            .ok_or_else(|| Error::msg("ERR invalid vector mutation prefix"))?;
+        let mut batch = WriteBatch::new();
+        batch.delete_range(&mutation_prefix, &mutation_upper)?;
+        batch.put(
+            &checkpoint_key,
+            &encode_record(&VectorVersionCheckpoint {
+                through_doc_version,
+                current_versions,
+            })?,
+        )?;
+        self.commit_vector_batch_if_marker_unchanged(
+            index,
+            meta.internal,
+            version,
+            &expected_marker,
+            &expected_meta,
+            &batch,
+        )?;
+        global_metrics().record_vector_mutation_checkpoint();
+        Ok(true)
+    }
+
     pub fn vector_compact(&self, index: &str) -> Result<(), Error> {
         global_metrics().record_vector_write();
         let write_lock = self.vector_runtimes.write_lock(self.db_index, index);
-        let _guard = write_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR vector write lock poisoned"))?;
-        let (_, version, mut meta, expected_marker, expected_meta) =
+        let _guard = write_lock.blocking_lock();
+        let (_, version, mut meta, expected_marker, expected_meta, expected_state) =
             self.read_vector_meta_observed(index)?;
         if meta.algorithm == VectorIndexAlgorithm::Flat {
             let doc_prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
@@ -674,12 +825,17 @@ impl Db {
                 &vector_meta_key(self.key_layout, self.db_index, index, version),
                 &encode_record(&meta)?,
             )?;
-            self.commit_vector_batch_if_marker_unchanged(
+            batch.put(
+                &vector_mutable_state_key(self.key_layout, self.db_index, index, version),
+                &encode_record(&VectorMutableState::from_meta(&meta))?,
+            )?;
+            self.commit_vector_batch_with_state_if_unchanged(
                 index,
                 meta.internal,
                 version,
                 &expected_marker,
                 &expected_meta,
+                expected_state,
                 &batch,
             )?;
             self.vector_runtimes.remove(self.db_index, index, version);
@@ -816,16 +972,30 @@ impl Db {
                     .collect(),
             })?,
         )?;
+        let mutation_prefix = vector_version_mutation_prefix(
+            self.key_layout,
+            self.db_index,
+            index,
+            version,
+        );
+        let mutation_upper = super::prefix_exclusive_upper_bound(&mutation_prefix)
+            .ok_or_else(|| Error::msg("ERR invalid vector mutation prefix"))?;
+        batch.delete_range(&mutation_prefix, &mutation_upper)?;
         batch.put(
             &vector_meta_key(self.key_layout, self.db_index, index, version),
             &encode_record(&meta)?,
         )?;
-        self.commit_vector_batch_if_marker_unchanged(
+        batch.put(
+            &vector_mutable_state_key(self.key_layout, self.db_index, index, version),
+            &encode_record(&VectorMutableState::from_meta(&meta))?,
+        )?;
+        self.commit_vector_batch_with_state_if_unchanged(
             index,
             meta.internal,
             version,
             &expected_marker,
             &expected_meta,
+            expected_state,
             &batch,
         )?;
 
@@ -838,14 +1008,9 @@ impl Db {
             })
             .collect::<Vec<_>>();
         let mut rebuilt = VectorRuntime::with_segments(
-            meta.dim as usize,
-            meta.distance,
-            meta.m as usize,
-            meta.ef_construction as usize,
-            meta.initial_cap as usize,
+            VectorRuntimeConfig::from(&meta),
             meta.next_segment_id,
             runtime_segments,
-            meta.quantization,
         );
         rebuilt.reconcile_docs(live_docs, meta.snapshot_doc_version);
         self.vector_runtimes.insert_runtime(
@@ -876,6 +1041,9 @@ impl Db {
                 let built = self.build_one_vector_segment_index(&index, expected_version)?;
                 let flushed = self.flush_vector_memtable(&index, expected_version, false)?;
                 let merged = self.merge_one_vector_segment_group(&index, expected_version)?;
+                let _delta_built = self.build_vector_delta_index(&index, expected_version)?;
+                let _checkpointed =
+                    self.checkpoint_vector_mutations(&index, expected_version, false)?;
                 if built || flushed || merged {
                     self.vector_runtimes
                         .mark_dirty(self.db_index, &index, expected_version);

@@ -10,6 +10,7 @@ impl Frame {
                     None
                 }
             }
+            Frame::Attribute { data, .. } => data.get_arg(index),
             _ => None,
         }
     }
@@ -17,6 +18,7 @@ impl Frame {
     pub fn arg_len(&self) -> usize {
         match self {
             Frame::Array(array) => array.len(),
+            Frame::Attribute { data, .. } => data.arg_len(),
             _ => 0,
         }
     }
@@ -31,6 +33,7 @@ impl Frame {
                 .map(Frame::as_text)
                 .collect::<Option<Vec<_>>>()
                 .unwrap_or_default(),
+            Frame::Attribute { data, .. } => data.get_args(),
             _ => Vec::new(),
         }
     }
@@ -48,6 +51,7 @@ impl Frame {
                     Vec::new()
                 }
             }
+            Frame::Attribute { data, .. } => data.get_args_from_index(start_index),
             _ => Vec::new(),
         }
     }
@@ -55,6 +59,7 @@ impl Frame {
     pub fn get_arg_bytes(&self, index: usize) -> Option<Vec<u8>> {
         match self {
             Frame::Array(array) => array.get(index).and_then(Frame::as_bytes_arg),
+            Frame::Attribute { data, .. } => data.get_arg_bytes(index),
             _ => None,
         }
     }
@@ -65,7 +70,17 @@ impl Frame {
             Frame::SimpleString(text) | Frame::Error(text) => Some(text.clone()),
             Frame::Integer(value) => Some(value.to_string()),
             Frame::Ok => Some("OK".to_string()),
-            Frame::Null | Frame::Array(_) => None,
+            Frame::Boolean(value) => Some(if *value { "true" } else { "false" }.to_string()),
+            Frame::Double(value) => Some(value.to_string()),
+            Frame::BigNumber(value) => Some(value.clone()),
+            Frame::VerbatimString { data, .. } => String::from_utf8(data.clone()).ok(),
+            Frame::Null
+            | Frame::Array(_)
+            | Frame::BlobError(_)
+            | Frame::Map(_)
+            | Frame::Set(_)
+            | Frame::Attribute { .. }
+            | Frame::Push(_) => None,
         }
     }
 
@@ -75,7 +90,19 @@ impl Frame {
             Frame::SimpleString(text) | Frame::Error(text) => Some(text.as_bytes().to_vec()),
             Frame::Integer(value) => Some(value.to_string().into_bytes()),
             Frame::Ok => Some(b"OK".to_vec()),
-            Frame::Null | Frame::Array(_) => None,
+            Frame::Boolean(value) => {
+                Some(if *value { &b"true"[..] } else { &b"false"[..] }.to_vec())
+            }
+            Frame::Double(value) => Some(value.to_string().into_bytes()),
+            Frame::BigNumber(value) => Some(value.as_bytes().to_vec()),
+            Frame::VerbatimString { data, .. } => Some(data.clone()),
+            Frame::Null
+            | Frame::Array(_)
+            | Frame::BlobError(_)
+            | Frame::Map(_)
+            | Frame::Set(_)
+            | Frame::Attribute { .. }
+            | Frame::Push(_) => None,
         }
     }
 

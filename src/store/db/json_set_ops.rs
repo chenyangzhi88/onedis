@@ -10,6 +10,183 @@ pub(in crate::store::db) struct JsonIndexedSetRequest<'a> {
 }
 
 impl Db {
+    /// Applies every JSON.MSET entry to an in-memory view first, then publishes
+    /// all affected documents with one conditional kv-engine batch. A missing
+    /// path, wrong type, invalid value, or write conflict leaves every key
+    /// unchanged.
+    pub(crate) async fn json_mset_atomic_async(
+        &self,
+        entries: &[(&str, &str, &str)],
+    ) -> Result<(), Error> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut parsed = Vec::with_capacity(entries.len());
+        for (key, path, raw_value) in entries {
+            let tokens = parse_json_path(path)?;
+            let value: JsonValue = serde_json::from_str(raw_value)
+                .map_err(|_| Error::msg("ERR invalid JSON value"))?;
+            validate_json_value_limits(&value, raw_value.len())?;
+            parsed.push((*key, tokens, value));
+        }
+
+        let shards = unique_key_write_lock_shards(
+            self.db_index,
+            parsed.iter().map(|(key, _, _)| key.as_bytes()),
+        );
+        let _write_guards = self.lock_write_shards(&shards).await;
+
+        let mut keys = Vec::<&str>::new();
+        let mut positions = HashMap::<&str, usize>::new();
+        for (key, _, _) in &parsed {
+            if !positions.contains_key(key) {
+                positions.insert(key, keys.len());
+                keys.push(key);
+            }
+        }
+        for key in &keys {
+            self.expire_if_needed_async(key).await;
+        }
+
+        let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+        let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+        let mut expires = Vec::with_capacity(keys.len());
+        let mut documents = Vec::with_capacity(keys.len());
+        for (key, observation) in keys.iter().zip(&observations) {
+            let Some(raw) = observation.value() else {
+                expires.push(0);
+                documents.push(None);
+                continue;
+            };
+            let (expire_ms, version) = Self::decode_json_meta(raw)?;
+            let document = self
+                .read_json_value_at_path_async(key, version, &[])
+                .await?
+                .ok_or_else(|| Error::msg("Type parsing error"))?;
+            expires.push(expire_ms);
+            documents.push(Some(document));
+        }
+
+        for (key, tokens, value) in parsed {
+            let position = positions[key];
+            if tokens.is_empty() {
+                documents[position] = Some(value);
+                continue;
+            }
+            let document = documents[position]
+                .as_mut()
+                .ok_or_else(|| Error::msg("ERR path does not exist"))?;
+            if !set_json_value_at_path(document, &tokens, value) {
+                return Err(Error::msg("ERR path does not exist"));
+            }
+        }
+
+        let mut batch = WriteBatch::new();
+        for (position, key) in keys.iter().enumerate() {
+            let document = documents[position]
+                .as_ref()
+                .ok_or_else(|| Error::msg("ERR path does not exist"))?;
+            let encoded_bytes = serde_json::to_vec(document)?.len();
+            validate_json_value_limits(document, encoded_bytes)?;
+            let version = self.next_version_async().await;
+            self.touch_json_meta_to_batch(&mut batch, key, expires[position], version)?;
+            write_json_subtree_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                version,
+                &mut Vec::new(),
+                document,
+            )?;
+            self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
+            if expires[position] > 0 {
+                self.ttl_manager.try_add_to_batch(
+                    &mut batch,
+                    expires[position],
+                    self.db_index,
+                    key,
+                )?;
+            }
+        }
+        let conditions = observations
+            .iter()
+            .map(CompareCondition::from_observed)
+            .collect::<Vec<_>>();
+        if !self
+            .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+            .await?
+        {
+            return Err(Error::msg("ERR json write conflict"));
+        }
+        self.changes
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        for key in keys {
+            self.fulltext_request_json_refresh(key)?;
+        }
+        Ok(())
+    }
+
+    /// Atomically read, transform and replace one JSON subtree.  The exclusive
+    /// structure lock coordinates with JSON.SET's shared subtree path, while
+    /// the observed metadata and node conditions protect against storage-level
+    /// races.  Non-root updates only rewrite the selected subtree.
+    pub(crate) async fn json_update_value_async<R, F>(
+        &self,
+        key: &str,
+        path: &str,
+        update: F,
+    ) -> Result<Option<R>, Error>
+    where
+        F: FnOnce(&mut JsonValue) -> Result<R, Error>,
+    {
+        let tokens = parse_json_path(path)?;
+        let _structure_guard = self.set_write_lock(key).lock().await;
+        self.expire_if_needed_async(key).await;
+
+        let key_bytes = self.mk(key);
+        let observed = self.store.get_raw_observed_async(&key_bytes).await;
+        let Some(raw) = observed.value() else {
+            return Ok(None);
+        };
+        let (_, version) = Self::decode_json_meta(raw)?;
+        let Some(mut value) = self
+            .read_json_value_at_path_async(key, version, &tokens)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let result = update(&mut value)?;
+        validate_json_value_limits(&value, serde_json::to_vec(&value)?.len())?;
+        let meta_condition = CompareCondition::from_observed(&observed);
+
+        let committed = if tokens.is_empty() {
+            let (expire_ms, _) = Self::decode_json_meta(raw)?;
+            self.write_json_value_cas_async(
+                key,
+                &value,
+                expire_ms,
+                self.next_version_async().await,
+                meta_condition,
+            )
+            .await?
+        } else {
+            self.json_set_indexed_async(JsonIndexedSetRequest {
+                key,
+                version,
+                tokens: &tokens,
+                new_value: value,
+                condition: SetCondition::Always,
+                meta_condition,
+            })
+            .await?
+            .unwrap_or(false)
+        };
+        if !committed {
+            return Err(Error::msg("ERR json write conflict"));
+        }
+        Ok(Some(result))
+    }
+
     /// Apply unconditional root JSON.SET commands as one ordered storage batch. Only the last
     /// valid root value for each key is materialized; every command still receives its own reply.
     pub(crate) async fn json_set_root_batch_async(
@@ -22,8 +199,10 @@ impl Db {
         let mut replies = commands
             .iter()
             .map(|(_, json)| {
-                serde_json::from_str::<JsonValue>(json)
-                    .map_err(|_| Error::msg("ERR invalid JSON value"))
+                let value = serde_json::from_str::<JsonValue>(json)
+                    .map_err(|_| Error::msg("ERR invalid JSON value"))?;
+                validate_json_value_limits(&value, json.len())?;
+                Ok(value)
             })
             .collect::<Vec<_>>();
         let valid_keys = commands
@@ -186,6 +365,7 @@ impl Db {
         let tokens = parse_json_path(path)?;
         let new_value: JsonValue =
             serde_json::from_str(json).map_err(|_| Error::msg("ERR invalid JSON value"))?;
+        validate_json_value_limits(&new_value, json.len())?;
 
         self.expire_if_needed(key);
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
@@ -368,6 +548,7 @@ impl Db {
         let tokens = parse_json_path(path)?;
         let new_value: JsonValue =
             serde_json::from_str(json).map_err(|_| Error::msg("ERR invalid JSON value"))?;
+        validate_json_value_limits(&new_value, json.len())?;
 
         if tokens.is_empty() {
             let _write_guard = self.set_write_lock(key).lock().await;
@@ -458,5 +639,45 @@ impl Db {
             }
         }
         Err(Error::msg("ERR json write conflict"))
+    }
+}
+
+fn set_json_value_at_path(
+    root: &mut JsonValue,
+    tokens: &[JsonPathToken],
+    new_value: JsonValue,
+) -> bool {
+    let Some((last, parents)) = tokens.split_last() else {
+        *root = new_value;
+        return true;
+    };
+    let mut current = root;
+    for token in parents {
+        current = match (token, current) {
+            (JsonPathToken::Field(field), JsonValue::Object(object)) => {
+                let Some(next) = object.get_mut(field) else {
+                    return false;
+                };
+                next
+            }
+            (JsonPathToken::Index(index), JsonValue::Array(array)) => {
+                let Some(next) = array.get_mut(*index) else {
+                    return false;
+                };
+                next
+            }
+            _ => return false,
+        };
+    }
+    match (last, current) {
+        (JsonPathToken::Field(field), JsonValue::Object(object)) => {
+            object.insert(field.clone(), new_value);
+            true
+        }
+        (JsonPathToken::Index(index), JsonValue::Array(array)) if *index < array.len() => {
+            array[*index] = new_value;
+            true
+        }
+        _ => false,
     }
 }

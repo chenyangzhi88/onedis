@@ -20,12 +20,13 @@ pub enum Xpending {
         end: StreamId,
         count: usize,
         consumer: Option<String>,
+        min_idle_ms: Option<u64>,
     },
 }
 
 impl Xpending {
     pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
-        if frame.arg_len() != 3 && frame.arg_len() != 6 && frame.arg_len() != 7 {
+        if !matches!(frame.arg_len(), 3 | 6 | 7 | 8 | 9) {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'xpending' command",
             ));
@@ -35,14 +36,35 @@ impl Xpending {
         if frame.arg_len() == 3 {
             return Ok(Self::Summary { key, group });
         }
-        let start = parse_bound(&text_arg(&frame, 3)?, true)?;
-        let end = parse_bound(&text_arg(&frame, 4)?, false)?;
-        let count = text_arg(&frame, 5)?
+        let (offset, min_idle_ms) = if frame
+            .get_arg(3)
+            .is_some_and(|arg| arg.eq_ignore_ascii_case("IDLE"))
+        {
+            if !matches!(frame.arg_len(), 8 | 9) {
+                return Err(Error::msg(
+                    "ERR wrong number of arguments for 'xpending' command",
+                ));
+            }
+            let idle = text_arg(&frame, 4)?
+                .parse::<u64>()
+                .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
+            (2, Some(idle))
+        } else {
+            if !matches!(frame.arg_len(), 6 | 7) {
+                return Err(Error::msg(
+                    "ERR wrong number of arguments for 'xpending' command",
+                ));
+            }
+            (0, None)
+        };
+        let start = parse_bound(&text_arg(&frame, 3 + offset)?, true)?;
+        let end = parse_bound(&text_arg(&frame, 4 + offset)?, false)?;
+        let count = text_arg(&frame, 5 + offset)?
             .parse::<usize>()
             .map_err(|_| Error::msg("ERR value is not an integer or out of range"))?;
         validate_count(count)?;
-        let consumer = if frame.arg_len() == 7 {
-            Some(text_arg(&frame, 6)?)
+        let consumer = if frame.arg_len() == 7 + offset {
+            Some(text_arg(&frame, 6 + offset)?)
         } else {
             None
         };
@@ -53,6 +75,7 @@ impl Xpending {
             end,
             count,
             consumer,
+            min_idle_ms,
         })
     }
 
@@ -69,9 +92,17 @@ impl Xpending {
                 end,
                 count,
                 consumer,
+                min_idle_ms,
             } => {
-                match db.stream_pending_range(&key, &group, start, end, count, consumer.as_deref())
-                {
+                match db.stream_pending_range_filtered(
+                    &key,
+                    &group,
+                    start,
+                    end,
+                    count,
+                    consumer.as_deref(),
+                    min_idle_ms,
+                ) {
                     Ok(entries) => stream_pending_entries_frame(entries),
                     Err(err) => Ok(Frame::Error(err.to_string())),
                 }
@@ -94,15 +125,17 @@ impl Xpending {
                 end,
                 count,
                 consumer,
+                min_idle_ms,
             } => {
                 match db
-                    .stream_pending_range_async(
+                    .stream_pending_range_filtered_async(
                         &key,
                         &group,
                         start,
                         end,
                         count,
                         consumer.as_deref(),
+                        min_idle_ms,
                     )
                     .await
                 {

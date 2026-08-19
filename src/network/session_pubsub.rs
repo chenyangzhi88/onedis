@@ -1,5 +1,20 @@
 impl SessionManager {
     pub fn register_channel(&self, channel: &str, session_id: usize, writer: SharedWriter) {
+        self.register_channel_with_protocol(
+            channel,
+            session_id,
+            writer,
+            crate::frame::RespVersion::Resp2,
+        );
+    }
+
+    pub fn register_channel_with_protocol(
+        &self,
+        channel: &str,
+        session_id: usize,
+        writer: SharedWriter,
+        protocol: crate::frame::RespVersion,
+    ) {
         self.subscriptions
             .entry(session_id)
             .or_default()
@@ -8,10 +23,25 @@ impl SessionManager {
         self.channels
             .entry(channel.to_string())
             .or_default()
-            .insert(session_id, writer);
+            .insert(session_id, SubscriberWriter { writer, protocol });
     }
 
     pub fn register_pattern(&self, pattern: &str, session_id: usize, writer: SharedWriter) {
+        self.register_pattern_with_protocol(
+            pattern,
+            session_id,
+            writer,
+            crate::frame::RespVersion::Resp2,
+        );
+    }
+
+    pub fn register_pattern_with_protocol(
+        &self,
+        pattern: &str,
+        session_id: usize,
+        writer: SharedWriter,
+        protocol: crate::frame::RespVersion,
+    ) {
         self.subscriptions
             .entry(session_id)
             .or_default()
@@ -20,10 +50,25 @@ impl SessionManager {
         self.patterns
             .entry(pattern.to_string())
             .or_default()
-            .insert(session_id, writer);
+            .insert(session_id, SubscriberWriter { writer, protocol });
     }
 
     pub fn register_shard_channel(&self, channel: &str, session_id: usize, writer: SharedWriter) {
+        self.register_shard_channel_with_protocol(
+            channel,
+            session_id,
+            writer,
+            crate::frame::RespVersion::Resp2,
+        );
+    }
+
+    pub fn register_shard_channel_with_protocol(
+        &self,
+        channel: &str,
+        session_id: usize,
+        writer: SharedWriter,
+        protocol: crate::frame::RespVersion,
+    ) {
         self.subscriptions
             .entry(session_id)
             .or_default()
@@ -32,7 +77,7 @@ impl SessionManager {
         self.shard_channels
             .entry(channel.to_string())
             .or_default()
-            .insert(session_id, writer);
+            .insert(session_id, SubscriberWriter { writer, protocol });
     }
 
     pub fn unregister_channel(&self, channel: &str, session_id: usize) {
@@ -237,13 +282,17 @@ impl SessionManager {
         let message: std::sync::Arc<[u8]> = std::sync::Arc::from(message.as_bytes());
         let mut direct_count = 0usize;
         let frame_name = if shard { "smessage" } else { "message" };
-        let direct_message = pubsub_message_chunks(&[frame_name, channel], message.clone());
-        for (session_id, writer) in writers {
-            if writer.is_closed() {
+        for (session_id, subscriber) in writers {
+            if subscriber.writer.is_closed() {
                 self.remove_shared_writer_state(session_id);
                 continue;
             }
-            if writer.try_write_chunks(direct_message.clone()) {
+            let direct_message = pubsub_message_chunks(
+                &[frame_name, channel],
+                message.clone(),
+                subscriber.protocol,
+            );
+            if subscriber.writer.try_write_chunks(direct_message) {
                 direct_count += 1;
             } else {
                 self.remove_shared_writer_state(session_id);
@@ -254,8 +303,8 @@ impl SessionManager {
         for (pattern, writers) in pattern_writers {
             let live_writers = writers
                 .into_iter()
-                .filter(|(session_id, writer)| {
-                    if writer.is_closed() {
+                .filter(|(session_id, subscriber)| {
+                    if subscriber.writer.is_closed() {
                         self.remove_shared_writer_state(*session_id);
                         false
                     } else {
@@ -266,10 +315,13 @@ impl SessionManager {
             if live_writers.is_empty() {
                 continue;
             }
-            let pattern_message =
-                pubsub_message_chunks(&["pmessage", &pattern, channel], message.clone());
-            for (session_id, writer) in live_writers {
-                if writer.try_write_chunks(pattern_message.clone()) {
+            for (session_id, subscriber) in live_writers {
+                let pattern_message = pubsub_message_chunks(
+                    &["pmessage", &pattern, channel],
+                    message.clone(),
+                    subscriber.protocol,
+                );
+                if subscriber.writer.try_write_chunks(pattern_message) {
                     pattern_deliveries += 1;
                 } else {
                     self.remove_shared_writer_state(session_id);
@@ -324,9 +376,16 @@ impl SessionManager {
 fn pubsub_message_chunks(
     leading_fields: &[&str],
     message: std::sync::Arc<[u8]>,
+    protocol: crate::frame::RespVersion,
 ) -> Vec<std::sync::Arc<[u8]>> {
     let mut prefix = Vec::new();
-    prefix.extend_from_slice(format!("*{}\r\n", leading_fields.len() + 1).as_bytes());
+    let aggregate = match protocol {
+        crate::frame::RespVersion::Resp2 => '*',
+        crate::frame::RespVersion::Resp3 => '>',
+    };
+    prefix.extend_from_slice(
+        format!("{aggregate}{}\r\n", leading_fields.len() + 1).as_bytes(),
+    );
     for field in leading_fields {
         append_pubsub_bulk(&mut prefix, field.as_bytes());
     }

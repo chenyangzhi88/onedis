@@ -56,12 +56,14 @@ const ERROR_CLASSES: [&str; 9] = [
     "unsupported",
 ];
 
-const REJECTION_REASONS: [&str; 5] = [
+const REJECTION_REASONS: [&str; 7] = [
     "noauth",
     "noperm",
     "parse_error",
     "maxclients",
     "transaction_state",
+    "not_ready",
+    "resource_limit",
 ];
 
 const COMMAND_NAMES: &[&str] = &[
@@ -417,6 +419,9 @@ pub struct OnedisMetrics {
 
 #[derive(Clone, Debug)]
 pub struct MetricsSnapshot {
+    pub uptime_seconds: u64,
+    pub current_connections: u64,
+    pub configured_maxclients: u64,
     pub total_connections_received: u64,
     pub total_commands_processed: u64,
     pub total_command_errors: u64,
@@ -1634,6 +1639,9 @@ impl OnedisMetrics {
         }
 
         MetricsSnapshot {
+            uptime_seconds: self.started.elapsed().as_secs(),
+            current_connections: self.connections_current.load(Ordering::Relaxed),
+            configured_maxclients: self.config_maxclients.load(Ordering::Relaxed),
             total_connections_received: self.connections_total.load(Ordering::Relaxed),
             total_commands_processed,
             total_command_errors,

@@ -1,12 +1,18 @@
 pub struct SessionManager {
     sessions: DashMap<usize, SessionSnapshot>,
     controls: DashMap<usize, std::sync::Arc<SessionControl>>,
-    channels: DashMap<String, DashMap<usize, SharedWriter>>,
-    patterns: DashMap<String, DashMap<usize, SharedWriter>>,
-    shard_channels: DashMap<String, DashMap<usize, SharedWriter>>,
+    channels: DashMap<String, DashMap<usize, SubscriberWriter>>,
+    patterns: DashMap<String, DashMap<usize, SubscriberWriter>>,
+    shard_channels: DashMap<String, DashMap<usize, SubscriberWriter>>,
     subscriptions: DashMap<usize, SessionSubscriptions>,
     monitors: DashMap<usize, SharedWriter>,
     acl_users: DashMap<String, AclUser>,
+}
+
+#[derive(Clone)]
+struct SubscriberWriter {
+    writer: SharedWriter,
+    protocol: crate::frame::RespVersion,
 }
 
 #[derive(Clone)]
@@ -27,6 +33,7 @@ struct SessionSnapshot {
     user: String,
     peer_addr: String,
     local_addr: String,
+    resp_version: crate::frame::RespVersion,
 }
 
 impl From<&Session> for SessionSnapshot {
@@ -48,6 +55,7 @@ impl From<&Session> for SessionSnapshot {
             user: session.user().to_string(),
             peer_addr: session.peer_addr().to_string(),
             local_addr: session.local_addr().to_string(),
+            resp_version: session.resp_version(),
         }
     }
 }

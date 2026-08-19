@@ -211,20 +211,45 @@ impl KeyEncodingLayout {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::store::db) fn open_or_initialize_for_table(store: &KvStore) -> Self {
+        Self::try_open_or_initialize_for_table(store)
+            .expect("failed to initialize onedis key encoding layout")
+    }
+
+    pub(in crate::store::db) fn try_open_or_initialize_for_table(
+        store: &KvStore,
+    ) -> anyhow::Result<Self> {
+        let failures_before = crate::store::health::storage_health().failure_count();
         if let Some(raw) = store.get_raw(KEY_ENCODING_LAYOUT_META_KEY) {
-            return Self::decode(&raw).unwrap_or_else(|| {
-                panic!(
+            return Self::decode(&raw).ok_or_else(|| {
+                anyhow::anyhow!(
                     "unsupported onedis key encoding layout metadata: {:?}",
                     String::from_utf8_lossy(&raw)
                 )
             });
         }
+        if crate::store::health::storage_health().failure_count() != failures_before {
+            return Err(anyhow::anyhow!(
+                "failed to read onedis key encoding layout: {}",
+                crate::store::health::storage_health()
+                    .last_error()
+                    .unwrap_or_else(|| "unknown storage failure".to_string())
+            ));
+        }
         let table_has_data = !store.scan_range_raw_limited(&[], None, 1).is_empty();
+        if crate::store::health::storage_health().failure_count() != failures_before {
+            return Err(anyhow::anyhow!(
+                "failed to inspect onedis key encoding layout: {}",
+                crate::store::health::storage_health()
+                    .last_error()
+                    .unwrap_or_else(|| "unknown storage failure".to_string())
+            ));
+        }
         if table_has_data && !store.is_canonical_db_table() {
-            panic!(
+            return Err(anyhow::anyhow!(
                 "onedis table contains data without key encoding metadata; remove old data before starting with TableLocalV2"
-            );
+            ));
         }
         if table_has_data {
             log::warn!(
@@ -232,7 +257,15 @@ impl KeyEncodingLayout {
             );
         }
         store.put_raw(KEY_ENCODING_LAYOUT_META_KEY, Self::TableLocalV2.encode());
-        Self::TableLocalV2
+        if crate::store::health::storage_health().failure_count() != failures_before {
+            return Err(anyhow::anyhow!(
+                "failed to persist onedis key encoding layout: {}",
+                crate::store::health::storage_health()
+                    .last_error()
+                    .unwrap_or_else(|| "unknown storage failure".to_string())
+            ));
+        }
+        Ok(Self::TableLocalV2)
     }
 }
 

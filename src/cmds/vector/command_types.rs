@@ -74,3 +74,15 @@ pub struct VLinks {
     pub element: String,
     pub with_scores: bool,
 }
+
+pub struct VIsMember {
+    pub key: String,
+    pub element: String,
+}
+
+pub struct VRange {
+    pub key: String,
+    pub start: String,
+    pub end: String,
+    pub count: usize,
+}

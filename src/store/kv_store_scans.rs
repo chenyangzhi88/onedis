@@ -21,23 +21,44 @@ impl KvStore {
             None,
             KvProjection::KeyOnly,
         );
-        let mut cursor = if self.txn.is_some() {
-            self.with_transaction_mut(|txn| {
-                txn.scan(query)
-                    .expect("failed to create kv_engine transaction key scan cursor")
+        let cursor = if self.txn.is_some() {
+            self.transaction_access_or(
+                self.with_transaction_mut(|txn| txn.scan(query)),
+                || {
+                    Err(Status::InvalidArgument(
+                        "unable to access onedis transaction".to_string(),
+                    ))
+                },
+                "access transaction for key count",
+            )
+            .unwrap_or_else(|| {
+                Err(Status::InvalidArgument(
+                    "missing onedis transaction".to_string(),
+                ))
             })
-            .expect("missing kv_engine transaction")
         } else {
-            self.table
-                .scan(query)
-                .expect("failed to create kv_engine key scan cursor")
+            self.table.scan(query)
+        };
+        let mut cursor = match cursor {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                crate::store::health::storage_health()
+                    .record_failure("create key count cursor", error);
+                global_metrics().record_storage_read(elapsed_us(storage_started));
+                return 0;
+            }
         };
         let mut count = 0usize;
-        while let Some(batch) = cursor
-            .next_batch()
-            .expect("failed to advance kv_engine key scan cursor")
-        {
-            count = count.saturating_add(batch.len());
+        loop {
+            match cursor.next_batch() {
+                Ok(Some(batch)) => count = count.saturating_add(batch.len()),
+                Ok(None) => break,
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("advance key count cursor", error);
+                    break;
+                }
+            }
         }
         global_metrics().record_storage_read(elapsed_us(storage_started));
         count
@@ -50,11 +71,18 @@ impl KvStore {
     ) -> usize {
         let store = self.clone();
         let lower_bound = lower_bound.to_vec();
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             store.count_range_raw_keys(&lower_bound, upper_bound)
         })
         .await
-        .expect("kv_engine key count worker panicked")
+        {
+            Ok(count) => count,
+            Err(error) => {
+                crate::store::health::storage_health()
+                    .record_failure("key count worker", error);
+                0
+            }
+        }
     }
 
     /// Scan a bounded raw range and stop after `limit` entries.
@@ -74,15 +102,34 @@ impl KvStore {
         let query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
         let entries = if self.txn.is_some() {
             let new_cursor_started_at = trace_id.map(|_| Instant::now());
-            let cursor = self
-                .with_transaction_mut(|txn| {
-                    txn.scan(query)
-                        .expect("failed to create kv_engine transaction scan cursor")
-                })
-                .expect("missing kv_engine transaction");
+            let cursor = match self.with_transaction_mut(|txn| txn.scan(query)) {
+                Ok(Some(Ok(cursor))) => Some(cursor),
+                Ok(Some(Err(error))) => {
+                    crate::store::health::storage_health()
+                        .record_failure("transaction scan", error);
+                    None
+                }
+                Ok(None) => {
+                    crate::store::health::storage_health()
+                        .record_failure("transaction scan", "missing transaction");
+                    None
+                }
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("access transaction for scan", error);
+                    None
+                }
+            };
             let new_cursor_us = new_cursor_started_at.map(|started| started.elapsed().as_micros());
             let collect_started_at = trace_id.map(|_| Instant::now());
-            let entries = collect_scan_cursor(cursor, limit);
+            let entries = cursor.map_or_else(
+                || {
+                    crate::store::health::storage_health()
+                        .record_failure("transaction scan", "failed to create cursor");
+                    Vec::new()
+                },
+                |cursor| collect_scan_cursor(cursor, limit),
+            );
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_scan sample={} txn=true limit={} entries={} lower_len={} upper_len={} new_cursor_us={} collect_us={} total_us={}",
@@ -101,13 +148,16 @@ impl KvStore {
             entries
         } else {
             let new_cursor_started_at = trace_id.map(|_| Instant::now());
-            let cursor = self
-                .table
-                .scan(query)
-                .expect("failed to create kv_engine scan cursor");
+            let cursor = self.table.scan(query);
             let new_cursor_us = new_cursor_started_at.map(|started| started.elapsed().as_micros());
             let collect_started_at = trace_id.map(|_| Instant::now());
-            let entries = collect_scan_cursor(cursor, limit);
+            let entries = match cursor {
+                Ok(cursor) => collect_scan_cursor(cursor, limit),
+                Err(error) => {
+                    crate::store::health::storage_health().record_failure("scan", error);
+                    Vec::new()
+                }
+            };
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_scan sample={} txn=false limit={} entries={} lower_len={} upper_len={} new_cursor_us={} collect_us={} total_us={}",
@@ -137,11 +187,17 @@ impl KvStore {
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let store = self.clone();
         let lower_bound = lower_bound.to_vec();
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             store.scan_range_raw_limited(&lower_bound, upper_bound, limit)
         })
         .await
-        .expect("kv_engine scan worker panicked")
+        {
+            Ok(entries) => entries,
+            Err(error) => {
+                crate::store::health::storage_health().record_failure("scan worker", error);
+                Vec::new()
+            }
+        }
     }
 
     /// Scan a bounded raw range in descending key order and stop after `limit` entries.
@@ -158,19 +214,33 @@ impl KvStore {
         let mut query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
         query.order = KeyOrder::Desc;
         let entries = if self.txn.is_some() {
-            let cursor = self
-                .with_transaction_mut(|txn| {
-                    txn.scan(query)
-                        .expect("failed to create reverse kv_engine transaction scan cursor")
-                })
-                .expect("missing kv_engine transaction");
-            collect_scan_cursor(cursor, limit)
+            match self.with_transaction_mut(|txn| txn.scan(query)) {
+                Ok(Some(Ok(cursor))) => collect_scan_cursor(cursor, limit),
+                Ok(Some(Err(error))) => {
+                    crate::store::health::storage_health()
+                        .record_failure("reverse transaction scan", error);
+                    Vec::new()
+                }
+                Ok(None) => {
+                    crate::store::health::storage_health()
+                        .record_failure("reverse transaction scan", "missing transaction");
+                    Vec::new()
+                }
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("access transaction for reverse scan", error);
+                    Vec::new()
+                }
+            }
         } else {
-            let cursor = self
-                .table
-                .scan(query)
-                .expect("failed to create reverse kv_engine scan cursor");
-            collect_scan_cursor(cursor, limit)
+            match self.table.scan(query) {
+                Ok(cursor) => collect_scan_cursor(cursor, limit),
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("reverse scan", error);
+                    Vec::new()
+                }
+            }
         };
         global_metrics().record_storage_read(elapsed_us(storage_started));
         entries
@@ -187,11 +257,18 @@ impl KvStore {
         }
         let store = self.clone();
         let lower_bound = lower_bound.to_vec();
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             store.scan_range_raw_limited_reverse(&lower_bound, upper_bound, limit)
         })
         .await
-        .expect("kv_engine reverse scan worker panicked")
+        {
+            Ok(entries) => entries,
+            Err(error) => {
+                crate::store::health::storage_health()
+                    .record_failure("reverse scan worker", error);
+                Vec::new()
+            }
+        }
     }
 
     /// Return the keys at the requested zero-based visible-key ranks from one bounded read view.
@@ -219,19 +296,40 @@ impl KvStore {
             KvProjection::KeyOnly,
         );
         let selected = if self.txn.is_some() {
-            self.with_transaction_mut(|txn| {
+            match self.with_transaction_mut(|txn| {
                 txn.scan(query)
-                    .expect("failed to create kv_engine transaction key scan cursor")
-                    .select_keys_by_rank(&ranks)
-                    .expect("failed to select ranked keys from kv_engine transaction cursor")
-            })
-            .expect("missing kv_engine transaction")
+                    .and_then(|cursor| cursor.select_keys_by_rank(&ranks))
+            }) {
+                Ok(Some(Ok(keys))) => keys,
+                Ok(Some(Err(error))) => {
+                    crate::store::health::storage_health()
+                        .record_failure("transaction ordinal scan", error);
+                    Vec::new()
+                }
+                Ok(None) => {
+                    crate::store::health::storage_health()
+                        .record_failure("transaction ordinal scan", "missing transaction");
+                    Vec::new()
+                }
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("access transaction for ordinal scan", error);
+                    Vec::new()
+                }
+            }
         } else {
-            self.table
+            match self
+                .table
                 .scan(query)
-                .expect("failed to create kv_engine key scan cursor")
-                .select_keys_by_rank(&ranks)
-                .expect("failed to select ranked keys from kv_engine cursor")
+                .and_then(|cursor| cursor.select_keys_by_rank(&ranks))
+            {
+                Ok(keys) => keys,
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("ordinal scan", error);
+                    Vec::new()
+                }
+            }
         };
         global_metrics().record_storage_read(elapsed_us(storage_started));
         selected
@@ -249,11 +347,18 @@ impl KvStore {
         let store = self.clone();
         let lower_bound = lower_bound.to_vec();
         let ordinals = ordinals.to_vec();
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             store.scan_range_raw_keys_at_ordinals(&lower_bound, upper_bound, &ordinals)
         })
         .await
-        .expect("kv_engine ordinal key scan worker panicked")
+        {
+            Ok(keys) => keys,
+            Err(error) => {
+                crate::store::health::storage_health()
+                    .record_failure("ordinal scan worker", error);
+                Vec::new()
+            }
+        }
     }
 
     /// Resolve the inclusive lower bound for a zero-based visible-key offset.
@@ -306,15 +411,27 @@ impl KvStore {
         let query = scan_request(Some(lower_bound.to_vec()), upper_bound, limit);
         let mut visitor = visitor;
         let seen = if self.txn.is_some() {
-            let cursor = self
-                .with_transaction_mut(|txn| {
-                    txn.scan(query)
-                        .expect("failed to create kv_engine transaction scan cursor")
-                })
-                .expect("missing kv_engine transaction");
             let scan_started_at = trace_id.map(|_| Instant::now());
-            let mut cursor = cursor;
-            let seen = collect_scan_cursor_into(&mut cursor, limit, &mut visitor);
+            let seen = match self.with_transaction_mut(|txn| txn.scan(query)) {
+                Ok(Some(Ok(mut cursor))) => {
+                    collect_scan_cursor_into(&mut cursor, limit, &mut visitor)
+                }
+                Ok(Some(Err(error))) => {
+                    crate::store::health::storage_health()
+                        .record_failure("transaction visit scan", error);
+                    0
+                }
+                Ok(None) => {
+                    crate::store::health::storage_health()
+                        .record_failure("transaction visit scan", "missing transaction");
+                    0
+                }
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("access transaction for visit scan", error);
+                    0
+                }
+            };
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_visit sample={} txn=true limit={} entries={} lower_len={} upper_len={} scan_us={} total_us={}",
@@ -331,13 +448,15 @@ impl KvStore {
             }
             seen
         } else {
-            let cursor = self
-                .table
-                .scan(query)
-                .expect("failed to create kv_engine scan cursor");
             let scan_started_at = trace_id.map(|_| Instant::now());
-            let mut cursor = cursor;
-            let seen = collect_scan_cursor_into(&mut cursor, limit, &mut visitor);
+            let seen = match self.table.scan(query) {
+                Ok(mut cursor) => collect_scan_cursor_into(&mut cursor, limit, &mut visitor),
+                Err(error) => {
+                    crate::store::health::storage_health()
+                        .record_failure("visit scan", error);
+                    0
+                }
+            };
             if let (Some(trace_id), Some(total_started_at)) = (trace_id, total_started_at) {
                 eprintln!(
                     "lrange-trace kv_visit sample={} txn=false limit={} entries={} lower_len={} upper_len={} scan_us={} total_us={}",
@@ -487,14 +606,30 @@ impl KvStore {
     /// 范围删除 [start, end)，用于批量清理 sub-keys。
     pub fn delete_range(&self, start: &[u8], end: &[u8]) {
         let started = Instant::now();
-        if let Some(result) = self.with_transaction_mut(|txn| txn.delete_range(start, end)) {
-            result.expect("failed to stage delete_range into kv_engine transaction");
-            global_metrics().record_storage_write(elapsed_us(started), false);
+        if let Some(result) = self.transaction_access_or(
+            self.with_transaction_mut(|txn| txn.delete_range(start, end)),
+            || {
+                Err(Status::InvalidArgument(
+                    "unable to access onedis transaction".to_string(),
+                ))
+            },
+            "access transaction for delete range",
+        ) {
+            let failed = result.is_err();
+            if let Err(error) = result {
+                crate::store::health::storage_health()
+                    .record_failure("transaction delete range", error);
+            }
+            global_metrics().record_storage_write(elapsed_us(started), failed);
             return;
         }
-        self.table
-            .delete_range(start, end, self.write_options.clone())
-            .expect("failed to delete_range in kv_engine");
-        global_metrics().record_storage_write(elapsed_us(started), false);
+        let result = self
+            .table
+            .delete_range(start, end, self.write_options.clone());
+        let failed = result.is_err();
+        if let Err(error) = result {
+            crate::store::health::storage_health().record_failure("delete range", error);
+        }
+        global_metrics().record_storage_write(elapsed_us(started), failed);
     }
 }

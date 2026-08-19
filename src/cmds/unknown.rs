@@ -21,25 +21,12 @@ impl Unknown {
 
     pub fn apply(self) -> Result<Frame, Error> {
         match self.command_name.to_ascii_uppercase().as_str() {
-            "HELLO" => {
-                return Ok(Frame::Array(vec![
-                    Frame::bulk_string("server"),
-                    Frame::bulk_string("onedis"),
-                    Frame::bulk_string("version"),
-                    Frame::bulk_string("0.1.0"),
-                    Frame::bulk_string("proto"),
-                    Frame::Integer(2),
-                    Frame::bulk_string("id"),
-                    Frame::Integer(0),
-                    Frame::bulk_string("mode"),
-                    Frame::bulk_string("standalone"),
-                    Frame::bulk_string("role"),
-                    Frame::bulk_string("master"),
-                    Frame::bulk_string("modules"),
-                    Frame::Array(Vec::new()),
-                ]));
+            "HELLO" | "RESET" | "QUIT" => {
+                return Ok(connection_context_error(&self.command_name));
             }
-            "QUIT" | "RESET" | "ASKING" | "READONLY" | "READWRITE" => return Ok(Frame::Ok),
+            "ASKING" | "READONLY" | "READWRITE" => {
+                return Ok(unsupported_response(&self.command_name));
+            }
             "TIME" => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -49,28 +36,25 @@ impl Unknown {
                     Frame::bulk_string(now.subsec_micros().to_string()),
                 ]));
             }
-            "COMMAND" => return Ok(command_response(&self.args)),
-            "MEMORY" => return Ok(memory_response(&self.args)),
-            "ACL" => return Ok(acl_response(&self.args)),
-            "CLUSTER" => return Ok(cluster_response(&self.args)),
-            "LATENCY" | "SLOWLOG" | "MODULE" => return Ok(simple_subcommand_response(&self.args)),
-            "PUBSUB" => return Ok(pubsub_response(&self.args)),
-            "PUBLISH" | "SPUBLISH" => return Ok(Frame::Integer(0)),
-            "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" => {
-                return Ok(subscription_response(
-                    self.command_name.to_ascii_lowercase(),
-                    &self.args,
-                    true,
-                ));
+            "COMMAND" => {
+                return Ok(crate::command::command_introspection_response(&self.args));
             }
-            "UNSUBSCRIBE" | "PUNSUBSCRIBE" | "SUNSUBSCRIBE" => {
-                return Ok(subscription_response(
-                    self.command_name.to_ascii_lowercase(),
-                    &self.args,
-                    false,
-                ));
+            "MEMORY" => return Ok(memory_response(&self.args)),
+            "ACL" => return Ok(connection_context_error("ACL")),
+            "CLUSTER" => return Ok(cluster_response(&self.args)),
+            "LATENCY" | "SLOWLOG" | "MODULE" => {
+                return Ok(unsupported_response(&self.command_name));
+            }
+            "PUBSUB" | "PUBLISH" | "SPUBLISH" | "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE"
+            | "UNSUBSCRIBE" | "PUNSUBSCRIBE" | "SUNSUBSCRIBE" | "MONITOR" => {
+                return Ok(connection_context_error(&self.command_name));
             }
             _ => {}
+        }
+        if crate::command::command_capability(&self.command_name)
+            .is_some_and(|capability| capability.compatibility == "Unsupported")
+        {
+            return Ok(unsupported_response(&self.command_name));
         }
         Ok(Frame::Error(format!(
             "ERR unknown command `{}`, with args beginning with: `{}`",
@@ -109,94 +93,31 @@ fn format_args_preview(args: &[String]) -> String {
     preview
 }
 
-fn command_response(args: &[String]) -> Frame {
-    if args
-        .first()
-        .is_some_and(|arg| arg.eq_ignore_ascii_case("DOCS") || arg.eq_ignore_ascii_case("INFO"))
-    {
-        return Frame::Array(Vec::new());
-    }
-    if args
-        .first()
-        .is_some_and(|arg| arg.eq_ignore_ascii_case("COUNT"))
-    {
-        return Frame::Integer(0);
-    }
-    Frame::Array(Vec::new())
-}
-
 fn memory_response(args: &[String]) -> Frame {
     match args.first().map(|arg| arg.to_ascii_uppercase()).as_deref() {
-        Some("USAGE") => Frame::Integer(0),
-        Some("STATS") => Frame::Array(Vec::new()),
         Some("HELP") => Frame::Array(vec![Frame::bulk_string("MEMORY USAGE <key>")]),
-        _ => Frame::Ok,
-    }
-}
-
-fn acl_response(args: &[String]) -> Frame {
-    match args.first().map(|arg| arg.to_ascii_uppercase()).as_deref() {
-        Some("WHOAMI") => Frame::bulk_string("default"),
-        Some("LIST") => Frame::Array(vec![Frame::bulk_string(
-            "user default on nopass ~* &* +@all",
-        )]),
-        Some("USERS") => Frame::Array(vec![Frame::bulk_string("default")]),
-        Some("CAT") => Frame::Array(Vec::new()),
-        Some("HELP") => Frame::Array(vec![Frame::bulk_string("ACL compatibility surface")]),
-        _ => Frame::Ok,
+        _ => unsupported_response("MEMORY"),
     }
 }
 
 fn cluster_response(args: &[String]) -> Frame {
     match args.first().map(|arg| arg.to_ascii_uppercase()).as_deref() {
         Some("INFO") => Frame::bulk_string("cluster_enabled:0\r\n"),
-        Some("NODES") => Frame::bulk_string(""),
-        Some("SLOTS") | Some("SHARDS") => Frame::Array(Vec::new()),
-        Some("KEYSLOT") => Frame::Integer(0),
         Some("HELP") => Frame::Array(vec![Frame::bulk_string("CLUSTER compatibility surface")]),
         _ => Frame::Error("ERR cluster support disabled".to_string()),
     }
 }
 
-fn simple_subcommand_response(_args: &[String]) -> Frame {
-    Frame::Array(Vec::new())
+fn unsupported_response(command: &str) -> Frame {
+    Frame::Error(format!(
+        "ERR command '{}' is unsupported by OneDis",
+        command.to_ascii_lowercase()
+    ))
 }
 
-fn pubsub_response(args: &[String]) -> Frame {
-    match args.first().map(|arg| arg.to_ascii_uppercase()).as_deref() {
-        Some("NUMSUB") => {
-            let mut frames = Vec::new();
-            for channel in args.iter().skip(1) {
-                frames.push(Frame::bulk_string(channel.clone()));
-                frames.push(Frame::Integer(0));
-            }
-            Frame::Array(frames)
-        }
-        Some("NUMPAT") => Frame::Integer(0),
-        Some("CHANNELS") | Some("SHARDCHANNELS") | Some("SHARDNUMSUB") | Some("HELP") | None => {
-            Frame::Array(Vec::new())
-        }
-        _ => Frame::Array(Vec::new()),
-    }
-}
-
-fn subscription_response(command: String, args: &[String], subscribing: bool) -> Frame {
-    let channels = if args.is_empty() {
-        vec![String::new()]
-    } else {
-        args.to_vec()
-    };
-    Frame::Array(
-        channels
-            .into_iter()
-            .enumerate()
-            .map(|(idx, channel)| {
-                Frame::Array(vec![
-                    Frame::bulk_string(command.clone()),
-                    Frame::bulk_string(channel),
-                    Frame::Integer(if subscribing { idx + 1 } else { 0 } as i64),
-                ])
-            })
-            .collect(),
-    )
+fn connection_context_error(command: &str) -> Frame {
+    Frame::Error(format!(
+        "ERR command '{}' requires a live client connection",
+        command.to_ascii_lowercase()
+    ))
 }

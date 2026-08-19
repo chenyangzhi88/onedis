@@ -1,46 +1,21 @@
-# Rudis Docker Image
+# OneDis container image
 
-This is the Dockerfile of the Docker image for Rudis.
+Run `scripts/bootstrap-dependencies.sh` first. The build then needs the parent directory as context
+because OneDis uses the sibling Tantivy checkout:
 
-## Image Variants
-
-### `ghcr.io/sleeprite/rudis:latest`
-
-This is the latest released rusdis Docker image.
-
-### `ghcr.io/sleeprite/rudis:<version>`
-
-Rudis Docker image will be builded on each release, [view the package page](https://github.com/sleeprite/rudis/pkgs/container/rudis).
-
-## How to use this image
-
-### Base
-
-```sh
-docker run -p 6379:6379 ghcr.io/sleeprite/rudis:latest
+```bash
+cp onedis/docker/workspace.dockerignore .dockerignore
+docker build --pull -f onedis/docker/Dockerfile -t onedis:local .
+docker run --name onedis --stop-timeout 40 \
+  -p 6379:6379 -p 127.0.0.1:9121:9121 \
+  -v onedis-data:/var/lib/onedis \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  onedis:local
 ```
 
-### With Args
+The image runs as UID/GID `10001`, stores kv-engine state under `/var/lib/onedis`, checks
+`/readyz`, and sends SIGTERM directly to `onedis-server`. Mount a replacement configuration at
+`/etc/onedis/onedis.toml` when using object-backed tablet storage.
 
-You can add all supported args at the end, like
-
-```sh
-docker run -p 6379:8848 ghcr.io/sleeprite/rudis:latest --port 8848
-```
-
-### Handle Data
-
-Rudis Docker image's default `WORKDIR` is /rudis, but you can change it with arg `--dir /some/other/path`
-
-So bind /rudis to handle data
-
-```sh
-docker run -p 6379:6379 -v /some/path/to/save/data:/rudis ghcr.io/sleeprite/rudis:latest --save 60/1
-```
-
-You can use a config file like this
-
-```sh
-touch ./config.properties
-docker run -p 6379:6379 -v ./:/rudis ghcr.io/sleeprite/rudis:latest --config config.properties
-```
+Do not use Redis `SAVE`, `BGSAVE`, RDB, or AOF procedures with OneDis. Backup and recovery are
+owned by the configured kv-engine/tablet-store deployment.

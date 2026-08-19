@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crate::{frame::Frame, store::db::Db};
+use crate::{
+    frame::{Frame, RespVersion},
+    store::db::Db,
+};
 
 static SESSION_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -36,6 +39,7 @@ pub struct Session {
     user: String,
     peer_addr: String,
     local_addr: String,
+    resp_version: RespVersion,
 }
 
 impl Session {
@@ -77,6 +81,7 @@ impl Session {
             user: "default".to_string(),
             peer_addr,
             local_addr,
+            resp_version: RespVersion::Resp2,
         }
     }
 
@@ -106,6 +111,14 @@ impl Session {
 
     pub fn get_id(&self) -> usize {
         self.id
+    }
+
+    pub fn resp_version(&self) -> RespVersion {
+        self.resp_version
+    }
+
+    pub fn set_resp_version(&mut self, resp_version: RespVersion) {
+        self.resp_version = resp_version;
     }
 
     // 事务相关方法

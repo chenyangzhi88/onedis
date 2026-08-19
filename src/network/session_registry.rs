@@ -24,6 +24,10 @@ impl SessionManager {
         self.monitors.remove(&session_id);
     }
 
+    pub fn reset_connection_state(&self, session_id: usize) {
+        self.remove_shared_writer_state(session_id);
+    }
+
     pub fn get_connection_count(&self) -> usize {
         self.sessions.len()
     }
@@ -145,6 +149,21 @@ impl SessionManager {
             .is_some_and(|control| control.request_unblock(mode))
     }
 
+    /// Wake blocking clients and request every connection to finish its current command and exit.
+    /// Returns the number of live sessions that received the shutdown request.
+    pub fn request_shutdown_all(&self) -> usize {
+        let controls = self
+            .controls
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect::<Vec<_>>();
+        for control in &controls {
+            let _ = control.request_unblock(ClientUnblockMode::Error);
+            control.request_kill();
+        }
+        controls.len()
+    }
+
     pub fn client_info(&self, session_id: usize) -> Option<String> {
         self.sessions
             .get(&session_id)
@@ -219,7 +238,7 @@ impl SessionManager {
             "-1".to_string()
         };
         Ok(format!(
-            "id={} addr={} laddr={} fd=-1 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem={} rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir=-1 resp=2 lib-name={} lib-ver={}\r\n",
+            "id={} addr={} laddr={} fd=-1 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem={} rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir=-1 resp={} lib-name={} lib-ver={}\r\n",
             session.id,
             session.peer_addr,
             session.local_addr,
@@ -235,6 +254,10 @@ impl SessionManager {
             session.transaction_bytes,
             cmd,
             user,
+            match session.resp_version {
+                crate::frame::RespVersion::Resp2 => 2,
+                crate::frame::RespVersion::Resp3 => 3,
+            },
             library_name,
             library_version,
         ))

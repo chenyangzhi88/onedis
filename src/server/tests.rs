@@ -117,6 +117,7 @@ maxclients = 0
         metrics_bind: "127.0.0.1".to_string(),
         metrics_port: 0,
         slow_command_threshold_ms: 10,
+        shutdown_timeout_ms: 30_000,
     })
 }
 
@@ -158,7 +159,7 @@ fn text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 fn server_new_initializes_core_runtime_components_without_binding_socket() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let args = test_args(3, Some("secret"));
-    let server = rt.block_on(Server::new(args.clone()));
+    let server = rt.block_on(Server::new(args.clone())).unwrap();
 
     assert_eq!(server.args.databases, 3);
     assert_eq!(server.args.requirepass.as_deref(), Some("secret"));
@@ -951,6 +952,54 @@ fn handler_accepts_redis_cli_pipe_trailer_and_binary_echo_marker() {
             .unwrap();
             assert_eq!(response, expected);
             client.shutdown().await.unwrap();
+        };
+        let (_, ()) = tokio::join!(handler.handle(), client_io);
+    });
+}
+
+#[test]
+fn hello_switches_to_resp3_allows_commands_while_subscribed_and_reset_restores_resp2() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (mut handler, mut client) = rt.block_on(test_handler(1, None));
+    rt.block_on(async {
+        let client_io = async {
+            client
+                .write_all(
+                    b"*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n\
+                      *1\r\n$4\r\nPING\r\n\
+                      *2\r\n$9\r\nSUBSCRIBE\r\n$4\r\nnews\r\n\
+                      *3\r\n$7\r\nPUBLISH\r\n$4\r\nnews\r\n$5\r\nhello\r\n\
+                      *1\r\n$5\r\nRESET\r\n\
+                      *1\r\n$4\r\nPING\r\n\
+                      *1\r\n$4\r\nQUIT\r\n",
+                )
+                .await
+                .unwrap();
+
+            let mut response = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut chunk = [0_u8; 512];
+                while !response.ends_with(b"+OK\r\n") {
+                    let read = client.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "RESP3 connection closed before QUIT response");
+                    response.extend_from_slice(&chunk[..read]);
+                }
+            })
+            .await
+            .expect("RESP3 pipeline response timed out");
+
+            assert!(response.starts_with(b"%7\r\n"));
+            assert!(response.windows(b":3\r\n".len()).any(|part| part == b":3\r\n"));
+            assert!(response.windows(b"+PONG\r\n".len()).any(|part| part == b"+PONG\r\n"));
+            assert!(response.windows(b">3\r\n$9\r\nsubscribe\r\n".len()).any(|part| {
+                part == b">3\r\n$9\r\nsubscribe\r\n"
+            }));
+            assert!(response.windows(b">3\r\n$7\r\nmessage\r\n".len()).any(|part| {
+                part == b">3\r\n$7\r\nmessage\r\n"
+            }));
+            assert!(response.windows(b"+RESET\r\n".len()).any(|part| part == b"+RESET\r\n"));
+            assert!(!response.windows(b"-ERR".len()).any(|part| part == b"-ERR"));
+            assert_eq!(response.windows(b"+PONG\r\n".len()).filter(|part| *part == b"+PONG\r\n").count(), 2);
         };
         let (_, ()) = tokio::join!(handler.handle(), client_io);
     });

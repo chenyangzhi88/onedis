@@ -30,7 +30,7 @@ impl Frame {
             return Err(Error::msg("Empty frame"));
         }
         match bytes[0] {
-            b'+' | b'-' | b':' => {
+            b'+' | b'-' | b':' | b'_' | b'#' | b',' | b'(' => {
                 let frame_end = bytes
                     .windows(2)
                     .position(|window| window == b"\r\n")
@@ -40,6 +40,12 @@ impl Frame {
                     b'+' => Frame::parse_simple_string(&bytes[..frame_end])?,
                     b'-' => Frame::parse_error(&bytes[..frame_end])?,
                     b':' => Frame::parse_integer(&bytes[..frame_end])?,
+                    b'_' => Frame::Null,
+                    b'#' => Frame::Boolean(bytes.get(1) == Some(&b't')),
+                    b',' => Frame::Double(parse_resp3_double(&bytes[1..frame_end - 2])?),
+                    b'(' => Frame::BigNumber(
+                        std::str::from_utf8(&bytes[1..frame_end - 2])?.to_string(),
+                    ),
                     _ => unreachable!(),
                 };
                 Ok((frame, frame_end))
@@ -54,10 +60,9 @@ impl Frame {
                 };
                 Ok((Frame::parse_bulk_string(&bytes[..frame_end])?, frame_end))
             }
-            b'*' => Frame::parse_array(bytes, depth),
-            b'_' | b'#' | b',' | b'(' | b'!' | b'=' | b'%' | b'~' | b'>' => {
-                Err(Error::msg("ERR unsupported RESP3 frame type"))
-            }
+            b'!' => parse_resp3_blob(bytes, false),
+            b'=' => parse_resp3_blob(bytes, true),
+            b'*' | b'%' | b'~' | b'|' | b'>' => Frame::parse_aggregate(bytes, depth),
             _ => {
                 let frame_end = bytes
                     .windows(2)
@@ -96,5 +101,51 @@ impl Frame {
         }
 
         Ok(frames)
+    }
+}
+
+fn parse_resp3_double(bytes: &[u8]) -> Result<f64, Error> {
+    match std::str::from_utf8(bytes)? {
+        "inf" | "+inf" => Ok(f64::INFINITY),
+        "-inf" => Ok(f64::NEG_INFINITY),
+        "nan" => Ok(f64::NAN),
+        value => value
+            .parse::<f64>()
+            .map_err(|_| Error::msg("ERR invalid RESP3 double")),
+    }
+}
+
+fn parse_resp3_blob(bytes: &[u8], verbatim: bool) -> Result<(Frame, usize), Error> {
+    let header_end = bytes
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .ok_or_else(|| Error::msg("ERR incomplete RESP3 blob header"))?;
+    let payload_len = parse_protocol_usize(std::str::from_utf8(&bytes[1..header_end])?)
+        .ok_or_else(|| Error::msg("ERR invalid RESP3 blob length"))?;
+    let data_start = header_end + 2;
+    let data_end = data_start
+        .checked_add(payload_len)
+        .ok_or_else(|| Error::msg("ERR RESP3 blob length overflow"))?;
+    let frame_end = data_end
+        .checked_add(2)
+        .ok_or_else(|| Error::msg("ERR RESP3 blob length overflow"))?;
+    let payload = bytes
+        .get(data_start..data_end)
+        .ok_or_else(|| Error::msg("ERR incomplete RESP3 blob"))?;
+    if verbatim {
+        if payload.len() < 4 || payload[3] != b':' {
+            return Err(Error::msg("ERR invalid RESP3 verbatim string"));
+        }
+        let mut format = [0_u8; 3];
+        format.copy_from_slice(&payload[..3]);
+        Ok((
+            Frame::VerbatimString {
+                format,
+                data: payload[4..].to_vec(),
+            },
+            frame_end,
+        ))
+    } else {
+        Ok((Frame::BlobError(payload.to_vec()), frame_end))
     }
 }

@@ -2,6 +2,10 @@ impl KvStore {
     const ROOT_TABLE: &'static str = "default";
 
     pub fn open(options: Options) -> Self {
+        Self::try_open(options).expect("failed to open kv_engine for onedis")
+    }
+
+    pub fn try_open(options: Options) -> anyhow::Result<Self> {
         let write_options = if options.wal_sync_interval.is_zero() {
             WriteOptions::sync_wal()
         } else {
@@ -16,16 +20,16 @@ impl KvStore {
             vec![Arc::new(OnedisIntegerMergeOperator)],
             Some(compaction_filter),
         )
-        .expect("failed to open kv_engine for onedis");
-        let table = Self::open_or_create_table(&db, Self::ROOT_TABLE);
-        KvStore {
+        .map_err(|err| anyhow::Error::msg(format!("failed to open kv_engine: {err}")))?;
+        let table = Self::try_open_or_create_table(&db, Self::ROOT_TABLE)?;
+        Ok(KvStore {
             db,
             table,
             table_name: Arc::from(Self::ROOT_TABLE),
             write_options,
             version_compaction,
             txn: None,
-        }
+        })
     }
 
     pub fn new<P: AsRef<Path>>(db_path: P, wal_dir: P, engine_id: u32) -> Self {
@@ -42,16 +46,26 @@ impl KvStore {
         self.for_table(&Self::db_table_name(db_index))
     }
 
+    pub fn try_for_db_index(&self, db_index: u16) -> anyhow::Result<Self> {
+        self.try_for_table(&Self::db_table_name(db_index))
+    }
+
     pub fn for_table(&self, table_name: &str) -> Self {
-        let table = Self::open_or_create_table(&self.db, table_name);
-        KvStore {
+        self.try_for_table(table_name).unwrap_or_else(|err| {
+            panic!("failed to open or create kv_engine schemaless table {table_name:?}: {err}")
+        })
+    }
+
+    pub fn try_for_table(&self, table_name: &str) -> anyhow::Result<Self> {
+        let table = Self::try_open_or_create_table(&self.db, table_name)?;
+        Ok(KvStore {
             db: self.db.clone(),
             table,
             table_name: Arc::from(table_name),
             write_options: self.write_options.clone(),
             version_compaction: self.version_compaction.clone(),
             txn: self.txn.clone(),
-        }
+        })
     }
 
     fn db_table_name(db_index: u16) -> String {
@@ -68,7 +82,10 @@ impl KvStore {
             .is_some_and(|db_index| Self::db_table_name(db_index) == self.table_name.as_ref())
     }
 
-    fn open_or_create_table(db: &Arc<DbImpl>, table_name: &str) -> SchemalessTable {
+    fn try_open_or_create_table(
+        db: &Arc<DbImpl>,
+        table_name: &str,
+    ) -> anyhow::Result<SchemalessTable> {
         let table_options =
             SchemalessTableOptions::default().with_merge_operator(OnedisIntegerMergeOperator::NAME);
         match db.open_schemaless_table(table_name) {
@@ -76,23 +93,19 @@ impl KvStore {
                 if table.descriptor().merge_operator_name.as_deref()
                     == Some(OnedisIntegerMergeOperator::NAME) =>
             {
-                table
+                Ok(table)
             }
             Ok(_) => db
                 .update_schemaless_table_options(table_name, table_options)
-                .unwrap_or_else(|update_err| {
-                    panic!(
-                        "failed to configure kv_engine schemaless table {table_name:?}: {update_err}"
-                    )
-                }),
+                .map_err(|update_err| anyhow::Error::msg(format!(
+                    "failed to configure kv_engine schemaless table {table_name:?}: {update_err}"
+                ))),
             Err(open_err) => db
                 .create_schemaless_table(table_name, table_options)
                 .or_else(|_| db.open_schemaless_table(table_name))
-                .unwrap_or_else(|create_err| {
-                    panic!(
-                        "failed to open or create kv_engine schemaless table {table_name:?}: open={open_err}; create={create_err}"
-                    )
-                }),
+                .map_err(|create_err| anyhow::Error::msg(format!(
+                    "failed to open or create kv_engine schemaless table {table_name:?}: open={open_err}; create={create_err}"
+                ))),
         }
     }
 
@@ -157,29 +170,49 @@ impl KvStore {
     fn with_transaction_mut<T>(
         &self,
         action: impl FnOnce(&mut SchemalessTransaction) -> T,
-    ) -> Option<T> {
-        let txn_context = self.txn.as_ref()?;
-        let mut guard = txn_context.txns.lock().expect("transaction mutex poisoned");
-        let txns = guard
-            .as_mut()
-            .expect("attempted to use transaction after completion");
+    ) -> KvResult<Option<T>> {
+        let Some(txn_context) = self.txn.as_ref() else {
+            return Ok(None);
+        };
+        let mut guard = txn_context.txns.lock().map_err(|_| {
+            Status::InvalidArgument("onedis transaction state is unavailable".to_string())
+        })?;
+        let txns = guard.as_mut().ok_or_else(|| {
+            Status::InvalidArgument("onedis transaction has already completed".to_string())
+        })?;
         let shared_snapshot = txns
             .values()
             .next()
             .map(|transaction| transaction.snapshot().clone());
         let txn = match txns.entry(self.table_name.to_string()) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
-                self.table
-                    .begin_transaction_with_options(SchemalessTransactionOptions {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let transaction = self.table.begin_transaction_with_options(
+                    SchemalessTransactionOptions {
                         snapshot: shared_snapshot,
                         write_options: self.write_options.clone(),
                         ..SchemalessTransactionOptions::default()
-                    })
-                    .expect("failed to begin kv_engine schemaless transaction"),
-            ),
+                    },
+                )?;
+                entry.insert(transaction)
+            }
         };
-        Some(action(txn))
+        Ok(Some(action(txn)))
+    }
+
+    fn transaction_access_or<T>(
+        &self,
+        access: KvResult<Option<T>>,
+        fallback: impl FnOnce() -> T,
+        operation: &str,
+    ) -> Option<T> {
+        match access {
+            Ok(value) => value,
+            Err(error) => {
+                crate::store::health::storage_health().record_failure(operation, error);
+                Some(fallback())
+            }
+        }
     }
 
     pub fn commit_transaction(&self) -> anyhow::Result<()> {
@@ -187,7 +220,10 @@ impl KvStore {
             return Ok(());
         };
         let txns = {
-            let mut guard = txn_context.txns.lock().expect("transaction mutex poisoned");
+            let mut guard = txn_context
+                .txns
+                .lock()
+                .map_err(|_| anyhow::Error::msg("onedis transaction state is unavailable"))?;
             guard.take().unwrap_or_default()
         };
         SchemalessTransaction::commit_many(txns.into_values().collect())
@@ -200,7 +236,10 @@ impl KvStore {
             return;
         };
         let txns = {
-            let mut guard = txn_context.txns.lock().expect("transaction mutex poisoned");
+            let mut guard = txn_context
+                .txns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.take().unwrap_or_default()
         };
         for (_, txn) in txns {
@@ -213,7 +252,10 @@ impl KvStore {
             return Ok(());
         };
         let txns = {
-            let mut guard = txn_context.txns.lock().expect("transaction mutex poisoned");
+            let mut guard = txn_context
+                .txns
+                .lock()
+                .map_err(|_| anyhow::Error::msg("onedis transaction state is unavailable"))?;
             guard.take().unwrap_or_default()
         };
         SchemalessTransaction::commit_many_async(txns.into_values().collect())

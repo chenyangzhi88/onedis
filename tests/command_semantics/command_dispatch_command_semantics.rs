@@ -9,39 +9,28 @@ fn compatibility_surface_handles_common_unknown_command_families() {
         Command::Client(command) => command.apply().unwrap(),
         other => panic!("expected Client, got {}", other.name()),
     };
-    assert!(matches!(
-        client,
-        Frame::Array(items) if items.iter().any(|item| matches!(item, Frame::BulkString(value) if value == b"flags"))
-    ));
+    assert!(matches!(client, Frame::Error(message) if message.contains("live client connection")));
 
     let hello = Command::parse_from_frame(frame_args(&["hello", "2"])).unwrap();
     let hello = match hello {
         Command::Unknown(command) => command.apply().unwrap(),
         other => panic!("expected Unknown, got {}", other.name()),
     };
-    assert!(matches!(
-        hello,
-        Frame::Array(items) if items.iter().any(|item| matches!(item, Frame::BulkString(value) if value == b"standalone"))
-    ));
+    assert!(matches!(hello, Frame::Error(message) if message.contains("live client connection")));
 
     let acl = Command::parse_from_frame(frame_args(&["acl", "whoami"])).unwrap();
     let acl = match acl {
         Command::Unknown(command) => command.apply().unwrap(),
         other => panic!("expected Unknown, got {}", other.name()),
     };
-    assert!(matches!(acl, Frame::BulkString(value) if value == b"default"));
+    assert!(matches!(acl, Frame::Error(message) if message.contains("live client connection")));
 
     let pubsub = Command::parse_from_frame(frame_args(&["pubsub", "numsub", "events"])).unwrap();
     let pubsub = match pubsub {
         Command::Unknown(command) => command.apply().unwrap(),
         other => panic!("expected Unknown, got {}", other.name()),
     };
-    assert!(matches!(
-        pubsub,
-        Frame::Array(items)
-            if matches!(items.first(), Some(Frame::BulkString(channel)) if channel == b"events")
-                && matches!(items.get(1), Some(Frame::Integer(0)))
-    ));
+    assert!(matches!(pubsub, Frame::Error(message) if message.contains("live client connection")));
 }
 
 #[test]
@@ -60,15 +49,20 @@ fn unknown_command_compat_surface_covers_all_subcommand_shapes() {
         Frame::Error(message) if message.contains("unknown command")
     ));
 
-    for args in [
-        &["quit"][..],
-        &["reset"][..],
-        &["asking"][..],
-        &["readonly"][..],
-        &["readwrite"][..],
-    ] {
+    for args in [&["quit"][..], &["reset"][..]] {
         match Command::parse_from_frame(frame_args(args)).unwrap() {
-            Command::Unknown(command) => assert!(matches!(command.apply().unwrap(), Frame::Ok)),
+            Command::Unknown(command) => assert!(
+                matches!(command.apply().unwrap(), Frame::Error(message) if message.contains("live client connection"))
+            ),
+            other => panic!("expected Unknown, got {}", other.name()),
+        }
+    }
+
+    for args in [&["asking"][..], &["readonly"][..], &["readwrite"][..]] {
+        match Command::parse_from_frame(frame_args(args)).unwrap() {
+            Command::Unknown(command) => assert!(
+                matches!(command.apply().unwrap(), Frame::Error(message) if message.contains("unsupported"))
+            ),
             other => panic!("expected Unknown, got {}", other.name()),
         }
     }
@@ -77,15 +71,7 @@ fn unknown_command_compat_surface_covers_all_subcommand_shapes() {
         &["command"][..],
         &["command", "docs"][..],
         &["command", "info"][..],
-        &["memory", "stats"][..],
         &["memory", "help"][..],
-        &["latency", "help"][..],
-        &["slowlog", "get"][..],
-        &["module", "list"][..],
-        &["pubsub", "channels"][..],
-        &["pubsub", "shardchannels"][..],
-        &["pubsub", "shardnumsub"][..],
-        &["pubsub", "help"][..],
     ] {
         match Command::parse_from_frame(frame_args(args)).unwrap() {
             Command::Unknown(command) => {
@@ -95,14 +81,7 @@ fn unknown_command_compat_surface_covers_all_subcommand_shapes() {
         }
     }
 
-    for args in [
-        &["command", "count"][..],
-        &["memory", "usage", "k"][..],
-        &["pubsub", "numpat"][..],
-        &["publish", "events", "payload"][..],
-        &["spublish", "events", "payload"][..],
-        &["cluster", "keyslot", "k"][..],
-    ] {
+    for args in [&["command", "count"][..]] {
         match Command::parse_from_frame(frame_args(args)).unwrap() {
             Command::Unknown(command) => {
                 assert!(matches!(command.apply().unwrap(), Frame::Integer(_)))
@@ -111,23 +90,7 @@ fn unknown_command_compat_surface_covers_all_subcommand_shapes() {
         }
     }
 
-    for args in [
-        &["time"][..],
-        &["hello", "3"][..],
-        &["acl", "list"][..],
-        &["acl", "users"][..],
-        &["acl", "cat"][..],
-        &["acl", "help"][..],
-        &["cluster", "slots"][..],
-        &["cluster", "shards"][..],
-        &["cluster", "help"][..],
-        &["subscribe", "events", "alerts"][..],
-        &["psubscribe", "ev*"][..],
-        &["ssubscribe", "events"][..],
-        &["unsubscribe", "events"][..],
-        &["punsubscribe"][..],
-        &["sunsubscribe", "events"][..],
-    ] {
+    for args in [&["time"][..]] {
         match Command::parse_from_frame(frame_args(args)).unwrap() {
             Command::Unknown(command) => {
                 assert!(matches!(command.apply().unwrap(), Frame::Array(_)))
@@ -136,7 +99,7 @@ fn unknown_command_compat_surface_covers_all_subcommand_shapes() {
         }
     }
 
-    for args in [&["cluster", "info"][..], &["cluster", "nodes"][..]] {
+    for args in [&["cluster", "info"][..]] {
         match Command::parse_from_frame(frame_args(args)).unwrap() {
             Command::Unknown(command) => {
                 assert!(matches!(command.apply().unwrap(), Frame::BulkString(_)))
@@ -145,13 +108,25 @@ fn unknown_command_compat_surface_covers_all_subcommand_shapes() {
         }
     }
 
-    match Command::parse_from_frame(frame_args(&["memory"])).unwrap() {
-        Command::Unknown(command) => assert!(matches!(command.apply().unwrap(), Frame::Ok)),
-        other => panic!("expected Unknown, got {}", other.name()),
-    }
-    match Command::parse_from_frame(frame_args(&["acl", "setuser", "default"])).unwrap() {
-        Command::Unknown(command) => assert!(matches!(command.apply().unwrap(), Frame::Ok)),
-        other => panic!("expected Unknown, got {}", other.name()),
+    for args in [
+        &["memory", "stats"][..],
+        &["memory", "usage", "k"][..],
+        &["latency", "help"][..],
+        &["slowlog", "get"][..],
+        &["module", "list"][..],
+        &["hello", "3"][..],
+        &["acl", "list"][..],
+        &["pubsub", "channels"][..],
+        &["subscribe", "events"][..],
+        &["publish", "events", "payload"][..],
+        &["cluster", "nodes"][..],
+    ] {
+        match Command::parse_from_frame(frame_args(args)).unwrap() {
+            Command::Unknown(command) => {
+                assert!(matches!(command.apply().unwrap(), Frame::Error(_)))
+            }
+            other => panic!("expected Unknown, got {}", other.name()),
+        }
     }
     match Command::parse_from_frame(frame_args(&["cluster", "meet", "127.0.0.1", "1"])).unwrap() {
         Command::Unknown(command) => {

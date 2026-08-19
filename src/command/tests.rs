@@ -71,9 +71,6 @@ fn parse_dispatch_covers_aliases_and_extension_command_families() {
         "WASM.DEL",
         "WASM.SCAN",
         "WASM.LIST",
-        "FUNCTION",
-        "FCALL",
-        "FCALL_RO",
     ];
 
     for command_name in known_commands {
@@ -397,11 +394,6 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         (&["WASM.DEL", "mod"], "WASM.DEL", true),
         (&["WASM.SCAN", "mod", "scan", "p"], "WASM.SCAN", false),
         (&["WASM.LIST"], "WASM.LIST", false),
-        (&["FUNCTION", "LOAD", "mod", "bytes"], "FUNCTION", true),
-        (&["FUNCTION", "DELETE", "mod"], "FUNCTION", true),
-        (&["FUNCTION", "LIST"], "FUNCTION", false),
-        (&["FCALL", "mod.run", "0"], "FCALL", true),
-        (&["FCALL_RO", "mod.run", "0"], "FCALL_RO", false),
     ];
 
     for (args, expected_name, expected_aof) in cases {
@@ -421,6 +413,16 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
     let unknown = Command::parse_from_frame(frame_args(&["NOTACOMMAND"])).unwrap();
     assert_eq!(unknown.name(), "UNKNOWN");
     assert!(!unknown.propagate_aof_if_needed());
+
+    for args in [
+        &["FUNCTION", "LIST"][..],
+        &["FCALL", "mod.run", "0"][..],
+        &["FCALL_RO", "mod.run", "0"][..],
+    ] {
+        let unsupported = Command::parse_from_frame(frame_args(args)).unwrap();
+        assert_eq!(unsupported.name(), "UNKNOWN", "{args:?}");
+        assert!(!unsupported.propagate_aof_if_needed(), "{args:?}");
+    }
 }
 
 #[test]

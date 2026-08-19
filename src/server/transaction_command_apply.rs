@@ -190,6 +190,36 @@ fn frame_response_cost(frame: &Frame) -> Option<(usize, usize)> {
                 .len()
                 .checked_add(value.len().to_string().len())?
                 .checked_add(5)?,
+            Frame::Boolean(_) => 4,
+            Frame::Double(value) => value.to_string().len().checked_add(3)?,
+            Frame::BigNumber(value) => value.len().checked_add(3)?,
+            Frame::BlobError(value) => value
+                .len()
+                .checked_add(value.len().to_string().len())?
+                .checked_add(5)?,
+            Frame::VerbatimString { data, .. } => data
+                .len()
+                .checked_add(data.len().to_string().len())?
+                .checked_add(9)?,
+            Frame::Set(values) | Frame::Push(values) => {
+                pending.extend(values.iter());
+                values.len().to_string().len().checked_add(3)?
+            }
+            Frame::Map(entries) => {
+                for (key, value) in entries {
+                    pending.push(key);
+                    pending.push(value);
+                }
+                entries.len().to_string().len().checked_add(3)?
+            }
+            Frame::Attribute { attributes, data } => {
+                for (key, value) in attributes {
+                    pending.push(key);
+                    pending.push(value);
+                }
+                pending.push(data);
+                attributes.len().to_string().len().checked_add(3)?
+            }
         };
         bytes = bytes.checked_add(cost)?;
         if bytes > crate::frame::MAX_FRAME_BYTES {

@@ -5,6 +5,7 @@ pub mod frame;
 pub mod lua;
 pub mod network;
 pub mod observability;
+pub mod resource_limits;
 pub mod server;
 pub mod store;
 pub mod tools;

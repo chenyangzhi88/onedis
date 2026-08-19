@@ -6,23 +6,19 @@ use tokio::{
 };
 
 use super::metrics::OnedisMetrics;
+use crate::server::ServiceState;
 use crate::store::db_manager::DatabaseManager;
 
-pub fn spawn_prometheus_endpoint(
+pub async fn spawn_prometheus_endpoint(
     metrics: Arc<OnedisMetrics>,
     db_manager: Arc<DatabaseManager>,
+    service_state: Arc<ServiceState>,
     bind: String,
     port: u16,
-) {
-    tokio::spawn(async move {
-        let address = format!("{bind}:{port}");
-        let listener = match TcpListener::bind(&address).await {
-            Ok(listener) => listener,
-            Err(err) => {
-                log::warn!("failed to bind Prometheus metrics endpoint {address}: {err}");
-                return;
-            }
-        };
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let address = format!("{bind}:{port}");
+    let listener = TcpListener::bind(&address).await?;
+    Ok(tokio::spawn(async move {
         log::info!("Prometheus metrics endpoint listening on http://{address}/metrics");
 
         loop {
@@ -31,16 +27,55 @@ pub fn spawn_prometheus_endpoint(
             };
             let metrics = metrics.clone();
             let db_manager = db_manager.clone();
+            let service_state = service_state.clone();
             tokio::spawn(async move {
                 let mut request = [0_u8; 1024];
                 let read = stream.read(&mut request).await.unwrap_or(0);
                 let path_is_metrics = request[..read].starts_with(b"GET /metrics ")
                     || request[..read].starts_with(b"GET /metrics?");
+                let path_is_health = request[..read].starts_with(b"GET /healthz ")
+                    || request[..read].starts_with(b"GET /healthz?");
+                let path_is_ready = request[..read].starts_with(b"GET /readyz ")
+                    || request[..read].starts_with(b"GET /readyz?");
                 let (status, content_type, body) = if path_is_metrics {
                     let db_body = db_manager.render_observability_prometheus();
                     let mut body = metrics.render_prometheus();
                     body.push_str(&db_body);
+                    body.push_str(
+                        "# HELP onedis_ready Whether this process is ready for traffic.\n",
+                    );
+                    body.push_str("# TYPE onedis_ready gauge\n");
+                    body.push_str(&format!(
+                        "onedis_ready {}\n",
+                        u8::from(service_state.is_ready())
+                    ));
+                    body.push_str("# HELP onedis_storage_failures_total Fatal kv-engine operation failures observed by this process.\n");
+                    body.push_str("# TYPE onedis_storage_failures_total counter\n");
+                    body.push_str(&format!(
+                        "onedis_storage_failures_total {}\n",
+                        crate::store::health::storage_health().failure_count()
+                    ));
                     ("200 OK", "text/plain; version=0.0.4; charset=utf-8", body)
+                } else if path_is_health {
+                    (
+                        if service_state.is_healthy() {
+                            "200 OK"
+                        } else {
+                            "503 Service Unavailable"
+                        },
+                        "text/plain; charset=utf-8",
+                        service_state.health_body(),
+                    )
+                } else if path_is_ready {
+                    (
+                        if service_state.is_ready() {
+                            "200 OK"
+                        } else {
+                            "503 Service Unavailable"
+                        },
+                        "text/plain; charset=utf-8",
+                        service_state.readiness_body(),
+                    )
                 } else {
                     (
                         "404 Not Found",
@@ -55,7 +90,7 @@ pub fn spawn_prometheus_endpoint(
                 let _ = stream.write_all(response.as_bytes()).await;
             });
         }
-    });
+    }))
 }
 
 #[cfg(test)]
@@ -111,12 +146,23 @@ maxclients = 1000
             metrics_bind: "127.0.0.1".to_string(),
             metrics_port: port,
             slow_command_threshold_ms: 10,
+            shutdown_timeout_ms: 30_000,
         });
         let db_manager = Arc::new(crate::store::db_manager::DatabaseManager::new_async(args).await);
         let metrics = global_metrics();
         metrics.configure(1, 1000);
         metrics.record_command("GET", 100, None, 10_000);
-        spawn_prometheus_endpoint(metrics, db_manager, "127.0.0.1".to_string(), port);
+        let service_state = Arc::new(ServiceState::default());
+        service_state.mark_ready();
+        let endpoint = spawn_prometheus_endpoint(
+            metrics,
+            db_manager,
+            service_state,
+            "127.0.0.1".to_string(),
+            port,
+        )
+        .await
+        .unwrap();
 
         let body = scrape_metrics(port).await;
         assert!(body.contains("onedis_up 1"));
@@ -126,6 +172,7 @@ maxclients = 1000
         assert!(body.contains("onedis_fulltext_outbox_pending"));
         assert!(body.contains("onedis_stream_blocked_clients"));
         assert!(body.contains("onedis_vector_indexes_total"));
+        endpoint.abort();
     }
 
     fn reserve_port() -> io::Result<u16> {

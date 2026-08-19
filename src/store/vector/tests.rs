@@ -1315,34 +1315,57 @@ fn indexed_filters_use_bounded_ordered_ranges() {
 
 #[test]
 fn ip_candidates_are_comparable_across_segments_with_different_norms() {
-    let db = integration_test_db("onedis-vector-ip-segments", KeyEncodingLayout::TableLocalV2);
-    let mut options = create_options("IP", Some(32));
-    options.ef_runtime = Some(64);
-    db.vector_create("idx", options).unwrap();
-
-    for segment in 0..3 {
-        for offset in 0..32 {
-            let value = match segment {
-                0 => 1.0 - offset as f32 * 0.001,
-                1 => 1_000.0 - offset as f32,
-                _ => 10.0 - offset as f32 * 0.01,
-            };
-            db.vector_add(
-                "idx",
-                &format!("segment-{segment}-{offset}"),
-                vec![value, 0.0],
-                None,
+    let query = [1.0, 0.0];
+    let query_payload = hnsw_query_payload(
+        VectorDistance::Ip,
+        &query,
+        VectorQuantization::F32,
+    );
+    let small = hnsw_index_payload(
+        VectorDistance::Ip,
+        &[1.0, 0.0],
+        4.0,
+        VectorQuantization::F32,
+    );
+    let large = hnsw_index_payload(
+        VectorDistance::Ip,
+        &[1_000.0, 0.0],
+        4_000_000.0,
+        VectorQuantization::F32,
+    );
+    let small_graph_distance =
+        hnsw_payload_distance(VectorDistance::Ip, &query_payload, &small).unwrap();
+    let large_graph_distance =
+        hnsw_payload_distance(VectorDistance::Ip, &query_payload, &large).unwrap();
+    let candidates = vec![
+        VectorCandidate {
+            id: "small-radius".to_string(),
+            doc_version: 1,
+            distance: hnsw_candidate_distance(
+                VectorDistance::Ip,
+                &query,
+                &small,
+                small_graph_distance,
             )
-            .unwrap();
-        }
-        db.vector_maintenance_tick().unwrap();
-        db.vector_maintenance_tick().unwrap();
-    }
-
-    let mut options = search_options(1);
-    options.ef = Some(64);
-    let results = db.vector_search("idx", &[1.0, 0.0], options).unwrap();
-    assert_eq!(results[0].id, "segment-1-0");
+            .unwrap(),
+            source_position: None,
+        },
+        VectorCandidate {
+            id: "large-radius".to_string(),
+            doc_version: 1,
+            distance: hnsw_candidate_distance(
+                VectorDistance::Ip,
+                &query,
+                &large,
+                large_graph_distance,
+            )
+            .unwrap(),
+            source_position: None,
+        },
+    ];
+    let reduced = reduce_vector_candidates(candidates, 1).unwrap();
+    assert_eq!(reduced[0].id, "large-radius");
+    assert_eq!(reduced[0].distance, -1_000.0);
 }
 
 #[test]

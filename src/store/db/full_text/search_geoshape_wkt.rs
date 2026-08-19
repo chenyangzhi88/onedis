@@ -139,6 +139,19 @@ pub(super) fn fulltext_geoshape_cells(bounds: (f64, f64, f64, f64)) -> Option<Ve
 
 pub(super) fn fulltext_point_in_polygon(point: (f64, f64), polygon: &[(f64, f64)]) -> bool {
     let (x, y) = point;
+    // Redis GEOSHAPE WITHIN uses strict interior semantics.  Ray casting by
+    // itself classifies left and bottom edges inconsistently, so reject every
+    // boundary segment before testing the interior.
+    for edge in polygon.windows(2) {
+        if fulltext_point_on_segment(point, edge[0], edge[1]) {
+            return false;
+        }
+    }
+    if polygon.first() != polygon.last()
+        && fulltext_point_on_segment(point, *polygon.last().unwrap(), polygon[0])
+    {
+        return false;
+    }
     let mut inside = false;
     let mut j = polygon.len() - 1;
     for i in 0..polygon.len() {
@@ -154,4 +167,16 @@ pub(super) fn fulltext_point_in_polygon(point: (f64, f64), polygon: &[(f64, f64)
         j = i;
     }
     inside
+}
+
+fn fulltext_point_on_segment(point: (f64, f64), start: (f64, f64), end: (f64, f64)) -> bool {
+    let cross = (point.0 - start.0) * (end.1 - start.1) - (point.1 - start.1) * (end.0 - start.0);
+    let scale = (end.0 - start.0).abs() + (end.1 - start.1).abs() + 1.0;
+    if cross.abs() > f64::EPSILON * scale * 8.0 {
+        return false;
+    }
+    point.0 >= start.0.min(end.0)
+        && point.0 <= start.0.max(end.0)
+        && point.1 >= start.1.min(end.1)
+        && point.1 <= start.1.max(end.1)
 }

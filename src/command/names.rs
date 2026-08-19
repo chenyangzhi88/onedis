@@ -262,10 +262,20 @@ impl Command {
             Command::VInfo(_) => "VINFO",
             Command::VRandMember(_) => "VRANDMEMBER",
             Command::VLinks(_) => "VLINKS",
+            Command::VIsMember(_) => "VISMEMBER",
+            Command::VRange(_) => "VRANGE",
             Command::JsonSet(_) => "JSON.SET",
             Command::JsonGet(_) => "JSON.GET",
             Command::JsonDel(_) => "JSON.DEL",
             Command::JsonType(_) => "JSON.TYPE",
+            Command::JsonMGet(_) => "JSON.MGET",
+            Command::JsonMSet(_) => "JSON.MSET",
+            Command::JsonNumIncrBy(_) => "JSON.NUMINCRBY",
+            Command::JsonStrAppend(_) => "JSON.STRAPPEND",
+            Command::JsonArrAppend(_) => "JSON.ARRAPPEND",
+            Command::JsonArrInsert(_) => "JSON.ARRINSERT",
+            Command::JsonArrPop(_) => "JSON.ARRPOP",
+            Command::JsonObjKeys(_) => "JSON.OBJKEYS",
         }
     }
 }

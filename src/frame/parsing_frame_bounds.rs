@@ -68,10 +68,10 @@ fn line_frame_boundary(bytes: &[u8]) -> FrameBoundary {
     }
     let payload = &bytes[1..line_end - 2];
     match bytes[0] {
-        b'+' | b'-' if payload.contains(&b'\r') || payload.contains(&b'\n') => {
+        b'+' | b'-' | b',' | b'(' if payload.contains(&b'\r') || payload.contains(&b'\n') => {
             FrameBoundary::Invalid("invalid control character in line frame".to_string())
         }
-        b'+' | b'-' if std::str::from_utf8(payload).is_err() => {
+        b'+' | b'-' | b',' | b'(' if std::str::from_utf8(payload).is_err() => {
             FrameBoundary::Invalid("invalid UTF-8 in line frame".to_string())
         }
         b':' if std::str::from_utf8(payload)
@@ -81,6 +81,24 @@ fn line_frame_boundary(bytes: &[u8]) -> FrameBoundary {
         {
             FrameBoundary::Invalid("invalid integer frame".to_string())
         }
+        b'#' if !matches!(payload, b"t" | b"f") => {
+            FrameBoundary::Invalid("invalid boolean frame".to_string())
+        }
+        b',' if std::str::from_utf8(payload)
+            .ok()
+            .filter(|value| matches!(*value, "inf" | "+inf" | "-inf" | "nan") || value.parse::<f64>().is_ok())
+            .is_none() =>
+        {
+            FrameBoundary::Invalid("invalid double frame".to_string())
+        }
+        b'(' if {
+            let digits = payload
+                .strip_prefix(b"-")
+                .or_else(|| payload.strip_prefix(b"+"))
+                .unwrap_or(payload);
+            digits.is_empty() || !digits.iter().all(u8::is_ascii_digit)
+        } => FrameBoundary::Invalid("invalid big number frame".to_string()),
+        b'_' if !payload.is_empty() => FrameBoundary::Invalid("invalid null frame".to_string()),
         _ => FrameBoundary::Complete(line_end),
     }
 }
@@ -140,60 +158,80 @@ fn frame_boundary_with_budget(
     };
     *remaining_nodes = next_remaining;
     match bytes[0] {
-        b'*' => {
-            if depth >= MAX_ARRAY_NESTING_DEPTH {
-                return FrameBoundary::Invalid(
-                    "array nesting exceeds configured limit".to_string(),
-                );
-            }
-            let (line_end, line) = match prefixed_length_line(bytes) {
-                Ok(Some(header)) => header,
-                Ok(None) => return FrameBoundary::Incomplete,
-                Err(message) => return FrameBoundary::Invalid(message),
-            };
-            if line == "-1" {
-                return FrameBoundary::Complete(line_end);
-            }
-            let array_len = match parse_protocol_usize(line) {
-                Some(len) => len,
-                None => return FrameBoundary::Invalid("invalid array length".to_string()),
-            };
-            if array_len > MAX_ARRAY_ELEMENTS {
-                return FrameBoundary::Invalid("array exceeds configured limit".to_string());
-            }
-            let mut current_pos = line_end;
-            for _ in 0..array_len {
-                if current_pos >= bytes.len() {
-                    return FrameBoundary::Incomplete;
-                }
-                match frame_boundary_with_budget(
-                    &bytes[current_pos..],
-                    false,
-                    depth + 1,
-                    remaining_nodes,
-                ) {
-                    FrameBoundary::Complete(element_end) => {
-                        current_pos += element_end;
-                        if current_pos > MAX_FRAME_BYTES {
-                            return FrameBoundary::Invalid(
-                                "array frame exceeds configured limit".to_string(),
-                            );
-                        }
-                    }
-                    FrameBoundary::Incomplete => return FrameBoundary::Incomplete,
-                    FrameBoundary::Invalid(message) => return FrameBoundary::Invalid(message),
-                }
-            }
-            FrameBoundary::Complete(current_pos)
-        }
-        b'+' | b'-' | b':' => line_frame_boundary(bytes),
+        b'*' | b'~' | b'>' | b'%' | b'|' => aggregate_frame_boundary(
+            bytes,
+            depth,
+            remaining_nodes,
+            bytes[0],
+        ),
+        b'+' | b'-' | b':' | b'_' | b'#' | b',' | b'(' => line_frame_boundary(bytes),
         b'$' => payload_frame_boundary(bytes, true, "bulk string"),
-        b'_' | b'#' | b',' | b'(' | b'!' | b'=' | b'%' | b'~' | b'>' => {
-            FrameBoundary::Invalid("unsupported RESP3 frame type".to_string())
-        }
+        b'!' => payload_frame_boundary(bytes, false, "blob error"),
+        b'=' => payload_frame_boundary(bytes, false, "verbatim string"),
         _ if top_level => Frame::inline_frame_boundary(bytes),
         _ => FrameBoundary::Invalid("invalid array element type".to_string()),
     }
+}
+
+fn aggregate_frame_boundary(
+    bytes: &[u8],
+    depth: usize,
+    remaining_nodes: &mut usize,
+    prefix: u8,
+) -> FrameBoundary {
+    if depth >= MAX_ARRAY_NESTING_DEPTH {
+        return FrameBoundary::Invalid("aggregate nesting exceeds configured limit".to_string());
+    }
+    let (line_end, line) = match prefixed_length_line(bytes) {
+        Ok(Some(header)) => header,
+        Ok(None) => return FrameBoundary::Incomplete,
+        Err(message) => return FrameBoundary::Invalid(message),
+    };
+    if prefix == b'*' && line == "-1" {
+        return FrameBoundary::Complete(line_end);
+    }
+    let logical_len = match parse_protocol_usize(line) {
+        Some(len) => len,
+        None => return FrameBoundary::Invalid("invalid aggregate length".to_string()),
+    };
+    if logical_len > MAX_ARRAY_ELEMENTS {
+        return FrameBoundary::Invalid("aggregate exceeds configured limit".to_string());
+    }
+    let multiplier = if matches!(prefix, b'%' | b'|') { 2 } else { 1 };
+    let trailing = usize::from(prefix == b'|');
+    let Some(element_count) = logical_len
+        .checked_mul(multiplier)
+        .and_then(|count| count.checked_add(trailing))
+    else {
+        return FrameBoundary::Invalid("aggregate length overflow".to_string());
+    };
+    if element_count > MAX_FRAME_NODES {
+        return FrameBoundary::Invalid("aggregate element count exceeds configured limit".to_string());
+    }
+    let mut current_pos = line_end;
+    for _ in 0..element_count {
+        if current_pos >= bytes.len() {
+            return FrameBoundary::Incomplete;
+        }
+        match frame_boundary_with_budget(
+            &bytes[current_pos..],
+            false,
+            depth + 1,
+            remaining_nodes,
+        ) {
+            FrameBoundary::Complete(element_end) => {
+                current_pos += element_end;
+                if current_pos > MAX_FRAME_BYTES {
+                    return FrameBoundary::Invalid(
+                        "aggregate frame exceeds configured limit".to_string(),
+                    );
+                }
+            }
+            FrameBoundary::Incomplete => return FrameBoundary::Incomplete,
+            FrameBoundary::Invalid(message) => return FrameBoundary::Invalid(message),
+        }
+    }
+    FrameBoundary::Complete(current_pos)
 }
 
 impl Frame {

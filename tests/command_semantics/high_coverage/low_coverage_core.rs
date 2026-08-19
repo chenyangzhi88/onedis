@@ -48,6 +48,70 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
         Frame::SimpleString(kind) if kind == "object"
     ));
 
+    assert!(matches!(
+        apply_async(
+            &db,
+            &[
+                "JSON.MSET",
+                "json:a",
+                "$",
+                r#"{"name":"one","n":1,"items":[1,2]}"#,
+                "json:b",
+                "$",
+                r#"{"name":"two","n":10}"#,
+            ],
+        )
+        .await,
+        Frame::Ok
+    ));
+    assert!(matches!(
+        apply_async(&db, &["JSON.MGET", "json:a", "json:b", "$.name"]).await,
+        Frame::Array(values) if values.len() == 2
+    ));
+    assert!(matches!(
+        apply_async(&db, &["JSON.NUMINCRBY", "json:a", "$.n", "2.5"]).await,
+        Frame::BulkString(value) if value == b"3.5"
+    ));
+    assert!(matches!(
+        apply_async(&db, &["JSON.STRAPPEND", "json:a", "$.name", r#""dis""#]).await,
+        Frame::Integer(6)
+    ));
+    assert!(matches!(
+        apply_async(&db, &["JSON.ARRAPPEND", "json:a", "$.items", "3", "4"]).await,
+        Frame::Integer(4)
+    ));
+    assert!(matches!(
+        apply_async(&db, &["JSON.ARRINSERT", "json:a", "$.items", "1", "9"]).await,
+        Frame::Integer(5)
+    ));
+    assert!(matches!(
+        apply_async(&db, &["JSON.ARRPOP", "json:a", "$.items", "1"]).await,
+        Frame::BulkString(value) if value == b"9"
+    ));
+    assert!(matches!(
+        apply_async(&db, &["JSON.OBJKEYS", "json:a"]).await,
+        Frame::Array(values) if values.len() == 3
+    ));
+
+    let failed_mset = onedis_server::command_dispatch::handle_command_async(
+        &db,
+        parse(&[
+            "JSON.MSET",
+            "json:a",
+            "$.n",
+            "99",
+            "json:b",
+            "$.missing.child",
+            "1",
+        ]),
+    )
+    .await;
+    assert!(failed_mset.is_err());
+    assert!(matches!(
+        apply_async(&db, &["JSON.GET", "json:a", "$.n"]).await,
+        Frame::BulkString(value) if value == b"3.5"
+    ));
+
     for idx in 0..7 {
         assert!(matches!(
             apply(&db, &["SET", &format!("scan:{idx}"), "v"]),
@@ -181,17 +245,11 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
     assert!(parse_err(&["MOVE", "a", "bad"]).contains("integer"));
 
     assert!(matches!(client_apply(&["CLIENT", "HELP"]), Frame::Array(_)));
-    assert!(matches!(
-        client_apply(&["CLIENT", "INFO"]),
-        Frame::BulkString(_)
-    ));
-    assert!(matches!(
-        client_apply(&["CLIENT", "LIST"]),
-        Frame::BulkString(_)
-    ));
+    assert!(matches!(client_apply(&["CLIENT", "INFO"]), Frame::Error(_)));
+    assert!(matches!(client_apply(&["CLIENT", "LIST"]), Frame::Error(_)));
     assert!(matches!(
         client_apply(&["CLIENT", "SETINFO", "LIB-NAME", "onedis"]),
-        Frame::Ok
+        Frame::Error(_)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "SETINFO", "only-one"]),
@@ -199,37 +257,37 @@ async fn low_coverage_command_wrappers_cover_json_scan_copy_move_client_and_conf
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "SETNAME", "tester"]),
-        Frame::Ok
+        Frame::Error(_)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "SETNAME"]),
         Frame::Error(_)
     ));
-    assert!(matches!(client_apply(&["CLIENT", "GETNAME"]), Frame::Null));
+    assert!(matches!(client_apply(&["CLIENT", "GETNAME"]), Frame::Error(_)));
     assert!(matches!(
         client_apply(&["CLIENT", "GETNAME", "extra"]),
         Frame::Error(_)
     ));
-    assert!(matches!(client_apply(&["CLIENT", "ID"]), Frame::Integer(0)));
+    assert!(matches!(client_apply(&["CLIENT", "ID"]), Frame::Error(_)));
     assert!(matches!(
         client_apply(&["CLIENT", "ID", "extra"]),
         Frame::Error(_)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "GETREDIR"]),
-        Frame::Integer(-1)
+        Frame::Error(_)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "TRACKINGINFO"]),
-        Frame::Array(_)
+        Frame::Error(_)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "UNBLOCK", "123"]),
-        Frame::Integer(0)
+        Frame::Error(_)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "KILL", "ID", "123"]),
-        Frame::Integer(0)
+        Frame::Error(_)
     ));
     assert!(matches!(
         client_apply(&["CLIENT", "UNKNOWN"]),

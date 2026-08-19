@@ -42,6 +42,20 @@ pub(super) fn register_fulltext_aggregate_cursor(
         .lock()
         .map_err(|_| Error::msg("ERR fulltext cursor lock poisoned"))?;
     remove_expired_fulltext_aggregate_cursors(&mut cursors, now);
+    let limits = crate::resource_limits::resource_limits()?;
+    if max_idle_ms > limits.aggregate_cursor_idle_ms {
+        return Err(Error::msg(
+            "ERR aggregate cursor MAXIDLE exceeds configured limit",
+        ));
+    }
+    if cursors
+        .values()
+        .filter(|cursor| cursor.db_index == db_index)
+        .count()
+        >= limits.aggregate_cursors_per_db
+    {
+        return Err(Error::msg("ERR aggregate cursor count limit exceeded"));
+    }
     let used = cursors
         .values()
         .filter(|cursor| cursor.db_index == db_index)

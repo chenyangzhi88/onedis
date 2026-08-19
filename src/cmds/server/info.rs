@@ -1,11 +1,9 @@
-use anyhow::Error;
-use std::{sync::OnceLock, time::Instant};
-
 use crate::{
     frame::Frame,
     observability::metrics::{CommandStatsSnapshot, global_metrics},
     store::db::Db,
 };
+use anyhow::Error;
 
 pub struct Info {
     section: Option<String>,
@@ -74,80 +72,56 @@ impl Info {
         // Server section
         if show_server {
             info.push_str("# Server\r\n");
-            info.push_str("redis_version:0.1.0\r\n");
-            info.push_str("redis_git_sha1:00000000\r\n");
-            info.push_str("redis_git_dirty:0\r\n");
-            info.push_str("redis_build_id:unknown\r\n");
+            info.push_str(&format!("redis_version:{}\r\n", env!("CARGO_PKG_VERSION")));
+            info.push_str(&format!("onedis_version:{}\r\n", env!("CARGO_PKG_VERSION")));
             info.push_str("redis_mode:standalone\r\n");
-            info.push_str("os:Rust\r\n");
-            info.push_str("arch_bits:64\r\n");
-            info.push_str("multiplexing_api:unknown\r\n");
-            info.push_str("gcc_version:0.0.0\r\n");
-            info.push_str("process_id:0\r\n");
-
-            let uptime = process_uptime_seconds();
-            info.push_str(&format!("uptime_in_seconds:{}\r\n", uptime));
-            info.push_str(&format!("uptime_in_days:{}\r\n", uptime / 86400));
-
-            info.push_str("hz:10\r\n");
-            info.push_str("configured_hz:10\r\n");
-            info.push_str("lru_clock:0\r\n");
-            info.push_str("executable:/rudis-server\r\n");
-            info.push_str("config_file:config/onedis.toml\r\n\r\n");
+            info.push_str(&format!("os:{}\r\n", std::env::consts::OS));
+            info.push_str(&format!("arch:{}\r\n", std::env::consts::ARCH));
+            info.push_str(&format!("arch_bits:{}\r\n", usize::BITS));
+            info.push_str("multiplexing_api:tokio\r\n");
+            info.push_str(&format!("process_id:{}\r\n", std::process::id()));
+            info.push_str(&format!("uptime_in_seconds:{}\r\n", metrics.uptime_seconds));
+            info.push_str(&format!(
+                "uptime_in_days:{}\r\n",
+                metrics.uptime_seconds / 86400
+            ));
+            info.push_str("executable:onedis-server\r\n\r\n");
         }
 
         // Clients section
         if show_clients {
             info.push_str("# Clients\r\n");
-            info.push_str("connected_clients:1\r\n");
-            info.push_str("client_recent_max_input_buffer:0\r\n");
-            info.push_str("client_recent_max_output_buffer:0\r\n");
-            info.push_str("blocked_clients:0\r\n");
-            info.push_str("tracking_clients:0\r\n");
-            info.push_str("clients_in_timeout_table:0\r\n\r\n");
+            info.push_str(&format!(
+                "connected_clients:{}\r\n",
+                metrics.current_connections
+            ));
+            info.push_str(&format!(
+                "maxclients:{}\r\n\r\n",
+                metrics.configured_maxclients
+            ));
         }
 
         // Memory section
         if show_memory {
             info.push_str("# Memory\r\n");
-            // Estimate memory usage based on the number of records
-            let memory_used = db_size.saturating_mul(100); // Rough estimate
+            let memory_used = process_resident_memory_bytes().unwrap_or(0);
             info.push_str(&format!("used_memory:{}\r\n", memory_used));
             info.push_str(&format!("used_memory_human:{}B\r\n", memory_used));
-            info.push_str("used_memory_rss:0\r\n");
-            info.push_str("used_memory_peak:0\r\n");
-            info.push_str("used_memory_peak_human:0B\r\n");
-            info.push_str("used_memory_lua:0\r\n");
-            info.push_str("used_memory_lua_human:0B\r\n");
-            info.push_str("maxmemory:0\r\n");
-            info.push_str("maxmemory_human:0B\r\n");
-            info.push_str("maxmemory_policy:noeviction\r\n");
-            info.push_str("mem_fragmentation_ratio:0.00\r\n");
-            info.push_str("mem_allocator:jemalloc-0.0.0\r\n\r\n");
+            info.push_str(&format!("used_memory_rss:{}\r\n", memory_used));
+            info.push_str("mem_allocator:system\r\n");
+            info.push_str("onedis_memory_measurement:process_rss\r\n\r\n");
         }
 
         // Persistence section
         if show_persistence {
             info.push_str("# Persistence\r\n");
-            info.push_str("persistence_enabled:0\r\n");
+            info.push_str("persistence_enabled:1\r\n");
+            info.push_str("storage_engine:kv-engine\r\n");
+            info.push_str("redis_rdb_supported:0\r\n");
+            info.push_str("redis_aof_supported:0\r\n");
             info.push_str("loading:0\r\n");
-            info.push_str("rdb_changes_since_last_save:0\r\n");
-            info.push_str("rdb_bgsave_in_progress:0\r\n");
-            info.push_str("rdb_last_save_time:0\r\n");
-            info.push_str("rdb_last_bgsave_status:disabled\r\n");
-            info.push_str("rdb_last_bgsave_time_sec:-1\r\n");
-            info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
-            info.push_str("rdb_last_cow_size:0\r\n");
             info.push_str("aof_enabled:0\r\n");
-            info.push_str("aof_rewrite_in_progress:0\r\n");
-            info.push_str("aof_rewrite_scheduled:0\r\n");
-            info.push_str("aof_last_rewrite_time_sec:-1\r\n");
-            info.push_str("aof_current_rewrite_time_sec:-1\r\n");
-            info.push_str("aof_last_bgrewrite_status:disabled\r\n");
-            info.push_str("aof_last_write_status:disabled\r\n");
-            info.push_str("aof_last_cow_size:0\r\n");
-            info.push_str("module_fork_in_progress:0\r\n");
-            info.push_str("module_fork_last_cow_size:0\r\n\r\n");
+            info.push_str("rdb_last_bgsave_status:unsupported\r\n\r\n");
         }
 
         // Stats section
@@ -161,7 +135,6 @@ impl Info {
                 "total_commands_processed:{}\r\n",
                 metrics.total_commands_processed
             ));
-            info.push_str("instantaneous_ops_per_sec:0\r\n");
             info.push_str(&format!(
                 "total_net_input_bytes:{}\r\n",
                 metrics.total_net_input_bytes
@@ -170,69 +143,29 @@ impl Info {
                 "total_net_output_bytes:{}\r\n",
                 metrics.total_net_output_bytes
             ));
-            info.push_str("instantaneous_input_kbps:0.00\r\n");
-            info.push_str("instantaneous_output_kbps:0.00\r\n");
             info.push_str(&format!(
                 "rejected_connections:{}\r\n",
                 metrics.rejected_connections
             ));
-            info.push_str("sync_full:0\r\n");
-            info.push_str("sync_partial_ok:0\r\n");
-            info.push_str("sync_partial_err:0\r\n");
             info.push_str(&format!("expired_keys:{}\r\n", ttl.expired_keys));
-            info.push_str("expired_stale_perc:0.00\r\n");
-            info.push_str("expired_time_cap_reached_count:0\r\n");
-            info.push_str("expire_cycle_cpu_milliseconds:0\r\n");
-            info.push_str("evicted_keys:0\r\n");
-            info.push_str("keyspace_hits:0\r\n");
-            info.push_str("keyspace_misses:0\r\n");
-            info.push_str("pubsub_channels:0\r\n");
-            info.push_str("pubsub_patterns:0\r\n");
-            info.push_str("latest_fork_usec:0\r\n");
-            info.push_str("total_forks:0\r\n");
-            info.push_str("migrate_cached_sockets:0\r\n");
-            info.push_str("slave_expires_tracked_keys:0\r\n");
-            info.push_str("active_defrag_hits:0\r\n");
-            info.push_str("active_defrag_misses:0\r\n");
-            info.push_str("active_defrag_key_hits:0\r\n");
-            info.push_str("active_defrag_key_misses:0\r\n");
-            info.push_str("tracking_total_keys:0\r\n");
-            info.push_str("tracking_total_items:0\r\n");
-            info.push_str("tracking_total_prefixes:0\r\n");
             info.push_str(&format!(
                 "unexpected_error_replies:{}\r\n",
                 metrics.total_command_errors
             ));
-            info.push_str("total_reads_processed:0\r\n");
-            info.push_str("total_writes_processed:0\r\n");
-            info.push_str("io_threaded_reads_processed:0\r\n");
-            info.push_str("io_threaded_writes_processed:0\r\n\r\n");
+            info.push_str("\r\n");
         }
 
         // Replication section
         if show_replication {
             info.push_str("# Replication\r\n");
-            info.push_str("role:master\r\n");
-            info.push_str("connected_slaves:0\r\n");
-            info.push_str("master_replid:0000000000000000000000000000000000000000\r\n");
-            info.push_str("master_replid2:0000000000000000000000000000000000000000\r\n");
-            info.push_str("master_repl_offset:0\r\n");
-            info.push_str("second_repl_offset:-1\r\n");
-            info.push_str("repl_backlog_active:0\r\n");
-            info.push_str("repl_backlog_size:1048576\r\n");
-            info.push_str("repl_backlog_first_byte_offset:0\r\n");
-            info.push_str("repl_backlog_histlen:0\r\n\r\n");
+            info.push_str("redis_replication_supported:0\r\n");
+            info.push_str("onedis_storage_role:standalone\r\n\r\n");
         }
 
         // CPU section
         if show_cpu {
             info.push_str("# CPU\r\n");
-            info.push_str("used_cpu_sys:0.000000\r\n");
-            info.push_str("used_cpu_user:0.000000\r\n");
-            info.push_str("used_cpu_sys_children:0.000000\r\n");
-            info.push_str("used_cpu_user_children:0.000000\r\n");
-            info.push_str("used_cpu_sys_main_thread:0.000000\r\n");
-            info.push_str("used_cpu_user_main_thread:0.000000\r\n\r\n");
+            info.push_str("cpu_measurement_supported:0\r\n\r\n");
         }
 
         // Commandstats section
@@ -264,9 +197,16 @@ impl Info {
     }
 }
 
-fn process_uptime_seconds() -> u64 {
-    static STARTED_AT: OnceLock<Instant> = OnceLock::new();
-    STARTED_AT.get_or_init(Instant::now).elapsed().as_secs()
+fn process_resident_memory_bytes() -> Option<usize> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let rss_kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<usize>()
+        .ok()?;
+    rss_kib.checked_mul(1024)
 }
 
 fn push_command_stat(info: &mut String, command: &CommandStatsSnapshot) {
@@ -356,10 +296,10 @@ mod tests {
             assert!(default_info.contains(section), "missing {section}");
         }
         assert!(default_info.contains("db0:keys=2,expires=0,avg_ttl=0"));
-        assert!(default_info.contains("used_memory:200"));
+        assert!(default_info.contains("onedis_memory_measurement:process_rss"));
 
         let all_info = bulk_text(command(&["info", "all"]).apply(&db).unwrap());
-        assert!(all_info.contains("master_replid:"));
+        assert!(all_info.contains("redis_replication_supported:0"));
         assert!(all_info.contains("cmdstat_info:calls="));
 
         let server_info = bulk_text(command(&["info", "server"]).apply(&db).unwrap());

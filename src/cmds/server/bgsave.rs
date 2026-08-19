@@ -20,7 +20,9 @@ impl Bgsave {
     }
 
     pub fn apply_sync(self, _db_manager: &DatabaseManager) -> Result<Frame, Error> {
-        // Compatibility-only command; durable storage does not create Redis RDB snapshots.
-        Ok(Frame::Ok)
+        Ok(Frame::Error(
+            "ERR BGSAVE is unsupported; durability and checkpoints are managed by kv-engine"
+                .to_string(),
+        ))
     }
 }

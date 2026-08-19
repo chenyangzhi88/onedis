@@ -1,4 +1,4 @@
-use anyhow::Error;
+use anyhow::{Context, Error};
 
 use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 
 use crate::args::ResolvedArgs;
 use crate::command::Command;
-use crate::frame::Frame;
+use crate::frame::{Frame, RespVersion};
 use crate::network::connection::Connection;
 use crate::network::session::{Session, WatchedKey};
 use crate::network::session_manager::{
@@ -26,6 +26,8 @@ use crate::wasm::WasmRegistry;
 use kv_engine::monitor::{CoordinatorMonitorConfig, MonitorMetric, spawn_coordinator_monitor};
 
 pub mod command_executor;
+mod service_state;
+pub use service_state::ServiceState;
 
 use self::command_executor::CommandExecutor;
 
@@ -39,16 +41,19 @@ pub struct Server {
     wasm_registry: Arc<WasmRegistry>,
     metrics: Arc<OnedisMetrics>,
     maxclients_limit: usize,
+    service_state: Arc<ServiceState>,
+    observability_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Server {
-    pub async fn new(args: Arc<ResolvedArgs>) -> Self {
+    pub async fn new(args: Arc<ResolvedArgs>) -> Result<Self, Error> {
+        crate::resource_limits::validate_resource_limit_environment()?;
+        let service_state = Arc::new(ServiceState::default());
         let session_manager = Arc::new(SessionManager::with_default_password(
             args.requirepass.as_deref(),
         ));
-        let db_manager = Arc::new(DatabaseManager::new_async(args.clone()).await);
-        let command_executor =
-            Arc::new(CommandExecutor::from_env().expect("failed to start command executor"));
+        let db_manager = Arc::new(DatabaseManager::try_new_async(args.clone()).await?);
+        let command_executor = Arc::new(CommandExecutor::from_env()?);
         let wasm_registry = Arc::new(WasmRegistry::new());
         let hard_maxclients = std::env::var("ONEDIS_HARD_MAX_CLIENTS")
             .ok()
@@ -64,14 +69,6 @@ impl Server {
         metrics.configure(args.databases, maxclients_limit);
         metrics.set_enabled(args.observability_enabled);
         metrics.initialize_command_index();
-        if args.observability_enabled && args.metrics_port != 0 {
-            spawn_prometheus_endpoint(
-                metrics.clone(),
-                db_manager.clone(),
-                args.metrics_bind.clone(),
-                args.metrics_port,
-            );
-        }
         if let Some(mut monitor_config) =
             CoordinatorMonitorConfig::from_options(db_manager.options())
         {
@@ -106,7 +103,7 @@ impl Server {
             );
         }
 
-        Server {
+        Ok(Server {
             args,
             session_manager,
             db_manager,
@@ -114,81 +111,127 @@ impl Server {
             wasm_registry,
             metrics,
             maxclients_limit,
-        }
+            service_state,
+            observability_task: None,
+        })
     }
 
-    pub async fn start(&mut self) {
-        match TcpListener::bind(format!("{}:{}", self.args.bind, self.args.port)).await {
-            Ok(listener) => {
-                log::info!("Server initialized");
-                log::info!("Ready to accept connections");
-                let mut handlers = tokio::task::JoinSet::new();
-                let mut shutdown = Box::pin(shutdown_signal());
-                loop {
-                    tokio::select! {
-                        _ = &mut shutdown => {
-                            log::info!("Shutdown signal received; stopping server");
-                            break;
+    pub async fn start(&mut self) -> Result<(), Error> {
+        let address = format!("{}:{}", self.args.bind, self.args.port);
+        let listener = TcpListener::bind(&address)
+            .await
+            .with_context(|| format!("failed to bind OneDis RESP endpoint {address}"))?;
+        if self.args.observability_enabled && self.args.metrics_port != 0 {
+            self.observability_task = Some(
+                spawn_prometheus_endpoint(
+                    self.metrics.clone(),
+                    self.db_manager.clone(),
+                    self.service_state.clone(),
+                    self.args.metrics_bind.clone(),
+                    self.args.metrics_port,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to bind OneDis observability endpoint {}:{}",
+                        self.args.metrics_bind, self.args.metrics_port
+                    )
+                })?,
+            );
+        }
+        self.service_state.mark_ready();
+        log::info!("Server initialized");
+        log::info!("Ready to accept connections");
+        let mut handlers = tokio::task::JoinSet::new();
+        let mut shutdown = Box::pin(shutdown_signal());
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => {
+                    log::info!("Shutdown signal received; stopping server");
+                    break;
+                }
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _address)) => {
+                        self.metrics.connection_accepted();
+                        if self
+                            .session_manager
+                            .is_over_max_clients(self.maxclients_limit)
+                        {
+                            self.metrics.connection_rejected("maxclients");
+                            let mut connection =
+                                crate::network::connection::Connection::new(stream);
+                            let error_frame = crate::frame::Frame::Error(
+                                "ERR max number of clients reached".to_string(),
+                            );
+                            self.metrics.add_output_bytes(error_frame.as_bytes().len());
+                            tokio::spawn(async move {
+                                let _ = connection.write_bytes(error_frame.as_bytes()).await;
+                            });
+                            continue;
                         }
-                        accepted = listener.accept() => match accepted {
-                            Ok((stream, _address)) => {
-                                self.metrics.connection_accepted();
-                                if self
-                                    .session_manager
-                                    .is_over_max_clients(self.maxclients_limit)
-                                {
-                                    self.metrics.connection_rejected("maxclients");
-                                    let mut connection =
-                                        crate::network::connection::Connection::new(stream);
-                                    let error_frame = crate::frame::Frame::Error(
-                                        "ERR max number of clients reached".to_string(),
-                                    );
-                                    self.metrics.add_output_bytes(error_frame.as_bytes().len());
-                                    tokio::spawn(async move {
-                                        let _ = connection.write_bytes(error_frame.as_bytes()).await;
-                                    });
-                                    continue;
-                                }
 
-                                let mut handler = Handler::new(
-                                    self.db_manager.clone(),
-                                    self.session_manager.clone(),
-                                    self.command_executor.clone(),
-                                    self.wasm_registry.clone(),
-                                    stream,
-                                    self.args.clone(),
-                                );
-                                handlers.spawn(async move {
-                                    handler.handle().await;
-                                });
-                            }
-                            Err(err) => {
-                                log::error!("Failed to accept connection: {err}");
-                                tokio::time::sleep(Duration::from_millis(50)).await;
-                            }
-                        },
-                        joined = handlers.join_next(), if !handlers.is_empty() => {
-                            if let Some(Err(err)) = joined {
-                                log::error!("Connection handler terminated unexpectedly: {err}");
-                            }
-                        }
+                        let mut handler = Handler::new_with_state(
+                            self.db_manager.clone(),
+                            self.session_manager.clone(),
+                            self.command_executor.clone(),
+                            self.wasm_registry.clone(),
+                            stream,
+                            self.args.clone(),
+                            self.service_state.clone(),
+                        );
+                        handlers.spawn(async move {
+                            handler.handle().await;
+                        });
+                    }
+                    Err(err) => {
+                        log::error!("Failed to accept connection: {err}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                },
+                joined = handlers.join_next(), if !handlers.is_empty() => {
+                    if let Some(Err(err)) = joined {
+                        log::error!("Connection handler terminated unexpectedly: {err}");
                     }
                 }
-                handlers.abort_all();
-                while handlers.join_next().await.is_some() {}
-                self.db_manager.shutdown().await;
-                self.command_executor.shutdown_background();
-                log::info!("Server shutdown complete");
-            }
-            Err(err) => {
-                log::error!(
-                    "Failed to bind to address {}:{}: {}",
-                    self.args.bind,
-                    self.args.port,
-                    err
-                );
             }
         }
+
+        self.service_state.begin_shutdown();
+        let requested = self.session_manager.request_shutdown_all();
+        log::info!("Draining {requested} active client connection(s)");
+        let deadline = Instant::now() + Duration::from_millis(self.args.shutdown_timeout_ms);
+        loop {
+            if handlers.is_empty() {
+                break;
+            }
+            match tokio::time::timeout_at(deadline, handlers.join_next()).await {
+                Ok(Some(Err(err))) => {
+                    log::error!("Connection handler terminated unexpectedly: {err}");
+                }
+                Ok(Some(Ok(()))) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    let remaining = handlers.len();
+                    log::warn!(
+                        "Graceful shutdown deadline reached; cancelling {remaining} connection handler(s)"
+                    );
+                    handlers.abort_all();
+                    while handlers.join_next().await.is_some() {}
+                    break;
+                }
+            }
+        }
+        let maintenance_budget = deadline.saturating_duration_since(Instant::now());
+        self.db_manager
+            .shutdown(maintenance_budget.max(Duration::from_millis(1)))
+            .await?;
+        self.command_executor.shutdown_background();
+        if let Some(task) = self.observability_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        log::info!("Server shutdown complete");
+        Ok(())
     }
 }
 
@@ -231,9 +274,14 @@ pub struct Handler {
     args: Arc<ResolvedArgs>,
     transaction_db: Option<crate::store::db::Db>,
     metrics: Arc<OnedisMetrics>,
+    service_state: Arc<ServiceState>,
 }
 
 impl Handler {
+    fn encode_frame(&self, frame: &Frame) -> Vec<u8> {
+        frame.as_bytes_for_protocol(self.session.resp_version())
+    }
+
     pub fn get_session(&self) -> &Session {
         &self.session
     }

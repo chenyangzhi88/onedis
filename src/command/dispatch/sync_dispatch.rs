@@ -187,6 +187,14 @@ pub fn handle_command(db: &Db, command: Command) -> Result<Frame, Error> {
         Command::JsonGet(json_get) => json_get.apply(db),
         Command::JsonDel(json_del) => json_del.apply(db),
         Command::JsonType(json_type) => json_type.apply(db),
+        Command::JsonMGet(command) => command.apply(db),
+        Command::JsonMSet(command) => command.apply(db),
+        Command::JsonNumIncrBy(command) => command.apply(db),
+        Command::JsonStrAppend(command) => command.apply(db),
+        Command::JsonArrAppend(command) => command.apply(db),
+        Command::JsonArrInsert(command) => command.apply(db),
+        Command::JsonArrPop(command) => command.apply(db),
+        Command::JsonObjKeys(command) => command.apply(db),
         Command::FtCreate(ft_create) => ft_create.apply(db),
         Command::FtList(ft_list) => ft_list.apply(db),
         Command::FtDropIndex(ft_drop_index) => ft_drop_index.apply(db),
@@ -220,6 +228,8 @@ pub fn handle_command(db: &Db, command: Command) -> Result<Frame, Error> {
         Command::VInfo(vinfo) => vinfo.apply(db),
         Command::VRandMember(vrandmember) => vrandmember.apply(db),
         Command::VLinks(vlinks) => vlinks.apply(db),
+        Command::VIsMember(command) => command.apply(db),
+        Command::VRange(command) => command.apply(db),
         Command::Copy(copy) => {
             let copied = db.copy_key_to_db(
                 copy.db_index().unwrap_or(db.db_index() as usize) as u16,

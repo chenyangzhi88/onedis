@@ -1,7 +1,4 @@
-use crate::{
-    frame::{Frame, MAX_ARRAY_ELEMENTS},
-    store::db::Db,
-};
+use crate::{frame::Frame, store::db::Db};
 use anyhow::Error;
 
 pub struct Keys {
@@ -20,7 +17,8 @@ impl Keys {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let (cursor, keys) = db.scan_keys_page(0, &self.pattern, MAX_ARRAY_ELEMENTS, None)?;
+        let limit = crate::resource_limits::resource_limits()?.keys_items;
+        let (cursor, keys) = db.scan_keys_page(0, &self.pattern, limit, None)?;
         if cursor != 0 {
             return Err(Error::msg("ERR response exceeds configured limit"));
         }
@@ -30,7 +28,12 @@ impl Keys {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let (cursor, keys) = db
-            .scan_keys_page_async(0, &self.pattern, MAX_ARRAY_ELEMENTS, None)
+            .scan_keys_page_async(
+                0,
+                &self.pattern,
+                crate::resource_limits::resource_limits()?.keys_items,
+                None,
+            )
             .await?;
         if cursor != 0 {
             return Err(Error::msg("ERR response exceeds configured limit"));

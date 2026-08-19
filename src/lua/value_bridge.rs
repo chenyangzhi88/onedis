@@ -45,13 +45,31 @@ pub(super) fn frame_to_lua_value(lua: &Lua, frame: Frame) -> mlua::Result<Value>
         Frame::Integer(value) => Ok(Value::Integer(value)),
         Frame::BulkString(bytes) => Ok(Value::String(lua.create_string(&bytes)?)),
         Frame::Null => Ok(Value::Boolean(false)),
-        Frame::Array(values) => {
+        Frame::Boolean(value) => Ok(Value::Boolean(value)),
+        Frame::Double(value) => Ok(Value::Number(value)),
+        Frame::BigNumber(value) => Ok(Value::String(lua.create_string(&value)?)),
+        Frame::BlobError(bytes) => {
+            error_table(lua, &String::from_utf8_lossy(&bytes)).map(Value::Table)
+        }
+        Frame::VerbatimString { data, .. } => Ok(Value::String(lua.create_string(&data)?)),
+        Frame::Array(values) | Frame::Set(values) | Frame::Push(values) => {
             let table = lua.create_table()?;
             for (idx, value) in values.into_iter().enumerate() {
                 table.set(idx + 1, frame_to_lua_value(lua, value)?)?;
             }
             Ok(Value::Table(table))
         }
+        Frame::Map(entries) => {
+            let table = lua.create_table()?;
+            for (key, value) in entries {
+                table.set(
+                    frame_to_lua_value(lua, key)?,
+                    frame_to_lua_value(lua, value)?,
+                )?;
+            }
+            Ok(Value::Table(table))
+        }
+        Frame::Attribute { data, .. } => frame_to_lua_value(lua, *data),
     }
 }
 

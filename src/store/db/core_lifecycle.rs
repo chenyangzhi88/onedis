@@ -46,15 +46,36 @@ impl Db {
         vector_runtimes: Arc<VectorRuntimeRegistry>,
         counter_cache: Arc<CounterCacheRuntime>,
     ) -> Self {
-        let store = store.for_db_index(db_index);
+        Self::try_new_with_mutation_tracker_and_vector_runtimes(
+            db_index,
+            store,
+            version_counter,
+            ttl_manager,
+            mutation_tracker,
+            vector_runtimes,
+            counter_cache,
+        )
+        .expect("failed to initialize onedis logical database")
+    }
+
+    pub(crate) fn try_new_with_mutation_tracker_and_vector_runtimes(
+        db_index: u16,
+        store: KvStore,
+        version_counter: Arc<VersionCounter>,
+        ttl_manager: Arc<TtlManager>,
+        mutation_tracker: Arc<KeyMutationTracker>,
+        vector_runtimes: Arc<VectorRuntimeRegistry>,
+        counter_cache: Arc<CounterCacheRuntime>,
+    ) -> Result<Self, Error> {
+        let store = store.try_for_db_index(db_index)?;
         // The layout marker describes the table itself, not a user transaction.
         // Initialize it through the durable table view before the transactional
         // snapshot is first touched.
         let key_layout =
-            KeyEncodingLayout::open_or_initialize_for_table(&store.non_transactional_view());
+            KeyEncodingLayout::try_open_or_initialize_for_table(&store.non_transactional_view())?;
         let key_write_locks = ttl_manager.key_write_locks();
         let hash_field_write_locks = ttl_manager.hash_field_write_locks();
-        Db {
+        Ok(Db {
             db_index,
             store,
             key_layout,
@@ -70,7 +91,7 @@ impl Db {
             hash_field_write_locks,
             mutation_tracker,
             pending_mutations: Arc::new(Mutex::new(PendingMutations::default())),
-        }
+        })
     }
 
     pub(crate) fn db_index(&self) -> u16 {

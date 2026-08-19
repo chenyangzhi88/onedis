@@ -1,6 +1,4 @@
 impl Handler {
-    const MAX_RESPONSE_BUFFER_BYTES: usize = 128 * 1024 * 1024;
-
     pub fn new(
         db_manager: Arc<DatabaseManager>,
         session_manager: Arc<SessionManager>,
@@ -8,6 +6,28 @@ impl Handler {
         wasm_registry: Arc<WasmRegistry>,
         stream: TcpStream,
         args: Arc<ResolvedArgs>,
+    ) -> Self {
+        let service_state = Arc::new(ServiceState::default());
+        service_state.mark_ready();
+        Self::new_with_state(
+            db_manager,
+            session_manager,
+            command_executor,
+            wasm_registry,
+            stream,
+            args,
+            service_state,
+        )
+    }
+
+    pub fn new_with_state(
+        db_manager: Arc<DatabaseManager>,
+        session_manager: Arc<SessionManager>,
+        command_executor: Arc<CommandExecutor>,
+        wasm_registry: Arc<WasmRegistry>,
+        stream: TcpStream,
+        args: Arc<ResolvedArgs>,
+        service_state: Arc<ServiceState>,
     ) -> Self {
         let certification = session_manager.acl_user_is_nopass("default");
         let db = db_manager.get_db(0);
@@ -36,6 +56,7 @@ impl Handler {
             args,
             transaction_db: None,
             metrics,
+            service_state,
         }
     }
 
@@ -88,7 +109,7 @@ impl Handler {
                 Err(error) => {
                     let message = error.to_string();
                     if message.starts_with("ERR Protocol error") {
-                        let response = Frame::Error(message).as_bytes();
+                        let response = self.encode_frame(&Frame::Error(message));
                         self.metrics.add_output_bytes(response.len());
                         let _ = self.connection.write_bytes(response).await;
                     }
@@ -97,15 +118,18 @@ impl Handler {
             };
             self.metrics.add_input_bytes(bytes.len());
 
-            if let Some(response_bytes) = self.try_handle_ping_fast_batch(bytes.as_slice()) {
+            if self.session.resp_version() == RespVersion::Resp2
+                && let Some(response_bytes) = self.try_handle_ping_fast_batch(bytes.as_slice())
+            {
                 self.metrics.add_output_bytes(response_bytes.len());
                 if !self.connection.write_bytes(response_bytes).await {
                     return;
                 }
                 continue;
             }
-            if let Some(response_bytes) =
-                self.try_handle_borrowed_fast_batch(bytes.as_slice()).await
+            if self.session.resp_version() == RespVersion::Resp2
+                && let Some(response_bytes) =
+                    self.try_handle_borrowed_fast_batch(bytes.as_slice()).await
             {
                 self.metrics.add_output_bytes(response_bytes.len());
                 if !self.connection.write_bytes(response_bytes).await {
@@ -120,7 +144,7 @@ impl Handler {
                 Err(e) => {
                     self.metrics.record_parse_error();
                     log::error!("Failed to parse multiple frames: {:?}", e);
-                    let response = Frame::Error(format!("ERR Protocol error: {e}")).as_bytes();
+                    let response = self.encode_frame(&Frame::Error(format!("ERR Protocol error: {e}")));
                     self.metrics.add_output_bytes(response.len());
                     let _ = self.connection.write_bytes(response).await;
                     return;
@@ -153,6 +177,7 @@ impl Handler {
                         && command_name != "DISCARD"
                         && command_name != "MULTI"
                         && command_name != "WATCH"
+                        && command_name != "RESET"
                     {
                         self.queue_transaction_frame(frame, &mut response_bytes);
                         continue;
@@ -164,7 +189,7 @@ impl Handler {
                     Err(e) => {
                         self.metrics.record_parse_error();
                         let frame = Frame::Error(e.to_string());
-                        response_bytes.extend(frame.as_bytes());
+                        response_bytes.extend(self.encode_frame(&frame));
                         continue;
                     }
                 };
@@ -174,10 +199,24 @@ impl Handler {
                     .set_last_cmd(effective_command_name.to_ascii_lowercase());
                 self.session_manager.update_session(&self.session);
 
-                match command {
-                    Command::Auth(_) => {}
-                    _ => {
-                        if !self.session.get_certification() {
+                if command.propagate_aof_if_needed() && !self.service_state.accepts_writes() {
+                    self.metrics.record_rejection("not_ready");
+                    self.metrics.record_command(
+                        command_name,
+                        1,
+                        Some("not_ready"),
+                        self.slow_command_threshold_us(),
+                    );
+                    response_bytes.extend(self.encode_frame(&Frame::Error(
+                        "TRYAGAIN OneDis is not ready to accept writes".to_string(),
+                    )));
+                    continue;
+                }
+
+                let auth_exempt = matches!(&command, Command::Auth(_))
+                    || matches!(effective_command_name.as_str(), "HELLO" | "RESET");
+                if !auth_exempt {
+                    if !self.session.get_certification() {
                             self.metrics.record_rejection("noauth");
                             self.metrics.record_command(
                                 command_name,
@@ -186,13 +225,13 @@ impl Handler {
                                 self.slow_command_threshold_us(),
                             );
                             let frame = Frame::Error("NOAUTH Authentication required.".to_string());
-                            response_bytes.extend(frame.as_bytes());
+                            response_bytes.extend(self.encode_frame(&frame));
                             continue;
-                        }
-                        if !self
-                            .session_manager
-                            .acl_allows(self.session.user(), &effective_command_name)
-                        {
+                    }
+                    if !self
+                        .session_manager
+                        .acl_allows(self.session.user(), &effective_command_name)
+                    {
                             self.metrics.record_rejection("noperm");
                             self.metrics.record_command(
                                 command_name,
@@ -204,25 +243,22 @@ impl Handler {
                                 "NOPERM this user has no permissions to run the '{}' command",
                                 effective_command_name.to_ascii_lowercase()
                             ));
-                            response_bytes.extend(frame.as_bytes());
-                            continue;
-                        }
+                        response_bytes.extend(self.encode_frame(&frame));
+                        continue;
                     }
-                };
+                }
 
-                if self
-                    .session_manager
-                    .subscription_count(self.session.get_id())
-                    > 0
+                if self.session.resp_version() == RespVersion::Resp2
+                    && self
+                        .session_manager
+                        .subscription_count(self.session.get_id())
+                        > 0
                     && !Self::command_allowed_while_subscribed(&effective_command_name)
                 {
-                    response_bytes.extend(
-                        Frame::Error(format!(
+                    response_bytes.extend(self.encode_frame(&Frame::Error(format!(
                             "ERR Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT are allowed in this context",
                             effective_command_name.to_ascii_lowercase()
-                        ))
-                        .as_bytes(),
-                    );
+                        ))));
                     continue;
                 }
 
@@ -235,9 +271,24 @@ impl Handler {
                             self.session.peer_addr(),
                         ),
                     );
-                    response_bytes.extend(Frame::Ok.as_bytes());
+                    response_bytes.extend(self.encode_frame(&Frame::Ok));
                     close_after_reply = true;
                     break;
+                }
+
+                // PUBLISH can synchronously enqueue a push on this same connection. Flush all
+                // earlier pipeline replies first so the push cannot overtake HELLO or a
+                // subscription acknowledgement.
+                if matches!(effective_command_name.as_str(), "PUBLISH" | "SPUBLISH")
+                    && !response_bytes.is_empty()
+                {
+                    let response = std::mem::take(&mut response_bytes);
+                    self.metrics.add_output_bytes(response.len());
+                    if !self.connection.write_bytes(response).await {
+                        return;
+                    }
+                    frames_since_flush = 0;
+                    last_flush = std::time::Instant::now();
                 }
 
                 let self_monitor_line = self
@@ -249,9 +300,38 @@ impl Handler {
                             self.session.get_current_db(),
                             self.session.peer_addr(),
                         )
-                    });
+                });
                 let started = std::time::Instant::now();
-                match self.apply_command_response_bytes(command).await {
+                let storage_failures_before =
+                    crate::store::health::storage_health().failure_count();
+                let is_mutating = command.propagate_aof_if_needed();
+                let mut command_result = if is_mutating {
+                    self.apply_command_response_bytes(command).await
+                } else {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(
+                            crate::resource_limits::active_resource_limits().readonly_timeout_ms,
+                        ),
+                        self.apply_command_response_bytes(command),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(Error::msg("ERR read-only command timed out")),
+                    }
+                };
+                let storage_health = crate::store::health::storage_health();
+                if storage_health.failure_count() != storage_failures_before {
+                    let reason = storage_health
+                        .last_error()
+                        .unwrap_or_else(|| "unknown kv-engine failure".to_string());
+                    self.service_state
+                        .mark_degraded(format!("storage degraded: {reason}"));
+                    command_result = Err(Error::msg(format!(
+                        "ERR storage operation failed: {reason}"
+                    )));
+                }
+                match command_result {
                     Ok(bytes) => {
                         self.metrics.record_command(
                             command_name,
@@ -259,11 +339,12 @@ impl Handler {
                             crate::observability::metrics::classify_error_response(&bytes),
                             self.slow_command_threshold_us(),
                         );
-                        if bytes.len() > Self::MAX_RESPONSE_BUFFER_BYTES {
-                            response_bytes.extend(
-                                Frame::Error("ERR response exceeds configured limit".to_string())
-                                    .as_bytes(),
-                            );
+                        if bytes.len()
+                            > crate::resource_limits::active_resource_limits().response_bytes
+                        {
+                            response_bytes.extend(self.encode_frame(&Frame::Error(
+                                "ERR response exceeds configured limit".to_string(),
+                            )));
                             close_after_reply = true;
                             break;
                         }
@@ -274,14 +355,14 @@ impl Handler {
                         }
                     }
                     Err(e) => {
+                        let error_bytes = self.encode_frame(&Frame::Error(e.to_string()));
                         self.metrics.record_command(
                             command_name,
                             crate::observability::metrics::elapsed_us(started),
-                            Some("internal_error"),
+                            crate::observability::metrics::classify_error_response(&error_bytes),
                             self.slow_command_threshold_us(),
                         );
-                        log::error!("Failed to receive; err = {:?}", e);
-                        response_bytes.extend(Frame::Error(e.to_string()).as_bytes());
+                        response_bytes.extend(error_bytes);
                     }
                 }
                 self.session_manager.update_session(&self.session);
@@ -325,6 +406,7 @@ impl Handler {
                 | "PUNSUBSCRIBE"
                 | "SUNSUBSCRIBE"
                 | "PING"
+                | "RESET"
                 | "QUIT"
         )
     }

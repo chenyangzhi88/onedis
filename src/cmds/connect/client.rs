@@ -98,54 +98,51 @@ impl Client {
             }
             "INFO" => {
                 self.require_no_args()?;
-                Ok(Frame::bulk_string(Self::placeholder_client_info()))
+                Ok(self.requires_connection())
             }
             "LIST" => {
                 self.parse_list_filter()?;
-                Ok(Frame::bulk_string(Self::placeholder_client_info()))
+                Ok(self.requires_connection())
             }
             "SETINFO" => {
                 self.parse_setinfo()?;
-                Ok(Frame::Ok)
+                Ok(self.requires_connection())
             }
             "SETNAME" => {
                 self.parse_setname()?;
-                Ok(Frame::Ok)
+                Ok(self.requires_connection())
             }
             "GETNAME" => {
                 self.require_no_args()?;
-                Ok(Frame::Null)
+                Ok(self.requires_connection())
             }
             "ID" => {
                 self.require_no_args()?;
-                Ok(Frame::Integer(0))
+                Ok(self.requires_connection())
             }
             "GETREDIR" => {
                 self.require_no_args()?;
-                Ok(Frame::Integer(-1))
+                Ok(self.requires_connection())
             }
             "NO-EVICT" | "NO-TOUCH" => {
                 self.parse_on_off()?;
-                Ok(Frame::Ok)
+                Ok(self.requires_connection())
             }
             "TRACKINGINFO" => {
                 self.require_no_args()?;
-                Ok(Self::tracking_info())
+                Ok(self.requires_connection())
             }
             "UNBLOCK" => {
                 self.parse_unblock()?;
-                Ok(Frame::Integer(0))
+                Ok(self.requires_connection())
             }
-            "KILL" => match self.parse_kill()? {
-                ParsedKill::LegacyAddress(_) => Ok(Frame::Error("ERR No such client".to_string())),
-                ParsedKill::Filter(_) => Ok(Frame::Integer(0)),
-            },
-            "TRACKING" if self.args.len() == 1 && self.args[0].eq_ignore_ascii_case("OFF") => {
-                Ok(Frame::Ok)
+            "KILL" => {
+                self.parse_kill()?;
+                Ok(self.requires_connection())
             }
             "UNPAUSE" => {
                 self.require_no_args()?;
-                Ok(Frame::Ok)
+                Ok(self.unsupported())
             }
             "CACHING" | "PAUSE" | "REPLY" | "TRACKING" => {
                 self.validate_unsupported_syntax()?;
@@ -210,6 +207,14 @@ impl Client {
             "ID" => {
                 self.require_no_args()?;
                 Ok(Frame::Integer(handler.get_session().get_id() as i64))
+            }
+            "GETREDIR" => {
+                self.require_no_args()?;
+                Ok(Frame::Integer(-1))
+            }
+            "TRACKINGINFO" => {
+                self.require_no_args()?;
+                Ok(Self::tracking_info())
             }
             "NO-EVICT" => {
                 let enabled = self.parse_on_off()?;
@@ -470,10 +475,6 @@ impl Client {
         ])
     }
 
-    fn placeholder_client_info() -> &'static str {
-        "id=0 addr=127.0.0.1:0 laddr=127.0.0.1:0 fd=-1 name= age=0 idle=0 flags=N db=0 sub=0 psub=0 ssub=0 multi=-1 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client user=default redir=-1 resp=2 lib-name= lib-ver=\r\n"
-    }
-
     fn wrong_arity(&self) -> Error {
         Error::msg(format!(
             "ERR wrong number of arguments for 'client|{}' command",
@@ -484,6 +485,13 @@ impl Client {
     fn unsupported(&self) -> Frame {
         Frame::Error(format!(
             "ERR CLIENT {} is not supported by onedis",
+            self.subcommand
+        ))
+    }
+
+    fn requires_connection(&self) -> Frame {
+        Frame::Error(format!(
+            "ERR CLIENT {} requires a live client connection",
             self.subcommand
         ))
     }

@@ -1,3 +1,4 @@
+use anyhow::{Context, Error};
 use clap::Parser;
 use common::types::options::{FileConfig, OnedisServerOptions};
 use std::path::Path;
@@ -52,6 +53,10 @@ pub struct Args {
     /// 慢命令阈值，单位毫秒
     #[arg(long)]
     pub slow_command_threshold_ms: Option<u64>,
+
+    /// 优雅关闭的最长等待时间，单位毫秒
+    #[arg(long)]
+    pub shutdown_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +73,7 @@ pub struct ResolvedArgs {
     pub metrics_bind: String,
     pub metrics_port: u16,
     pub slow_command_threshold_ms: u64,
+    pub shutdown_timeout_ms: u64,
 }
 
 impl Args {
@@ -76,15 +82,18 @@ impl Args {
     /// 1. 解析命令行参数
     /// 2. 尝试从配置文件加载默认配置
     /// 3. 用命令行显式覆盖配置文件
-    pub fn load() -> ResolvedArgs {
-        let args = Args::parse();
+    pub fn load() -> Result<ResolvedArgs, Error> {
+        Self::load_from(Args::parse())
+    }
+
+    fn load_from(args: Args) -> Result<ResolvedArgs, Error> {
         let config = parse_config_file(&args.config)
-            .map(FileConfig::into_onedis_server_options)
-            .unwrap_or_else(|_| OnedisServerOptions::default());
+            .with_context(|| format!("failed to load OneDis config {}", args.config))?
+            .into_onedis_server_options();
         args.resolve(config)
     }
 
-    fn resolve(self, mut config: OnedisServerOptions) -> ResolvedArgs {
+    fn resolve(self, mut config: OnedisServerOptions) -> Result<ResolvedArgs, Error> {
         if let Some(requirepass) = self.requirepass {
             config.requirepass = Some(requirepass);
         }
@@ -107,7 +116,24 @@ impl Args {
             config.maxclients = maxclients;
         }
 
-        ResolvedArgs {
+        if config.databases == 0 || config.databases > u16::MAX as usize {
+            return Err(Error::msg(format!(
+                "invalid databases value {}; expected 1..={}",
+                config.databases,
+                u16::MAX
+            )));
+        }
+        if !config.hz.is_finite() || config.hz <= 0.0 || config.hz > 1_000.0 {
+            return Err(Error::msg(format!(
+                "invalid hz value {}; expected a finite value in (0, 1000]",
+                config.hz
+            )));
+        }
+        if config.bind.trim().is_empty() {
+            return Err(Error::msg("invalid empty bind address"));
+        }
+
+        Ok(ResolvedArgs {
             config: self.config,
             requirepass: config.requirepass,
             bind: config.bind,
@@ -120,7 +146,8 @@ impl Args {
             metrics_bind: self.metrics_bind.unwrap_or_else(|| "0.0.0.0".to_string()),
             metrics_port: self.metrics_port.unwrap_or(9121),
             slow_command_threshold_ms: self.slow_command_threshold_ms.unwrap_or(10),
-        }
+            shutdown_timeout_ms: self.shutdown_timeout_ms.unwrap_or(30_000).max(1),
+        })
     }
 }
 
@@ -177,9 +204,10 @@ mod tests {
             metrics_port: Some(19121),
             disable_observability: true,
             slow_command_threshold_ms: Some(25),
+            shutdown_timeout_ms: None,
         };
 
-        let resolved = args.resolve(OnedisServerOptions::default());
+        let resolved = args.resolve(OnedisServerOptions::default()).unwrap();
         assert_eq!(resolved.requirepass.as_deref(), Some("cli-pass"));
         assert_eq!(resolved.bind, "0.0.0.0");
         assert_eq!(resolved.databases, 4);
@@ -191,5 +219,43 @@ mod tests {
         assert_eq!(resolved.metrics_bind, "127.0.0.1");
         assert_eq!(resolved.metrics_port, 19121);
         assert_eq!(resolved.slow_command_threshold_ms, 25);
+        assert_eq!(resolved.shutdown_timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn invalid_config_and_ranges_fail_closed() {
+        let missing = Args {
+            config: "/definitely/missing/onedis.toml".to_string(),
+            requirepass: None,
+            bind: None,
+            databases: None,
+            hz: None,
+            port: None,
+            loglevel: None,
+            maxclients: None,
+            metrics_bind: None,
+            metrics_port: None,
+            disable_observability: false,
+            slow_command_threshold_ms: None,
+            shutdown_timeout_ms: None,
+        };
+        assert!(Args::load_from(missing).is_err());
+
+        let invalid = Args {
+            config: "unused".to_string(),
+            requirepass: None,
+            bind: None,
+            databases: Some(0),
+            hz: Some(f64::NAN),
+            port: None,
+            loglevel: None,
+            maxclients: None,
+            metrics_bind: None,
+            metrics_port: None,
+            disable_observability: false,
+            slow_command_threshold_ms: None,
+            shutdown_timeout_ms: None,
+        };
+        assert!(invalid.resolve(OnedisServerOptions::default()).is_err());
     }
 }

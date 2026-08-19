@@ -21,18 +21,18 @@ impl Handler {
             notified.as_mut().enable();
             let frame = self.try_stream_read_once(&command).await?;
             if !matches!(frame, Frame::Null) {
-                return Ok(frame.as_bytes());
+                return Ok(self.encode_frame(&frame));
             }
             blocked.get_or_insert_with(|| self.client_control.begin_blocking());
             match deadline {
                 Some(deadline) => {
                     if Instant::now() >= deadline {
-                        return Ok(Frame::Null.as_bytes());
+                        return Ok(self.encode_frame(&Frame::Null));
                     }
                     tokio::select! {
                         result = tokio::time::timeout_at(deadline, notified.as_mut()) => {
                             if result.is_err() {
-                                return Ok(Frame::Null.as_bytes());
+                                return Ok(self.encode_frame(&Frame::Null));
                             }
                         }
                         result = self.connection.wait_read_closed() => {

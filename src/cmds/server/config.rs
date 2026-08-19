@@ -138,6 +138,7 @@ mod tests {
             metrics_bind: "127.0.0.1".to_string(),
             metrics_port: 0,
             slow_command_threshold_ms: 10,
+            shutdown_timeout_ms: 30_000,
         }
     }
 

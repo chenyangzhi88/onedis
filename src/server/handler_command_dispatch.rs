@@ -1,5 +1,31 @@
 impl Handler {
+    fn reset_connection_context(&mut self) -> Result<Frame, Error> {
+        self.clear_transaction();
+        self.session_manager
+            .reset_connection_state(self.session.get_id());
+        self.change_db(0)?;
+        self.session.set_name(None);
+        self.session.set_library_name(None);
+        self.session.set_library_version(None);
+        self.session.set_no_evict(false);
+        self.session.set_no_touch(false);
+        self.session.set_resp_version(RespVersion::Resp2);
+        self.session.set_user("default".to_string());
+        self.session.set_certification(
+            self.session_manager.acl_user_is_nopass("default"),
+        );
+        self.session_manager.update_session(&self.session);
+        Ok(Frame::SimpleString("RESET".to_string()))
+    }
+
     async fn apply_command_response_bytes(&mut self, command: Command) -> Result<Vec<u8>, Error> {
+        if let Command::Unknown(unknown) = &command
+            && unknown.command_name().eq_ignore_ascii_case("HELLO")
+        {
+            let args = unknown.args().to_vec();
+            let frame = self.apply_hello(&args)?;
+            return Ok(self.encode_frame(&frame));
+        }
         if self.session_manager.has_monitors() {
             self.session_manager.broadcast_monitor(
                 self.session.get_id(),
@@ -14,14 +40,15 @@ impl Handler {
             return Ok(bytes);
         }
         let command = match command {
-            Command::Echo(echo) => return Ok(echo.into_response_bytes()),
+            Command::Echo(echo) if self.session.resp_version() == RespVersion::Resp2 => {
+                return Ok(echo.into_response_bytes());
+            }
+            Command::Echo(echo) => return Ok(self.encode_frame(&echo.apply()?)),
             command => command,
         };
         if let Command::Exec(_) = command {
-            return self
-                .execute_transaction_async()
-                .await
-                .map(|frame| frame.as_bytes());
+            let frame = self.execute_transaction_async().await?;
+            return Ok(self.encode_frame(&frame));
         }
         if Self::is_blocking_list_command(&command) {
             return self.apply_blocking_list_command(command).await;
@@ -35,20 +62,26 @@ impl Handler {
         if let Command::Wasm(wasm) = command {
             let registry = self.wasm_registry.clone();
             let db = self.session.get_db().clone();
+            let protocol = self.session.resp_version();
             return self
                 .command_executor
-                .execute(async move { wasm.apply(&registry, db).await.as_bytes() })
+                .execute(async move {
+                    wasm.apply(&registry, db)
+                        .await
+                        .as_bytes_for_protocol(protocol)
+                })
                 .await;
         }
         if matches!(command, Command::Lrange(_)) {
             let db = self.session.get_db().clone();
+            let protocol = self.session.resp_version();
             return self
                 .command_executor
                 .execute(
                     async move {
                         crate::command_dispatch::handle_command_async(&db, command)
                             .await
-                            .map(|f| f.as_bytes())
+                            .map(|f| f.as_bytes_for_protocol(protocol))
                     },
                 )
                 .await?;
@@ -67,19 +100,19 @@ impl Handler {
             if should_notify_stream && !matches!(frame, Frame::Error(_)) {
                 self.db_manager.notify_stream_waiters();
             }
-            return Ok(frame.as_bytes());
+            return Ok(self.encode_frame(&frame));
         }
         if let Command::Move(r#move) = &command
             && self.args.databases <= r#move.get_db_index()
         {
-            return Ok(Frame::Error("ERR DB index is out of range".to_string()).as_bytes());
+            return Ok(self.encode_frame(&Frame::Error("ERR DB index is out of range".to_string())));
         }
         if let Command::Copy(copy) = &command
             && copy
                 .db_index()
                 .is_some_and(|db_index| self.args.databases <= db_index)
         {
-            return Ok(Frame::Error("ERR DB index is out of range".to_string()).as_bytes());
+            return Ok(self.encode_frame(&Frame::Error("ERR DB index is out of range".to_string())));
         }
 
         let db = self.session.get_db().clone();
@@ -101,7 +134,94 @@ impl Handler {
         if should_notify_stream && !matches!(frame, Frame::Error(_)) {
             self.db_manager.notify_stream_waiters();
         }
-        Ok(frame.as_bytes())
+        Ok(self.encode_frame(&frame))
+    }
+
+    fn apply_hello(&mut self, args: &[String]) -> Result<Frame, Error> {
+        let mut index = 0usize;
+        let requested = if let Some(value) = args.first() {
+            match value.as_str() {
+                "2" => {
+                    index = 1;
+                    Some(RespVersion::Resp2)
+                }
+                "3" => {
+                    index = 1;
+                    Some(RespVersion::Resp3)
+                }
+                _ if value.eq_ignore_ascii_case("AUTH") || value.eq_ignore_ascii_case("SETNAME") => None,
+                _ => return Err(Error::msg("NOPROTO unsupported protocol version")),
+            }
+        } else {
+            None
+        };
+
+        let mut auth = None;
+        let mut setname = None;
+        while index < args.len() {
+            match args[index].to_ascii_uppercase().as_str() {
+                "AUTH" => {
+                    if index + 2 >= args.len() || auth.is_some() {
+                        return Err(Error::msg("ERR syntax error"));
+                    }
+                    auth = Some((args[index + 1].as_str(), args[index + 2].as_str()));
+                    index += 3;
+                }
+                "SETNAME" => {
+                    if index + 1 >= args.len() || setname.is_some() {
+                        return Err(Error::msg("ERR syntax error"));
+                    }
+                    setname = Some(args[index + 1].as_str());
+                    index += 2;
+                }
+                _ => return Err(Error::msg("ERR syntax error")),
+            }
+        }
+        if let Some((username, password)) = auth {
+            self.login(Some(username), password)?;
+        } else if !self.session.get_certification() {
+            return Err(Error::msg("NOAUTH HELLO must be called with the client already authenticated, otherwise the HELLO AUTH <user> <pass> option can be used"));
+        }
+        if let Some(name) = setname {
+            if !name.bytes().all(|byte| (b'!'..=b'~').contains(&byte)) {
+                return Err(Error::msg("ERR Client names cannot contain spaces, newlines or special characters."));
+            }
+            self.set_client_name((!name.is_empty()).then(|| name.to_string()));
+        }
+        if let Some(protocol) = requested {
+            self.session.set_resp_version(protocol);
+        }
+        self.session_manager.update_session(&self.session);
+
+        let fields = vec![
+            ("server", Frame::bulk_string("onedis")),
+            ("version", Frame::bulk_string(env!("CARGO_PKG_VERSION"))),
+            (
+                "proto",
+                Frame::Integer(match self.session.resp_version() {
+                    RespVersion::Resp2 => 2,
+                    RespVersion::Resp3 => 3,
+                }),
+            ),
+            ("id", Frame::Integer(self.session.get_id() as i64)),
+            ("mode", Frame::bulk_string("standalone")),
+            ("role", Frame::bulk_string("standalone")),
+            ("modules", Frame::Array(Vec::new())),
+        ];
+        Ok(match self.session.resp_version() {
+            RespVersion::Resp3 => Frame::Map(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (Frame::bulk_string(key), value))
+                    .collect(),
+            ),
+            RespVersion::Resp2 => Frame::Array(
+                fields
+                    .into_iter()
+                    .flat_map(|(key, value)| [Frame::bulk_string(key), value])
+                    .collect(),
+            ),
+        })
     }
 
     /// 执行命令（直接调用 Db，无 channel 开销）

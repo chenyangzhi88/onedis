@@ -1,6 +1,4 @@
 impl Handler {
-    const MAX_SUBSCRIPTIONS_PER_CLIENT: usize = 10_000;
-
     async fn try_apply_pubsub_or_monitor(
         &mut self,
         command: &Command,
@@ -11,37 +9,43 @@ impl Handler {
         let name = unknown.command_name().to_ascii_uppercase();
         let args = unknown.args();
         match name.as_str() {
+            "RESET" => {
+                if !args.is_empty() {
+                    return Ok(Some(self.encode_frame(&Frame::Error(
+                        "ERR wrong number of arguments for 'reset' command".to_string(),
+                    ))));
+                }
+                let frame = self.reset_connection_context()?;
+                Ok(Some(self.encode_frame(&frame)))
+            }
             "MONITOR" => {
                 let writer = self.connection.shared_writer();
                 self.session_manager
                     .add_monitor(self.session.get_id(), writer);
-                Ok(Some(Frame::Ok.as_bytes()))
+                Ok(Some(self.encode_frame(&Frame::Ok)))
             }
-            "ACL" => Ok(Some(self.apply_acl(args).as_bytes())),
+            "ACL" => {
+                let frame = self.apply_acl(args);
+                Ok(Some(self.encode_frame(&frame)))
+            }
             "PUBLISH" | "SPUBLISH" => {
                 if args.len() != 2 {
-                    return Ok(Some(
-                        Frame::Error(format!(
-                            "ERR wrong number of arguments for '{}' command",
-                            name.to_ascii_lowercase()
-                        ))
-                        .as_bytes(),
-                    ));
+                    return Ok(Some(self.encode_frame(&Frame::Error(format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        name.to_ascii_lowercase()
+                    )))));
                 }
                 let delivered = self
                     .session_manager
                     .publish(&args[0], &args[1], name == "SPUBLISH");
-                Ok(Some(Frame::Integer(delivered as i64).as_bytes()))
+                Ok(Some(self.encode_frame(&Frame::Integer(delivered as i64))))
             }
             "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" => {
                 if args.is_empty() {
-                    return Ok(Some(
-                        Frame::Error(format!(
-                            "ERR wrong number of arguments for '{}' command",
-                            name.to_ascii_lowercase()
-                        ))
-                        .as_bytes(),
-                    ));
+                    return Ok(Some(self.encode_frame(&Frame::Error(format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        name.to_ascii_lowercase()
+                    )))));
                 }
                 let current_count = self
                     .session_manager
@@ -57,35 +61,38 @@ impl Handler {
                     args,
                     kind,
                 );
-                if current_count.saturating_add(additional) > Self::MAX_SUBSCRIPTIONS_PER_CLIENT {
-                    return Ok(Some(
-                        Frame::Error("ERR maximum number of subscriptions reached".to_string())
-                            .as_bytes(),
-                    ));
+                let subscription_limit =
+                    crate::resource_limits::resource_limits()?.subscriptions_per_client;
+                if current_count.saturating_add(additional) > subscription_limit {
+                    return Ok(Some(self.encode_frame(&Frame::Error(
+                        "ERR maximum number of subscriptions reached".to_string(),
+                    ))));
                 }
                 let writer = self.connection.shared_writer();
                 let mut frames = Vec::new();
                 for channel in args {
                     match name.as_str() {
-                        "SUBSCRIBE" => self.session_manager.register_channel(
+                        "SUBSCRIBE" => self.session_manager.register_channel_with_protocol(
                             channel,
                             self.session.get_id(),
                             writer.clone(),
+                            self.session.resp_version(),
                         ),
-                        "PSUBSCRIBE" => self.session_manager.register_pattern(
+                        "PSUBSCRIBE" => self.session_manager.register_pattern_with_protocol(
                             channel,
                             self.session.get_id(),
                             writer.clone(),
+                            self.session.resp_version(),
                         ),
-                        "SSUBSCRIBE" => self.session_manager.register_shard_channel(
+                        "SSUBSCRIBE" => self.session_manager.register_shard_channel_with_protocol(
                             channel,
                             self.session.get_id(),
                             writer.clone(),
+                            self.session.resp_version(),
                         ),
                         _ => {}
                     }
-                    frames.extend(
-                        Frame::Array(vec![
+                    frames.extend(self.encode_pubsub_frame(vec![
                             Frame::bulk_string(name.to_ascii_lowercase()),
                             Frame::bulk_string(channel.clone()),
                             Frame::Integer(
@@ -93,9 +100,7 @@ impl Handler {
                                     .subscription_ack_count(self.session.get_id(), kind)
                                     as i64,
                             ),
-                        ])
-                        .as_bytes(),
-                    );
+                        ]));
                 }
                 Ok(Some(frames))
             }
@@ -136,8 +141,7 @@ impl Handler {
                             .unregister_shard_channel(&channel, self.session.get_id()),
                         _ => {}
                     }
-                    frames.extend(
-                        Frame::Array(vec![
+                    frames.extend(self.encode_pubsub_frame(vec![
                             Frame::bulk_string(name.to_ascii_lowercase()),
                             Frame::bulk_string(channel),
                             Frame::Integer(
@@ -145,13 +149,10 @@ impl Handler {
                                     .subscription_ack_count(self.session.get_id(), kind)
                                     as i64,
                             ),
-                        ])
-                        .as_bytes(),
-                    );
+                        ]));
                 }
                 if frames.is_empty() {
-                    frames.extend(
-                        Frame::Array(vec![
+                    frames.extend(self.encode_pubsub_frame(vec![
                             Frame::bulk_string(name.to_ascii_lowercase()),
                             Frame::Null,
                             Frame::Integer(
@@ -159,15 +160,21 @@ impl Handler {
                                     .subscription_ack_count(self.session.get_id(), kind)
                                     as i64,
                             ),
-                        ])
-                        .as_bytes(),
-                    );
+                        ]));
                 }
                 Ok(Some(frames))
             }
-            "PUBSUB" => Ok(Some(self.apply_pubsub_introspection(args).as_bytes())),
+            "PUBSUB" => Ok(Some(self.encode_frame(&self.apply_pubsub_introspection(args)))),
             _ => Ok(None),
         }
+    }
+
+    fn encode_pubsub_frame(&self, values: Vec<Frame>) -> Vec<u8> {
+        let frame = match self.session.resp_version() {
+            RespVersion::Resp2 => Frame::Array(values),
+            RespVersion::Resp3 => Frame::Push(values),
+        };
+        self.encode_frame(&frame)
     }
 
     fn apply_acl(&mut self, args: &[String]) -> Frame {

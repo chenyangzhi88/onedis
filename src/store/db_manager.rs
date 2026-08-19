@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::observability::metrics::global_metrics;
+use anyhow::{Context, Error};
 
 use tokio::sync::Notify;
 
@@ -86,9 +87,12 @@ impl DatabaseManager {
         self.fulltext_shutdown.store(true, Ordering::Release);
         self.version_scan_shutdown.store(true, Ordering::Release);
         self.ttl_manager.shutdown();
+        self.list_notify.notify_waiters();
+        self.zset_notify.notify_waiters();
+        self.stream_notify.notify_waiters();
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self, timeout: Duration) -> Result<(), Error> {
         self.request_shutdown();
         let tasks = {
             let mut tasks = self
@@ -97,11 +101,9 @@ impl DatabaseManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             std::mem::take(&mut *tasks)
         };
+        let deadline = tokio::time::Instant::now() + timeout;
         for mut task in tasks {
-            if tokio::time::timeout(Duration::from_secs(1), &mut task)
-                .await
-                .is_err()
-            {
+            if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
                 task.abort();
                 let _ = task.await;
             }
@@ -109,17 +111,36 @@ impl DatabaseManager {
         for db in &self.dbs {
             db.shutdown_fulltext_runtime();
         }
+        self.store
+            .sync_wal()
+            .map_err(|err| Error::msg(format!("failed to checkpoint kv-engine WAL: {err}")))?;
+        Ok(())
     }
 
     pub async fn new_async(args: Arc<ResolvedArgs>) -> Self {
+        Self::try_new_async(args)
+            .await
+            .expect("failed to initialize OneDis database manager")
+    }
+
+    pub async fn try_new_async(args: Arc<ResolvedArgs>) -> Result<Self, Error> {
         let options = FileConfig::load_from_path(std::path::Path::new(&args.config))
-            .and_then(FileConfig::into_options)
-            .unwrap_or_else(|_| Options::default());
-        std::fs::create_dir_all(&options.db_path)
-            .expect("failed to create onedis kv_engine db dir");
-        std::fs::create_dir_all(&options.wal_dir)
-            .expect("failed to create onedis kv_engine wal dir");
-        let store = KvStore::open(options.clone());
+            .with_context(|| format!("failed to load kv-engine config {}", args.config))?
+            .into_options()
+            .with_context(|| format!("invalid kv-engine config {}", args.config))?;
+        std::fs::create_dir_all(&options.db_path).with_context(|| {
+            format!(
+                "failed to create kv-engine db dir {}",
+                options.db_path.display()
+            )
+        })?;
+        std::fs::create_dir_all(&options.wal_dir).with_context(|| {
+            format!(
+                "failed to create kv-engine WAL dir {}",
+                options.wal_dir.display()
+            )
+        })?;
+        let store = KvStore::try_open(options.clone())?;
 
         let version_counter = Arc::new(VersionCounter::new());
         let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
@@ -137,7 +158,7 @@ impl DatabaseManager {
 
         let mut dbs = Vec::new();
         for id in 0..args.databases {
-            let db = Arc::new(Db::new_with_mutation_tracker_and_vector_runtimes(
+            let db = Arc::new(Db::try_new_with_mutation_tracker_and_vector_runtimes(
                 id as u16,
                 store.clone(),
                 version_counter.clone(),
@@ -145,7 +166,7 @@ impl DatabaseManager {
                 mutation_tracker.clone(),
                 vector_runtimes.clone(),
                 counter_cache.clone(),
-            ));
+            )?);
             dbs.push(db);
         }
 
@@ -241,7 +262,7 @@ impl DatabaseManager {
         // Start background TTL sweeper
         let ttl_task = ttl_manager.start_sweeper();
 
-        DatabaseManager {
+        Ok(DatabaseManager {
             dbs,
             store,
             options,
@@ -258,7 +279,7 @@ impl DatabaseManager {
                 version_scan_task,
                 ttl_task,
             ]),
-        }
+        })
     }
 
     pub fn get_db(&self, idx: usize) -> Arc<Db> {

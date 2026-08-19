@@ -50,7 +50,21 @@ impl Echo {
             Frame::SimpleString(text) | Frame::Error(text) => Some(text.into_bytes()),
             Frame::Integer(value) => Some(value.to_string().into_bytes()),
             Frame::Ok => Some(b"OK".to_vec()),
-            Frame::Null | Frame::Array(_) => None,
+            Frame::Boolean(value) => Some(if value {
+                b"true".to_vec()
+            } else {
+                b"false".to_vec()
+            }),
+            Frame::Double(value) => Some(value.to_string().into_bytes()),
+            Frame::BigNumber(value) => Some(value.into_bytes()),
+            Frame::VerbatimString { data, .. } => Some(data),
+            Frame::Null
+            | Frame::Array(_)
+            | Frame::BlobError(_)
+            | Frame::Map(_)
+            | Frame::Set(_)
+            | Frame::Attribute { .. }
+            | Frame::Push(_) => None,
         }
     }
 

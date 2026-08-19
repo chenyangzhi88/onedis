@@ -371,6 +371,30 @@ pub fn handle_command_async(db: &Db, command: Command) -> CommandFuture<'_> {
         Command::JsonType(json_type) => {
             box_command(json_type, db, |json_type, db| json_type.apply_async(db))
         }
+        Command::JsonMGet(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::JsonMSet(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::JsonNumIncrBy(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::JsonStrAppend(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::JsonArrAppend(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::JsonArrInsert(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::JsonArrPop(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::JsonObjKeys(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
         Command::FtCreate(ft_create) => {
             box_command(ft_create, db, |ft_create, db| ft_create.apply_async(db))
         }
@@ -450,6 +474,10 @@ pub fn handle_command_async(db: &Db, command: Command) -> CommandFuture<'_> {
             vrandmember.apply_async(db)
         }),
         Command::VLinks(vlinks) => box_command(vlinks, db, |vlinks, db| vlinks.apply_async(db)),
+        Command::VIsMember(command) => {
+            box_command(command, db, |command, db| command.apply_async(db))
+        }
+        Command::VRange(command) => box_command(command, db, |command, db| command.apply_async(db)),
         Command::Copy(copy) => box_command(copy, db, |copy, db| async move {
             let copied = db
                 .copy_key_to_db_async(
@@ -472,8 +500,18 @@ pub fn handle_command_async(db: &Db, command: Command) -> CommandFuture<'_> {
             Ok(Frame::Ok)
         }),
         Command::Info(info) => box_command(info, db, |info, db| info.apply_async(db)),
-        Command::Save(_) => box_command((), db, |(), _| async { Ok(Frame::Ok) }),
-        Command::Bgsave(_) => box_command((), db, |(), _| async { Ok(Frame::Ok) }),
+        Command::Save(_) => box_command((), db, |(), _| async {
+            Ok(Frame::Error(
+                "ERR SAVE is unsupported; durability and checkpoints are managed by kv-engine"
+                    .to_string(),
+            ))
+        }),
+        Command::Bgsave(_) => box_command((), db, |(), _| async {
+            Ok(Frame::Error(
+                "ERR BGSAVE is unsupported; durability and checkpoints are managed by kv-engine"
+                    .to_string(),
+            ))
+        }),
         other => box_command(
             other,
             db,

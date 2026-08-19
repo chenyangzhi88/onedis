@@ -76,6 +76,34 @@ pub(in crate::store::db) fn json_type_name(value: &JsonValue) -> &'static str {
     }
 }
 
+pub(in crate::store::db) fn validate_json_value_limits(
+    value: &JsonValue,
+    encoded_bytes: usize,
+) -> Result<(), Error> {
+    let limits = crate::resource_limits::resource_limits()?;
+    if encoded_bytes > limits.json_document_bytes {
+        return Err(Error::msg(
+            "ERR JSON document exceeds configured byte limit",
+        ));
+    }
+    let mut nodes = 0usize;
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        nodes = nodes.saturating_add(1);
+        if nodes > limits.json_nodes {
+            return Err(Error::msg(
+                "ERR JSON document exceeds configured node limit",
+            ));
+        }
+        match value {
+            JsonValue::Array(values) => pending.extend(values),
+            JsonValue::Object(values) => pending.extend(values.values()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(in crate::store::db) fn json_node_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + JSON_NODE_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));

@@ -24,7 +24,10 @@ use crate::{
             hstrlen::Hstrlen, httl::Httl, hvals::Hvals,
         },
         hll::{pfadd::Pfadd, pfcount::Pfcount, pfmerge::Pfmerge},
-        json::{JsonDel, JsonGet, JsonSet, JsonType},
+        json::{
+            JsonArrAppend, JsonArrInsert, JsonArrPop, JsonDel, JsonGet, JsonMGet, JsonMSet,
+            JsonNumIncrBy, JsonObjKeys, JsonSet, JsonStrAppend, JsonType,
+        },
         key::{
             copy::Copy, del::Del, exists::Exists, expire::Expire, expireat::ExpireAt,
             expiretime::ExpireTime, keys::Keys, r#move::Move, persist::Persist, pexpire::Pexpire,
@@ -78,7 +81,8 @@ use crate::{
         transaction::{discard::Discard, exec::Exec, multi::Multi, unwatch::Unwatch, watch::Watch},
         unknown::Unknown,
         vector::{
-            VAdd, VCard, VDim, VEmb, VGetAttr, VInfo, VLinks, VRandMember, VRem, VSetAttr, VSim,
+            VAdd, VCard, VDim, VEmb, VGetAttr, VInfo, VIsMember, VLinks, VRandMember, VRange, VRem,
+            VSetAttr, VSim,
         },
         wasm::WasmCommand,
     },
@@ -86,11 +90,14 @@ use crate::{
 };
 
 mod aof;
+mod capabilities;
 pub mod dispatch;
 mod kind;
 mod names;
 mod parse;
 
+pub(crate) use capabilities::command_introspection_response;
+pub use capabilities::{command_capabilities, command_capability};
 pub use kind::Command;
 
 #[cfg(test)]

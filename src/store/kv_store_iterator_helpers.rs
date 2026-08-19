@@ -39,12 +39,19 @@ where
     F: FnMut(&[u8], &[u8]) -> bool,
 {
     let mut seen = 0usize;
-    while let Some(batch) = cursor
-        .next_batch()
-        .expect("failed to advance kv_engine scan cursor")
-    {
-        if !visit_scan_batch(&batch, limit, &mut seen, &mut visitor) {
-            break;
+    loop {
+        match cursor.next_batch() {
+            Ok(Some(batch)) => {
+                if !visit_scan_batch(&batch, limit, &mut seen, &mut visitor) {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                crate::store::health::storage_health()
+                    .record_failure("advance scan cursor", error);
+                break;
+            }
         }
     }
     seen

@@ -9,7 +9,14 @@ pub(crate) const MAX_FRAME_NODES: usize = MAX_ARRAY_ELEMENTS + 1;
 /*
  * 命令帧枚举
  */
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RespVersion {
+    #[default]
+    Resp2,
+    Resp3,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
     Ok,
     Integer(i64),
@@ -18,6 +25,21 @@ pub enum Frame {
     BulkString(Vec<u8>),
     Error(String),
     Null,
+    Boolean(bool),
+    Double(f64),
+    BigNumber(String),
+    BlobError(Vec<u8>),
+    VerbatimString {
+        format: [u8; 3],
+        data: Vec<u8>,
+    },
+    Map(Vec<(Frame, Frame)>),
+    Set(Vec<Frame>),
+    Attribute {
+        attributes: Vec<(Frame, Frame)>,
+        data: Box<Frame>,
+    },
+    Push(Vec<Frame>),
 }
 
 mod accessors;

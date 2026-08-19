@@ -244,3 +244,81 @@ impl VLinks {
         )
     }
 }
+
+impl VIsMember {
+    pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
+        if frame.arg_len() != 3 {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'vismember' command",
+            ));
+        }
+        Ok(Self {
+            key: vector_key_arg(&frame, 1)?,
+            element: arg(&frame, 2, "ERR invalid vector element")?,
+        })
+    }
+
+    pub fn apply(self, db: &Db) -> Result<Frame, Error> {
+        Ok(Frame::Integer(
+            db.vector_element(&self.key, &self.element)?.is_some() as i64,
+        ))
+    }
+
+    pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
+        Ok(Frame::Integer(
+            db.vector_element_async(&self.key, &self.element)
+                .await?
+                .is_some() as i64,
+        ))
+    }
+}
+
+impl VRange {
+    const DEFAULT_COUNT: usize = 10;
+    const MAX_COUNT: usize = 10_000;
+
+    pub fn parse_from_frame(frame: Frame) -> Result<Self, Error> {
+        if !(4..=5).contains(&frame.arg_len()) {
+            return Err(Error::msg(
+                "ERR wrong number of arguments for 'vrange' command",
+            ));
+        }
+        let count = if frame.arg_len() == 5 {
+            parse_usize_arg(&frame, 4, "ERR invalid vector range count")?
+        } else {
+            Self::DEFAULT_COUNT
+        };
+        if count > Self::MAX_COUNT {
+            return Err(Error::msg("ERR count exceeds configured response limit"));
+        }
+        Ok(Self {
+            key: vector_key_arg(&frame, 1)?,
+            start: arg(&frame, 2, "ERR invalid vector range start")?,
+            end: arg(&frame, 3, "ERR invalid vector range end")?,
+            count,
+        })
+    }
+
+    fn select(self, ids: Vec<String>) -> Frame {
+        let start = self.start;
+        let end = self.end;
+        Frame::Array(
+            ids.into_iter()
+                .filter(|id| start == "-" || id >= &start)
+                .filter(|id| end == "+" || id <= &end)
+                .take(self.count)
+                .map(Frame::bulk_string)
+                .collect(),
+        )
+    }
+
+    pub fn apply(self, db: &Db) -> Result<Frame, Error> {
+        let ids = db.vector_ids(&self.key)?;
+        Ok(self.select(ids))
+    }
+
+    pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
+        let ids = db.vector_ids_async(&self.key).await?;
+        Ok(self.select(ids))
+    }
+}

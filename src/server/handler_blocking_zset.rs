@@ -21,19 +21,19 @@ impl Handler {
                 if !matches!(frame, Frame::Null | Frame::Error(_)) {
                     self.db_manager.notify_zset_waiters();
                 }
-                return Ok(frame.as_bytes());
+                return Ok(self.encode_frame(&frame));
             }
             blocked.get_or_insert_with(|| self.client_control.begin_blocking());
             match deadline {
                 Some(deadline) => {
                     let now = Instant::now();
                     if now >= deadline {
-                        return Ok(Frame::Null.as_bytes());
+                        return Ok(self.encode_frame(&Frame::Null));
                     }
                     tokio::select! {
                         result = tokio::time::timeout_at(deadline, notified.as_mut()) => {
                             if result.is_err() {
-                                return Ok(Frame::Null.as_bytes());
+                                return Ok(self.encode_frame(&Frame::Null));
                             }
                         }
                         result = self.connection.wait_read_closed() => {

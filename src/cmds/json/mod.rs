@@ -1,3 +1,6 @@
 mod commands;
 
-pub use commands::{JsonDel, JsonGet, JsonSet, JsonType};
+pub use commands::{
+    JsonArrAppend, JsonArrInsert, JsonArrPop, JsonDel, JsonGet, JsonMGet, JsonMSet, JsonNumIncrBy,
+    JsonObjKeys, JsonSet, JsonStrAppend, JsonType,
+};

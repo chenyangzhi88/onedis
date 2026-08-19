@@ -29,6 +29,18 @@ fn geo_geoshape_numeric_filter_and_ast_matching_cover_edges() {
     assert!(parse_fulltext_wkt_point("1").is_err());
     assert!(fulltext_geoshape_relation_matches("POINT(1 1)", "BAD", "POINT(1 1)").is_err());
 
+    let strict_poly = parse_fulltext_wkt("POLYGON((0 0,4 0,4 4,0 4,0 0))").unwrap();
+    for boundary in [(0.0, 1.0), (1.0, 0.0), (4.0, 2.0), (2.0, 4.0)] {
+        assert!(!fulltext_geometry_within(
+            &FullTextGeometry::Point(boundary),
+            &strict_poly
+        ));
+    }
+    assert!(fulltext_geometry_within(
+        &FullTextGeometry::Point((0.1, 0.1)),
+        &strict_poly
+    ));
+
     let point_cells = fulltext_geoshape_cells((1.0, 1.0, 1.0, 1.0)).unwrap();
     assert_eq!(point_cells, vec!["4:4"]);
     let local_cells = fulltext_geoshape_cells((0.0, 0.5, 0.0, 0.5)).unwrap();

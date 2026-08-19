@@ -132,11 +132,19 @@ impl FtAggregate {
                     while idx < frame.arg_len() {
                         match upper_arg(&frame, idx)?.as_str() {
                             "COUNT" => {
-                                options.cursor_count = Some(parse_usize_arg(
+                                let count = parse_usize_arg(
                                     &frame,
                                     idx + 1,
                                     "ERR invalid cursor COUNT",
-                                )?);
+                                )?;
+                                if count
+                                    > crate::resource_limits::resource_limits()?.collection_items
+                                {
+                                    return Err(Error::msg(
+                                        "ERR cursor COUNT exceeds configured response limit",
+                                    ));
+                                }
+                                options.cursor_count = Some(count);
                                 idx += 2;
                             }
                             "MAXIDLE" => {
@@ -147,6 +155,14 @@ impl FtAggregate {
                                 )?;
                                 if max_idle_ms == 0 {
                                     return Err(Error::msg("ERR invalid cursor MAXIDLE"));
+                                }
+                                if max_idle_ms
+                                    > crate::resource_limits::resource_limits()?
+                                        .aggregate_cursor_idle_ms
+                                {
+                                    return Err(Error::msg(
+                                        "ERR cursor MAXIDLE exceeds configured limit",
+                                    ));
                                 }
                                 options.cursor_max_idle_ms = Some(max_idle_ms);
                                 idx += 2;
@@ -219,6 +235,13 @@ impl FtCursor {
                     match upper_arg(&frame, idx)?.as_str() {
                         "COUNT" => {
                             count = parse_usize_arg(&frame, idx + 1, "ERR invalid cursor COUNT")?;
+                            if count
+                                > crate::resource_limits::resource_limits()?.collection_items
+                            {
+                                return Err(Error::msg(
+                                    "ERR cursor COUNT exceeds configured response limit",
+                                ));
+                            }
                             idx += 2;
                         }
                         _ => return Err(Error::msg("ERR syntax error")),

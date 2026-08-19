@@ -29,7 +29,17 @@ fn bounded_geo_frame(frame: Frame) -> Result<Frame, Error> {
             Frame::SimpleString(value) | Frame::Error(value) => value.len(),
             Frame::Integer(value) => value.to_string().len(),
             Frame::Ok => 2,
-            Frame::Null | Frame::Array(_) => 0,
+            Frame::Boolean(_) => 1,
+            Frame::Double(value) => value.to_string().len(),
+            Frame::BigNumber(value) => value.len(),
+            Frame::BlobError(value) => value.len(),
+            Frame::VerbatimString { data, .. } => data.len(),
+            Frame::Null
+            | Frame::Array(_)
+            | Frame::Map(_)
+            | Frame::Set(_)
+            | Frame::Attribute { .. }
+            | Frame::Push(_) => 0,
         };
         *bytes = bytes
             .checked_add(payload.saturating_add(32))
@@ -42,6 +52,22 @@ fn bounded_geo_frame(frame: Frame) -> Result<Frame, Error> {
             for value in values {
                 charge(value, nodes, bytes)?;
             }
+        }
+        let nested: Vec<&Frame> = match frame {
+            Frame::Set(values) | Frame::Push(values) => values.iter().collect(),
+            Frame::Map(entries) => entries
+                .iter()
+                .flat_map(|(key, value)| [key, value])
+                .collect(),
+            Frame::Attribute { attributes, data } => attributes
+                .iter()
+                .flat_map(|(key, value)| [key, value])
+                .chain(std::iter::once(data.as_ref()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        for value in nested {
+            charge(value, nodes, bytes)?;
         }
         Ok(())
     }

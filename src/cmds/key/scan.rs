@@ -1,7 +1,4 @@
-use crate::{
-    frame::{Frame, MAX_ARRAY_ELEMENTS},
-    store::db::Db,
-};
+use crate::{frame::Frame, store::db::Db};
 use anyhow::Error;
 
 pub struct Scan {
@@ -41,7 +38,7 @@ impl Scan {
                 if parsed == 0 {
                     return Err(Error::msg("ERR syntax error"));
                 }
-                if parsed > MAX_ARRAY_ELEMENTS as u64 {
+                if parsed > crate::resource_limits::resource_limits()?.collection_items as u64 {
                     return Err(Error::msg("ERR COUNT exceeds configured response limit"));
                 }
                 count = Some(parsed);

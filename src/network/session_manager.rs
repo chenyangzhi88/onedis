@@ -124,7 +124,11 @@ mod tests {
         pattern.push('z');
         assert!(!glob_match(&pattern, &text));
 
-        let chunks = pubsub_message_chunks(&["pmessage", "n*", "news"], Arc::from(&b"payload"[..]));
+        let chunks = pubsub_message_chunks(
+            &["pmessage", "n*", "news"],
+            Arc::from(&b"payload"[..]),
+            crate::frame::RespVersion::Resp2,
+        );
         let encoded = chunks
             .iter()
             .flat_map(|chunk| chunk.iter().copied())

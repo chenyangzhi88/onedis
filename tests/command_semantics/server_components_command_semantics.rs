@@ -707,16 +707,22 @@ fn transaction_commands_cover_state_and_watch_semantics() {
 }
 
 #[test]
-fn save_and_bgsave_force_kv_engine_flush_paths() {
+fn save_and_bgsave_report_that_kv_engine_owns_durability() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let args = test_args_with_config(1, None);
     let db_manager = rt.block_on(DatabaseManager::new_async(args));
 
     let save = Save::parse_from_frame(frame_args(&["save"])).unwrap();
-    assert!(matches!(save.apply_sync(&db_manager).unwrap(), Frame::Ok));
+    assert!(matches!(
+        save.apply_sync(&db_manager).unwrap(),
+        Frame::Error(message) if message.contains("managed by kv-engine")
+    ));
 
     let bgsave = Bgsave::parse_from_frame(frame_args(&["bgsave"])).unwrap();
-    assert!(matches!(bgsave.apply_sync(&db_manager).unwrap(), Frame::Ok));
+    assert!(matches!(
+        bgsave.apply_sync(&db_manager).unwrap(),
+        Frame::Error(message) if message.contains("managed by kv-engine")
+    ));
 }
 
 #[test]

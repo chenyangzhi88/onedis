@@ -4,13 +4,14 @@ use std::process::id;
 use std::sync::Arc;
 
 #[tokio::main(worker_threads = 4)]
-async fn main() {
-    let args = Arc::new(Args::load());
-    common::logging::init_logging().unwrap();
+async fn main() -> anyhow::Result<()> {
+    let args = Arc::new(Args::load()?);
+    common::logging::init_logging()
+        .map_err(|err| anyhow::Error::msg(format!("failed to initialize logging: {err}")))?;
 
     server_info(args.clone());
-    let mut server = Server::new(args.clone()).await;
-    server.start().await;
+    let mut server = Server::new(args.clone()).await?;
+    server.start().await
 }
 
 fn server_info(args: Arc<ResolvedArgs>) {
@@ -26,7 +27,7 @@ fn server_info(args: Arc<ResolvedArgs>) {
 
     Onedis {}
     Bind: {}:{} PID: {}
-    Role: master
+    Storage: kv-engine
     "#,
         version, args.bind, args.port, pid
     );

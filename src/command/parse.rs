@@ -248,6 +248,14 @@ impl Command {
             "JSON.GET" => Command::JsonGet(JsonGet::parse_from_frame(frame)?),
             "JSON.DEL" => Command::JsonDel(JsonDel::parse_from_frame(frame)?),
             "JSON.TYPE" => Command::JsonType(JsonType::parse_from_frame(frame)?),
+            "JSON.MGET" => Command::JsonMGet(JsonMGet::parse_from_frame(frame)?),
+            "JSON.MSET" => Command::JsonMSet(JsonMSet::parse_from_frame(frame)?),
+            "JSON.NUMINCRBY" => Command::JsonNumIncrBy(JsonNumIncrBy::parse_from_frame(frame)?),
+            "JSON.STRAPPEND" => Command::JsonStrAppend(JsonStrAppend::parse_from_frame(frame)?),
+            "JSON.ARRAPPEND" => Command::JsonArrAppend(JsonArrAppend::parse_from_frame(frame)?),
+            "JSON.ARRINSERT" => Command::JsonArrInsert(JsonArrInsert::parse_from_frame(frame)?),
+            "JSON.ARRPOP" => Command::JsonArrPop(JsonArrPop::parse_from_frame(frame)?),
+            "JSON.OBJKEYS" => Command::JsonObjKeys(JsonObjKeys::parse_from_frame(frame)?),
             "VADD" => Command::VAdd(VAdd::parse_from_frame(frame)?),
             "VSIM" => Command::VSim(VSim::parse_from_frame(frame)?),
             "VREM" => Command::VRem(VRem::parse_from_frame(frame)?),
@@ -259,11 +267,12 @@ impl Command {
             "VINFO" => Command::VInfo(VInfo::parse_from_frame(frame)?),
             "VRANDMEMBER" => Command::VRandMember(VRandMember::parse_from_frame(frame)?),
             "VLINKS" => Command::VLinks(VLinks::parse_from_frame(frame)?),
+            "VISMEMBER" => Command::VIsMember(VIsMember::parse_from_frame(frame)?),
+            "VRANGE" => Command::VRange(VRange::parse_from_frame(frame)?),
             "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" | "SCRIPT" => {
                 Command::Lua(LuaCommand::parse_from_frame(frame)?)
             }
-            "WASM.LOAD" | "WASM.CALL" | "WASM.CALL_RO" | "WASM.DEL" | "WASM.SCAN" | "WASM.LIST"
-            | "FUNCTION" | "FCALL" | "FCALL_RO" => {
+            "WASM.LOAD" | "WASM.CALL" | "WASM.CALL_RO" | "WASM.DEL" | "WASM.SCAN" | "WASM.LIST" => {
                 Command::Wasm(WasmCommand::parse_from_frame(frame)?)
             }
             _ if command_name_upper.starts_with("FT.") => {

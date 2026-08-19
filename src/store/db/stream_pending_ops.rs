@@ -140,6 +140,19 @@ impl Db {
         count: usize,
         consumer: Option<&str>,
     ) -> Result<Vec<StreamPendingEntry>, Error> {
+        self.stream_pending_range_filtered(key, group, start, end, count, consumer, None)
+    }
+
+    pub fn stream_pending_range_filtered(
+        &self,
+        key: &str,
+        group: &str,
+        start: StreamId,
+        end: StreamId,
+        count: usize,
+        consumer: Option<&str>,
+        min_idle_ms: Option<u64>,
+    ) -> Result<Vec<StreamPendingEntry>, Error> {
         let Some(meta) = self.stream_meta(key)? else {
             return Ok(Vec::new());
         };
@@ -149,7 +162,7 @@ impl Db {
         let mut entries = Vec::with_capacity(count.min(1024));
         let mut scan_start = start;
         while entries.len() < count && scan_start <= end {
-            let scan_limit = if consumer.is_some() {
+            let scan_limit = if consumer.is_some() || min_idle_ms.is_some() {
                 count
                     .saturating_sub(entries.len())
                     .saturating_mul(2)
@@ -174,6 +187,11 @@ impl Db {
                 pending
                     .into_iter()
                     .filter(|(_, pel)| consumer.is_none_or(|name| pel.consumer == name))
+                    .filter(|(_, pel)| {
+                        min_idle_ms.is_none_or(|minimum| {
+                            now.saturating_sub(pel.last_delivery_ms) >= minimum
+                        })
+                    })
                     .map(|(id, pel)| StreamPendingEntry {
                         id: id.to_redis_id(),
                         consumer: pel.consumer,
@@ -202,6 +220,20 @@ impl Db {
         count: usize,
         consumer: Option<&str>,
     ) -> Result<Vec<StreamPendingEntry>, Error> {
+        self.stream_pending_range_filtered_async(key, group, start, end, count, consumer, None)
+            .await
+    }
+
+    pub async fn stream_pending_range_filtered_async(
+        &self,
+        key: &str,
+        group: &str,
+        start: StreamId,
+        end: StreamId,
+        count: usize,
+        consumer: Option<&str>,
+        min_idle_ms: Option<u64>,
+    ) -> Result<Vec<StreamPendingEntry>, Error> {
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(Vec::new());
         };
@@ -212,7 +244,7 @@ impl Db {
         let mut entries = Vec::with_capacity(count.min(1024));
         let mut scan_start = start;
         while entries.len() < count && scan_start <= end {
-            let scan_limit = if consumer.is_some() {
+            let scan_limit = if consumer.is_some() || min_idle_ms.is_some() {
                 count
                     .saturating_sub(entries.len())
                     .saturating_mul(2)
@@ -239,6 +271,11 @@ impl Db {
                 pending
                     .into_iter()
                     .filter(|(_, pel)| consumer.is_none_or(|name| pel.consumer == name))
+                    .filter(|(_, pel)| {
+                        min_idle_ms.is_none_or(|minimum| {
+                            now.saturating_sub(pel.last_delivery_ms) >= minimum
+                        })
+                    })
                     .map(|(id, pel)| StreamPendingEntry {
                         id: id.to_redis_id(),
                         consumer: pel.consumer,

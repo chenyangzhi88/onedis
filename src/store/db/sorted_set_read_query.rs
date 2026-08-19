@@ -27,6 +27,10 @@ impl Db {
                         Err(WRONG_TYPE_ERROR.to_string())
                     }
                     Some(header) => {
+                        if let Some(entries) = decode_packed_zset(&raw) {
+                            lengths.push(Ok(entries.len()));
+                            continue;
+                        }
                         let logical_key = key.as_bytes().to_vec();
                         self.counter_cache
                             .zset_ever_populated
@@ -90,6 +94,15 @@ impl Db {
             return Ok(None);
         };
 
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_zset)
+                .and_then(|entries| entries.get(member).copied()));
+        }
+
         Ok(self
             .store
             .get_raw(&zset_member_key(self.db_index, key, version, member))
@@ -101,6 +114,16 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(None);
         };
+
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_zset)
+                .and_then(|entries| entries.get(member).copied()));
+        }
 
         Ok(self
             .store
@@ -118,6 +141,19 @@ impl Db {
         let Some((_, version)) = self.zset_expire_ms_async(key).await? else {
             return Ok(vec![None; members.len()]);
         };
+        if version == 0 {
+            let entries = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_zset)
+                .ok_or_else(|| Error::msg("Failed to decode packed sorted set"))?;
+            return Ok(members
+                .iter()
+                .map(|member| entries.get(member).copied())
+                .collect());
+        }
         let member_keys = members
             .iter()
             .map(|member| zset_member_key(self.db_index, key, version, member))
@@ -164,6 +200,15 @@ impl Db {
                 plans.push(ZsetMultiScorePlan::Error(WRONG_TYPE_ERROR.to_string()));
                 continue;
             }
+            if let Some(entries) = decode_packed_zset(&raw) {
+                plans.push(ZsetMultiScorePlan::Packed(
+                    members
+                        .iter()
+                        .map(|member| entries.get(member).copied())
+                        .collect(),
+                ));
+                continue;
+            }
             let lookup = member_keys.len();
             member_keys.extend(
                 members
@@ -181,6 +226,7 @@ impl Db {
             .map(|plan| match plan {
                 ZsetMultiScorePlan::Missing(count) => Ok(vec![None; count]),
                 ZsetMultiScorePlan::Error(message) => Err(Error::msg(message)),
+                ZsetMultiScorePlan::Packed(values) => Ok(values),
                 ZsetMultiScorePlan::Members { lookup, count } => Ok(values
                     [lookup..lookup.saturating_add(count)]
                     .iter()
@@ -196,6 +242,15 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(0);
         };
+
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_zset)
+                .map_or(0, |entries| entries.len()));
+        }
 
         if self.store.is_transactional() {
             let prefix = zset_member_prefix(self.db_index, key, version);
@@ -248,6 +303,16 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(0);
         };
+
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_zset)
+                .map_or(0, |entries| entries.len()));
+        }
 
         if self.store.is_transactional() {
             let prefix = zset_member_prefix(self.db_index, key, version);
@@ -308,6 +373,13 @@ impl Db {
             return Ok(None);
         };
 
+        if version == 0 {
+            return Ok(self
+                .zset_ranked_members(key, version)
+                .iter()
+                .position(|(candidate, _)| candidate == member));
+        }
+
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let rank_key = zset_rank_key(self.db_index, key, version, score, member);
         Ok(Some(
@@ -325,6 +397,14 @@ impl Db {
             return Ok(None);
         };
 
+        if version == 0 {
+            return Ok(self
+                .zset_ranked_members_async(key, version)
+                .await
+                .iter()
+                .position(|(candidate, _)| candidate == member));
+        }
+
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let rank_key = zset_rank_key(self.db_index, key, version, score, member);
         Ok(Some(
@@ -341,6 +421,13 @@ impl Db {
         let Some((_, version)) = self.zset_expire_ms(key)? else {
             return Ok(None);
         };
+        if version == 0 {
+            return Ok(self
+                .zset_ranked_members(key, version)
+                .iter()
+                .rev()
+                .position(|(candidate, _)| candidate == member));
+        }
         let mut lower = zset_rank_key(self.db_index, key, version, score, member);
         lower.push(0);
         let prefix = zset_rank_prefix(self.db_index, key, version);
@@ -361,6 +448,14 @@ impl Db {
         let Some((_, version)) = self.zset_expire_ms_async(key).await? else {
             return Ok(None);
         };
+        if version == 0 {
+            return Ok(self
+                .zset_ranked_members_async(key, version)
+                .await
+                .iter()
+                .rev()
+                .position(|(candidate, _)| candidate == member));
+        }
         let mut lower = zset_rank_key(self.db_index, key, version, score, member);
         lower.push(0);
         let prefix = zset_rank_prefix(self.db_index, key, version);
@@ -393,6 +488,16 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(0);
         };
+        if version == 0 {
+            return Ok(self
+                .zset_ranked_members(key, version)
+                .into_iter()
+                .filter(|(_, score)| {
+                    (*score > min || min_inclusive && *score == min)
+                        && (*score < max || max_inclusive && *score == max)
+                })
+                .count());
+        }
         let Some((lower, upper)) = zset_score_scan_bounds(
             self.db_index,
             key,
@@ -419,6 +524,17 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(0);
         };
+        if version == 0 {
+            return Ok(self
+                .zset_ranked_members_async(key, version)
+                .await
+                .into_iter()
+                .filter(|(_, score)| {
+                    (*score > min || min_inclusive && *score == min)
+                        && (*score < max || max_inclusive && *score == max)
+                })
+                .count());
+        }
         let Some((lower, upper)) = zset_score_scan_bounds(
             self.db_index,
             key,
@@ -439,60 +555,37 @@ impl Db {
                 "ERR wrong number of arguments for 'zintercard' command",
             ));
         }
-        let mut versions = Vec::with_capacity(keys.len());
+        let mut sets = Vec::with_capacity(keys.len());
         for key in keys {
-            versions.push(self.zset_expire_ms(key)?.map(|(_, version)| version));
+            let entries = self.zset_all_entries(key)?;
+            if entries.is_empty() && self.zset_expire_ms(key)?.is_none() {
+                return Ok(0);
+            }
+            sets.push(
+                entries
+                    .into_iter()
+                    .map(|(member, _)| member)
+                    .collect::<HashSet<_>>(),
+            );
         }
-        let Some(versions) = versions.into_iter().collect::<Option<Vec<_>>>() else {
+        let Some((smallest_index, smallest)) =
+            sets.iter().enumerate().min_by_key(|(_, set)| set.len())
+        else {
             return Ok(0);
         };
-
-        let mut smallest = 0usize;
-        let mut smallest_len = usize::MAX;
-        for (idx, (key, version)) in keys.iter().zip(&versions).enumerate() {
-            let prefix = zset_member_prefix(self.db_index, key, *version);
-            let len = self.store.scan_range_raw_visit(
-                &prefix,
-                prefix_exclusive_upper_bound(&prefix),
-                usize::MAX,
-                |_, _| true,
-            );
-            if len < smallest_len {
-                smallest = idx;
-                smallest_len = len;
+        let mut count = 0usize;
+        for member in smallest {
+            if sets
+                .iter()
+                .enumerate()
+                .all(|(index, set)| index == smallest_index || set.contains(member))
+            {
+                count = count.saturating_add(1);
+                if limit > 0 && count >= limit {
+                    break;
+                }
             }
         }
-        if smallest_len == 0 {
-            return Ok(0);
-        }
-
-        let prefix = zset_member_prefix(self.db_index, &keys[smallest], versions[smallest]);
-        let mut count = 0usize;
-        self.store.scan_range_raw_visit(
-            &prefix,
-            prefix_exclusive_upper_bound(&prefix),
-            usize::MAX,
-            |member_key, _| {
-                let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
-                    return true;
-                };
-                let Ok(member) = std::str::from_utf8(member) else {
-                    return true;
-                };
-                if keys.iter().enumerate().all(|(idx, key)| {
-                    idx == smallest
-                        || self.store.contains_key(&zset_member_key(
-                            self.db_index,
-                            key,
-                            versions[idx],
-                            member,
-                        ))
-                }) {
-                    count = count.saturating_add(1);
-                }
-                limit == 0 || count < limit
-            },
-        );
         Ok(count)
     }
 
@@ -510,5 +603,6 @@ impl Db {
 enum ZsetMultiScorePlan {
     Missing(usize),
     Error(String),
+    Packed(Vec<Option<f64>>),
     Members { lookup: usize, count: usize },
 }

@@ -1,6 +1,220 @@
 use super::*;
 
 impl Db {
+    fn try_set_add_packed(&self, key: &str, members: &[String]) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed(key);
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let (expire_ms, mut packed) = match observed.value() {
+                None => (0, PackedSetMembers::new()),
+                Some(raw) => {
+                    let header = decode_meta_header(raw)
+                        .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
+                    if header.type_tag != TYPE_SET {
+                        return Err(Error::msg(WRONG_TYPE_ERROR));
+                    }
+                    let Some(packed) = decode_packed_set(raw) else {
+                        return Ok(None);
+                    };
+                    (header.expire_ms, packed)
+                }
+            };
+            let mut added = 0usize;
+            for member in members {
+                added += usize::from(packed.insert(member.clone()));
+            }
+            if added == 0 {
+                return Ok(Some(0));
+            }
+
+            let mut batch = WriteBatch::new();
+            if let Some(raw) = encode_packed_set(expire_ms, &packed) {
+                (batch.put(&key_bytes, &raw)).expect("write batch append invariant violated");
+            } else {
+                let version = self.next_version();
+                (batch.put(
+                    &key_bytes,
+                    &encode_set_meta(expire_ms, version, packed.len()),
+                ))
+                .expect("write batch append invariant violated");
+                for member in &packed {
+                    (batch.put(
+                        &set_member_key(self.db_index, key, version, member),
+                        INDEX_MARKER_VALUE,
+                    ))
+                    .expect("write batch append invariant violated");
+                }
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(added));
+            }
+        }
+        self.promote_packed_set(key)?;
+        Ok(None)
+    }
+
+    async fn try_set_add_packed_async(
+        &self,
+        key: &str,
+        members: &[String],
+    ) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed_async(key).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let (expire_ms, mut packed) = match observed.value() {
+                None => (0, PackedSetMembers::new()),
+                Some(raw) => {
+                    let header = decode_meta_header(raw)
+                        .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
+                    if header.type_tag != TYPE_SET {
+                        return Err(Error::msg(WRONG_TYPE_ERROR));
+                    }
+                    let Some(packed) = decode_packed_set(raw) else {
+                        return Ok(None);
+                    };
+                    (header.expire_ms, packed)
+                }
+            };
+            let mut added = 0usize;
+            for member in members {
+                added += usize::from(packed.insert(member.clone()));
+            }
+            if added == 0 {
+                return Ok(Some(0));
+            }
+
+            let mut batch = WriteBatch::new();
+            if let Some(raw) = encode_packed_set(expire_ms, &packed) {
+                (batch.put(&key_bytes, &raw)).expect("write batch append invariant violated");
+            } else {
+                let version = self.next_version_async().await;
+                (batch.put(
+                    &key_bytes,
+                    &encode_set_meta(expire_ms, version, packed.len()),
+                ))
+                .expect("write batch append invariant violated");
+                for member in &packed {
+                    (batch.put(
+                        &set_member_key(self.db_index, key, version, member),
+                        INDEX_MARKER_VALUE,
+                    ))
+                    .expect("write batch append invariant violated");
+                }
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(added));
+            }
+        }
+        self.promote_packed_set_async(key).await?;
+        Ok(None)
+    }
+
+    fn try_set_remove_packed(&self, key: &str, members: &[String]) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed(key);
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(Some(0));
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
+            if header.type_tag != TYPE_SET {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let Some(mut packed) = decode_packed_set(raw) else {
+                return Ok(None);
+            };
+            let mut removed = 0usize;
+            for member in members {
+                removed += usize::from(packed.remove(member));
+            }
+            if removed == 0 {
+                return Ok(Some(0));
+            }
+            let mut batch = WriteBatch::new();
+            if packed.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            } else {
+                let encoded = encode_packed_set(header.expire_ms, &packed)
+                    .expect("removing members cannot overflow packed set");
+                (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(removed));
+            }
+        }
+        self.promote_packed_set(key)?;
+        Ok(None)
+    }
+
+    async fn try_set_remove_packed_async(
+        &self,
+        key: &str,
+        members: &[String],
+    ) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed_async(key).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(Some(0));
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
+            if header.type_tag != TYPE_SET {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let Some(mut packed) = decode_packed_set(raw) else {
+                return Ok(None);
+            };
+            let mut removed = 0usize;
+            for member in members {
+                removed += usize::from(packed.remove(member));
+            }
+            if removed == 0 {
+                return Ok(Some(0));
+            }
+            let mut batch = WriteBatch::new();
+            if packed.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            } else {
+                let encoded = encode_packed_set(header.expire_ms, &packed)
+                    .expect("removing members cannot overflow packed set");
+                (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(removed));
+            }
+        }
+        self.promote_packed_set_async(key).await?;
+        Ok(None)
+    }
+
     /// Apply ordered SADD/SREM commands with one metadata read and one atomic write per batch.
     pub(crate) async fn apply_set_batch_mutations_async(
         &self,
@@ -23,7 +237,7 @@ impl Db {
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
         let _write_guards = self.lock_write_shards(&shards).await;
 
-        for _ in 0..64 {
+        for attempt in 0..64 {
             for key in &keys {
                 self.expire_if_needed_async(key).await;
             }
@@ -53,7 +267,7 @@ impl Db {
                 let Ok((key, state)) = &states[position] else {
                     continue;
                 };
-                if !state.initially_exists {
+                if !state.initially_exists || state.packed {
                     continue;
                 }
                 member_lookups.extend(candidates.iter().map(|member| {
@@ -127,6 +341,35 @@ impl Db {
             let mut batch = WriteBatch::new();
             for &position in &dirty_positions {
                 let (key, state) = states[position].as_ref().expect("dirty set state is valid");
+                if state.packed {
+                    if state.members.is_empty() {
+                        self.delete_main_key_with_ttl_to_batch(&mut batch, key, state.expire_ms);
+                    } else {
+                        let packed = state.members.iter().cloned().collect::<PackedSetMembers>();
+                        if let Some(raw) = encode_packed_set(state.expire_ms, &packed) {
+                            (batch.put(&self.mk(key), &raw))
+                                .expect("write batch append invariant violated");
+                        } else {
+                            (batch.put(
+                                &self.mk(key),
+                                &encode_set_meta(
+                                    state.expire_ms,
+                                    state.version,
+                                    state.members.len(),
+                                ),
+                            ))
+                            .expect("write batch append invariant violated");
+                            for member in &state.members {
+                                (batch.put(
+                                    &set_member_key(self.db_index, key, state.version, member),
+                                    INDEX_MARKER_VALUE,
+                                ))
+                                .expect("write batch append invariant violated");
+                            }
+                        }
+                    }
+                    continue;
+                }
                 for member in state.members.difference(&state.initial_members) {
                     (batch.put(
                         &set_member_key(self.db_index, key, state.version, member),
@@ -175,7 +418,23 @@ impl Db {
                     self.changes.fetch_add(changed_commands, Ordering::Relaxed);
                     return replies;
                 }
-                Ok(false) => continue,
+                Ok(false) => {
+                    if attempt + 1 == SMALL_INLINE_CAS_ATTEMPTS {
+                        for &position in &dirty_positions {
+                            if let Ok((key, state)) = &states[position]
+                                && state.packed
+                                && let Err(error) = self.promote_packed_set_async(key).await
+                            {
+                                let message = error.to_string();
+                                return mutations
+                                    .iter()
+                                    .map(|_| Err(Error::msg(message.clone())))
+                                    .collect();
+                            }
+                        }
+                    }
+                    continue;
+                }
                 Err(error) => {
                     let message = error.to_string();
                     return mutations
@@ -193,6 +452,9 @@ impl Db {
     }
 
     pub fn set_add(&self, key: &str, members: &[String]) -> Result<usize, Error> {
+        if let Some(added) = self.try_set_add_packed(key, members)? {
+            return Ok(added);
+        }
         let meta = self.set_meta(key)?;
         let version = match meta {
             Some(meta) => meta.version,
@@ -238,6 +500,9 @@ impl Db {
         key: &str,
         members: &[String],
     ) -> Result<usize, Error> {
+        if let Some(added) = self.try_set_add_packed_async(key, members).await? {
+            return Ok(added);
+        }
         let key_bytes = self.mk(key);
         let raw_meta = self.store.get_raw_async(&key_bytes).await;
         let mut expired_header = None;
@@ -327,6 +592,9 @@ impl Db {
 
     /// 删除 set members，返回实际删除数量。
     pub fn set_remove(&self, key: &str, members: &[String]) -> Result<usize, Error> {
+        if let Some(removed) = self.try_set_remove_packed(key, members)? {
+            return Ok(removed);
+        }
         let meta = self.set_meta(key)?;
         let Some(meta) = meta else {
             return Ok(0);
@@ -374,6 +642,9 @@ impl Db {
 
     pub async fn set_remove_async(&self, key: &str, members: &[String]) -> Result<usize, Error> {
         let _set_write_guard = self.set_write_lock(key).lock().await;
+        if let Some(removed) = self.try_set_remove_packed_async(key, members).await? {
+            return Ok(removed);
+        }
         let meta = self.set_meta_async(key).await?;
         let Some(meta) = meta else {
             return Ok(0);
@@ -423,6 +694,8 @@ impl Db {
         if source == destination {
             return self.set_contains(source, member);
         }
+        self.promote_packed_set(source)?;
+        self.promote_packed_set(destination)?;
         let Some(source_meta) = self.set_meta(source)? else {
             return Ok(false);
         };
@@ -519,6 +792,8 @@ impl Db {
         if source == destination {
             return self.set_contains_async(source, member).await;
         }
+        self.promote_packed_set_async(source).await?;
+        self.promote_packed_set_async(destination).await?;
         let Some(source_meta) = self.set_meta_async(source).await? else {
             return Ok(false);
         };
@@ -588,6 +863,7 @@ struct SetBatchState {
     expire_ms: u64,
     initial_len: usize,
     initially_exists: bool,
+    packed: bool,
     initial_members: HashSet<String>,
     members: HashSet<String>,
     touched: bool,
@@ -599,7 +875,8 @@ impl SetBatchState {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = u64>,
     {
-        let (version, expire_ms, initial_len, initially_exists) = match raw {
+        let (version, expire_ms, initial_len, initially_exists, packed, initial_members) = match raw
+        {
             Some(raw) => {
                 let header = decode_meta_header(raw)
                     .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
@@ -608,17 +885,41 @@ impl SetBatchState {
                 }
                 let meta = decode_set_meta(raw)
                     .ok_or_else(|| Error::msg("Failed to decode set metadata"))?;
-                (meta.version, meta.expire_ms, meta.len, true)
+                if meta.packed {
+                    let members = decode_packed_set(raw)
+                        .ok_or_else(|| Error::msg("Failed to decode packed set"))?
+                        .into_iter()
+                        .collect::<HashSet<_>>();
+                    (
+                        next_version().await,
+                        meta.expire_ms,
+                        meta.len,
+                        true,
+                        true,
+                        members,
+                    )
+                } else {
+                    (
+                        meta.version,
+                        meta.expire_ms,
+                        meta.len,
+                        true,
+                        false,
+                        HashSet::new(),
+                    )
+                }
             }
-            None => (next_version().await, 0, 0, false),
+            None => (next_version().await, 0, 0, false, true, HashSet::new()),
         };
+        let members = initial_members.clone();
         Ok(Self {
             version,
             expire_ms,
             initial_len,
             initially_exists,
-            initial_members: HashSet::new(),
-            members: HashSet::new(),
+            packed,
+            initial_members,
+            members,
             touched: false,
         })
     }

@@ -12,6 +12,21 @@ impl Db {
         let Some((_, version)) = self.zset_expire_ms(key)? else {
             return Ok((0, Vec::new()));
         };
+        if version == 0 {
+            let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+            let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+            let mut state = ZsetScanState::new(cursor, count);
+            for (member, score) in self
+                .zset_ranked_members(key, version)
+                .into_iter()
+                .skip(offset)
+            {
+                if !state.visit(member, score, matcher.as_ref()) {
+                    break;
+                }
+            }
+            return state.finish();
+        }
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let upper = prefix_exclusive_upper_bound(&prefix);
         let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
@@ -46,6 +61,22 @@ impl Db {
         let Some((_, version)) = self.zset_expire_ms_async(key).await? else {
             return Ok((0, Vec::new()));
         };
+        if version == 0 {
+            let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+            let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+            let mut state = ZsetScanState::new(cursor, count);
+            for (member, score) in self
+                .zset_ranked_members_async(key, version)
+                .await
+                .into_iter()
+                .skip(offset)
+            {
+                if !state.visit(member, score, matcher.as_ref()) {
+                    break;
+                }
+            }
+            return state.finish();
+        }
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let upper = prefix_exclusive_upper_bound(&prefix);
         let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;

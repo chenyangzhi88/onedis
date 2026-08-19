@@ -2,6 +2,20 @@ use super::*;
 
 impl Db {
     pub(in crate::store::db) fn set_members_raw(&self, key: &str, version: u64) -> Vec<Vec<u8>> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_set)
+                .map(|members| {
+                    members
+                        .into_iter()
+                        .map(String::into_bytes)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        }
         let prefix = set_member_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw(&prefix)
@@ -19,6 +33,21 @@ impl Db {
         key: &str,
         version: u64,
     ) -> Vec<Vec<u8>> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_set)
+                .map(|members| {
+                    members
+                        .into_iter()
+                        .map(String::into_bytes)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        }
         let prefix = set_member_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw_async(&prefix)

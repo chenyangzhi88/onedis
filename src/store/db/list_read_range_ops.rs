@@ -28,6 +28,14 @@ impl Db {
             return Ok(None);
         };
 
+        if meta.version == 0 {
+            return Ok(self
+                .list_range_raw_values(key, meta.version, storage_index, storage_index)
+                .into_iter()
+                .next()
+                .and_then(|value| String::from_utf8(value).ok()));
+        }
+
         Ok(self
             .store
             .get_raw(&list_item_key(
@@ -48,6 +56,15 @@ impl Db {
         let Some(storage_index) = self.resolve_list_index(meta, index) else {
             return Ok(None);
         };
+
+        if meta.version == 0 {
+            return Ok(self
+                .list_range_raw_values_async(key, meta.version, storage_index, storage_index)
+                .await
+                .into_iter()
+                .next()
+                .and_then(|value| String::from_utf8(value).ok()));
+        }
 
         Ok(self
             .store

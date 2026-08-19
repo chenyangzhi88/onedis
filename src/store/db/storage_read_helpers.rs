@@ -230,6 +230,17 @@ impl Db {
     }
 
     pub(in crate::store::db) fn read_list_items(&self, key: &str, version: u64) -> Vec<String> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_list)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| String::from_utf8(value).ok())
+                .collect();
+        }
         let prefix = list_item_prefix(self.db_index, key, version);
         let mut items: Vec<(i64, String)> = Vec::new();
 
@@ -258,6 +269,18 @@ impl Db {
         key: &str,
         version: u64,
     ) -> Vec<String> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_list)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| String::from_utf8(value).ok())
+                .collect();
+        }
         let prefix = list_item_prefix(self.db_index, key, version);
         let mut items: Vec<(i64, String)> = Vec::new();
         for (key_bytes, value_bytes) in self.store.scan_prefix_raw_async(&prefix).await {

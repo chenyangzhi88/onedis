@@ -42,17 +42,6 @@ pub(in crate::store::db) fn set_member_key(
     composite_key
 }
 
-pub(in crate::store::db) fn set_member_key_bytes(
-    db_index: u16,
-    key: &str,
-    version: u64,
-    member: &[u8],
-) -> Vec<u8> {
-    let mut composite_key = set_member_prefix(db_index, key, version);
-    composite_key.extend_from_slice(member);
-    composite_key
-}
-
 pub(in crate::store::db) fn zset_member_prefix(db_index: u16, key: &str, version: u64) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(2 + ZSET_MEMBER_NAMESPACE.len() + key.len() + 1 + 8);
     prefix.extend_from_slice(&internal_prefix(db_index));

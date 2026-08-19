@@ -8,6 +8,7 @@ impl Db {
         id: StreamId,
         mkstream: bool,
     ) -> Result<(), Error> {
+        self.promote_packed_stream(key)?;
         let meta = match self.stream_meta(key)? {
             Some(meta) => meta,
             None if mkstream => {
@@ -64,6 +65,7 @@ impl Db {
         mkstream: bool,
     ) -> Result<(), Error> {
         let _stream_write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_stream_async(key).await?;
         let mut batch = WriteBatch::new();
         let meta = match self.stream_meta_async(key).await? {
             Some(meta) => meta,

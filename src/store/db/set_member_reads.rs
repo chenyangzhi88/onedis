@@ -8,6 +8,15 @@ impl Db {
             return Ok(false);
         };
 
+        if meta.packed {
+            return Ok(self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_set)
+                .is_some_and(|members| members.contains(member)));
+        }
+
         Ok(self
             .store
             .contains_key(&set_member_key(self.db_index, key, meta.version, member)))
@@ -18,6 +27,16 @@ impl Db {
         let Some(meta) = meta else {
             return Ok(false);
         };
+
+        if meta.packed {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_set)
+                .is_some_and(|members| members.contains(member)));
+        }
 
         Ok(self
             .store
@@ -34,6 +53,19 @@ impl Db {
         let Some(meta) = self.set_meta_async(key).await? else {
             return Ok(vec![false; members.len()]);
         };
+        if meta.packed {
+            let packed = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_set)
+                .ok_or_else(|| Error::msg("Failed to decode packed set"))?;
+            return Ok(members
+                .iter()
+                .map(|member| packed.contains(member))
+                .collect());
+        }
         let member_keys = members
             .iter()
             .map(|member| set_member_key(self.db_index, key, meta.version, member))
@@ -86,6 +118,21 @@ impl Db {
                 ));
                 continue;
             };
+            if meta.packed {
+                let Some(packed) = decode_packed_set(&raw) else {
+                    plans.push(SetMultiContainsPlan::Error(
+                        "Failed to decode packed set".to_string(),
+                    ));
+                    continue;
+                };
+                plans.push(SetMultiContainsPlan::Packed(
+                    members
+                        .iter()
+                        .map(|member| packed.contains(member))
+                        .collect(),
+                ));
+                continue;
+            }
             let lookup = member_keys.len();
             member_keys.extend(
                 members
@@ -103,6 +150,7 @@ impl Db {
             .map(|plan| match plan {
                 SetMultiContainsPlan::Missing(count) => Ok(vec![false; count]),
                 SetMultiContainsPlan::Error(message) => Err(Error::msg(message)),
+                SetMultiContainsPlan::Packed(values) => Ok(values),
                 SetMultiContainsPlan::Members { lookup, count } => Ok(values
                     [lookup..lookup.saturating_add(count)]
                     .iter()
@@ -149,6 +197,24 @@ impl Db {
         };
         if meta.len > max_members {
             return Err(Error::msg("ERR response exceeds configured limit"));
+        }
+
+        if meta.packed {
+            let members = self
+                .set_members_raw(key, meta.version)
+                .into_iter()
+                .map(|member| {
+                    String::from_utf8(member)
+                        .map_err(|_| Error::msg("ERR invalid UTF-8 set member"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let encoded_bytes = members.iter().try_fold(32usize, |bytes, member| {
+                bytes.checked_add(member.len().saturating_add(32))
+            });
+            if encoded_bytes.is_none_or(|bytes| bytes > max_encoded_bytes) {
+                return Err(Error::msg("ERR response exceeds configured limit"));
+            }
+            return Ok(members);
         }
 
         let prefix = set_member_prefix(self.db_index, key, meta.version);
@@ -235,5 +301,6 @@ impl Db {
 enum SetMultiContainsPlan {
     Missing(usize),
     Error(String),
+    Packed(Vec<bool>),
     Members { lookup: usize, count: usize },
 }

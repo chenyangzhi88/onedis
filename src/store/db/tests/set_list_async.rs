@@ -303,6 +303,7 @@ async fn set_pop_async_uses_only_member_entries_for_set_data() {
             .unwrap(),
         2
     );
+    db.promote_packed_set("repair").unwrap();
     let meta = db.set_meta("repair").unwrap().unwrap();
     let member_prefix = set_member_prefix(db.db_index, "repair", meta.version);
     let owner_prefix = version_owner_prefix(db.db_index);
@@ -330,6 +331,7 @@ async fn set_pop_async_does_not_mutate_an_inconsistent_set() {
             .unwrap(),
         2
     );
+    db.promote_packed_set("inconsistent-pop").unwrap();
 
     let meta = db.set_meta("inconsistent-pop").unwrap().unwrap();
     db.store.put_raw(

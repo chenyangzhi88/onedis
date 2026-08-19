@@ -90,7 +90,7 @@ impl Db {
         stop: i64,
         reverse: bool,
     ) -> Option<Vec<(String, f64)>> {
-        if start < 0 || stop < 0 {
+        if version == 0 || start < 0 || stop < 0 {
             return None;
         }
         if start > stop {
@@ -127,7 +127,7 @@ impl Db {
         stop: i64,
         reverse: bool,
     ) -> Option<Vec<(String, f64)>> {
-        if start < 0 || stop < 0 {
+        if version == 0 || start < 0 || stop < 0 {
             return None;
         }
         if start > stop {
@@ -187,6 +187,25 @@ impl Db {
             return Ok(Vec::new());
         };
 
+        if version == 0 {
+            let mut entries = self
+                .zset_ranked_members(key, version)
+                .into_iter()
+                .filter(|(_, score)| {
+                    (*score > min || min_inclusive && *score == min)
+                        && (*score < max || max_inclusive && *score == max)
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                entries.reverse();
+            }
+            return Ok(entries
+                .into_iter()
+                .skip(offset)
+                .take(scan_limit.saturating_sub(offset))
+                .collect());
+        }
+
         let Some((lower, upper)) = zset_score_scan_bounds(
             self.db_index,
             key,
@@ -243,6 +262,26 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(Vec::new());
         };
+
+        if version == 0 {
+            let mut entries = self
+                .zset_ranked_members_async(key, version)
+                .await
+                .into_iter()
+                .filter(|(_, score)| {
+                    (*score > min || min_inclusive && *score == min)
+                        && (*score < max || max_inclusive && *score == max)
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                entries.reverse();
+            }
+            return Ok(entries
+                .into_iter()
+                .skip(offset)
+                .take(scan_limit.saturating_sub(offset))
+                .collect());
+        }
 
         let Some((lower, upper)) = zset_score_scan_bounds(
             self.db_index,

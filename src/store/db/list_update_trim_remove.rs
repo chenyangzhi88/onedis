@@ -3,6 +3,7 @@ use super::*;
 impl Db {
     /// 设置指定下标的元素。
     pub fn list_set(&self, key: &str, index: i64, value: &str) -> Result<(), Error> {
+        self.promote_packed_list(key)?;
         let meta = self
             .list_meta(key)?
             .ok_or_else(|| Error::msg("ERR no such key"))?;
@@ -25,6 +26,7 @@ impl Db {
 
     pub async fn list_set_async(&self, key: &str, index: i64, value: &str) -> Result<(), Error> {
         let _write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_list_async(key).await?;
         let meta = self
             .list_meta_async(key)
             .await?
@@ -48,6 +50,7 @@ impl Db {
 
     /// 保留指定范围，其余元素删除。
     pub fn list_trim(&self, key: &str, start: i64, stop: i64) -> Result<(), Error> {
+        self.promote_packed_list(key)?;
         let meta = match self.list_meta(key)? {
             Some(meta) => meta,
             None => return Ok(()),
@@ -101,6 +104,7 @@ impl Db {
 
     pub async fn list_trim_async(&self, key: &str, start: i64, stop: i64) -> Result<(), Error> {
         let _write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_list_async(key).await?;
         let meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(()),
@@ -153,6 +157,7 @@ impl Db {
     }
 
     pub fn list_remove(&self, key: &str, count: i64, element: &str) -> Result<usize, Error> {
+        self.promote_packed_list(key)?;
         let meta = match self.list_meta(key)? {
             Some(meta) => meta,
             None => return Ok(0),
@@ -180,6 +185,7 @@ impl Db {
         element: &str,
     ) -> Result<usize, Error> {
         let _write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_list_async(key).await?;
         let meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(0),

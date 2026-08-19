@@ -49,6 +49,15 @@ impl Db {
             return Ok(());
         };
 
+        if version == 0 {
+            for (member, score) in self.zset_ranked_members(key, version) {
+                if !visit(member, score) {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let upper = prefix_exclusive_upper_bound(&prefix);
         self.store
@@ -99,6 +108,15 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(());
         };
+
+        if version == 0 {
+            for (member, score) in self.zset_ranked_members_async(key, version).await {
+                if !visit(member, score) {
+                    break;
+                }
+            }
+            return Ok(());
+        }
 
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let upper = prefix_exclusive_upper_bound(&prefix);
@@ -158,6 +176,27 @@ impl Db {
         picks: &[usize],
         unique: &[usize],
     ) -> Result<Vec<(String, f64)>, Error> {
+        if version == 0 {
+            let entries = self.zset_ranked_members(key, version);
+            let by_ordinal = unique
+                .iter()
+                .filter_map(|ordinal| {
+                    entries
+                        .get(*ordinal)
+                        .cloned()
+                        .map(|entry| (*ordinal, entry))
+                })
+                .collect::<HashMap<_, _>>();
+            return Ok(picks
+                .iter()
+                .map(|ordinal| {
+                    by_ordinal
+                        .get(ordinal)
+                        .expect("selected packed sorted set ordinal is present")
+                        .clone()
+                })
+                .collect());
+        }
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let rank_keys = self.store.scan_range_raw_keys_at_ordinals(
             &prefix,
@@ -174,6 +213,27 @@ impl Db {
         picks: &[usize],
         unique: &[usize],
     ) -> Result<Vec<(String, f64)>, Error> {
+        if version == 0 {
+            let entries = self.zset_ranked_members_async(key, version).await;
+            let by_ordinal = unique
+                .iter()
+                .filter_map(|ordinal| {
+                    entries
+                        .get(*ordinal)
+                        .cloned()
+                        .map(|entry| (*ordinal, entry))
+                })
+                .collect::<HashMap<_, _>>();
+            return Ok(picks
+                .iter()
+                .map(|ordinal| {
+                    by_ordinal
+                        .get(ordinal)
+                        .expect("selected packed sorted set ordinal is present")
+                        .clone()
+                })
+                .collect());
+        }
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let rank_keys = self
             .store

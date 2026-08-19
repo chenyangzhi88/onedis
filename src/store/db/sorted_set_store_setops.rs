@@ -53,52 +53,12 @@ impl Db {
     }
 
     pub async fn zset_diff_async(&self, keys: &[String]) -> Result<Vec<(String, f64)>, Error> {
-        let Some(first) = keys.first() else {
+        if keys.is_empty() {
             return Ok(Vec::new());
-        };
-        let first = first.clone();
+        }
         let keys = keys.to_vec();
-        self.run_blocking_store_task(move |db| {
-            let Some((_, first_version)) = db.zset_expire_ms(&first)? else {
-                return Ok(Vec::new());
-            };
-            let mut other_versions = Vec::with_capacity(keys.len().saturating_sub(1));
-            for key in &keys[1..] {
-                other_versions.push(db.zset_expire_ms(key)?.map(|(_, version)| version));
-            }
-            let mut result = Vec::new();
-            let prefix = zset_rank_prefix(db.db_index, &first, first_version);
-            db.store.scan_range_raw_visit(
-                &prefix,
-                prefix_exclusive_upper_bound(&prefix),
-                usize::MAX,
-                |rank_key, _| {
-                    let Some(member) = db.decode_rank_member(&first, first_version, rank_key)
-                    else {
-                        return true;
-                    };
-                    let present_elsewhere =
-                        keys[1..].iter().zip(&other_versions).any(|(key, version)| {
-                            version.is_some_and(|version| {
-                                db.store.contains_key(&zset_member_key(
-                                    db.db_index,
-                                    key,
-                                    version,
-                                    &member,
-                                ))
-                            })
-                        });
-                    if !present_elsewhere
-                        && let Some(score) = db.decode_rank_score(&first, first_version, rank_key)
-                    {
-                        result.push((member, score));
-                    }
-                    true
-                },
-            );
-            Ok(result)
-        })
-        .await
+        self.run_blocking_store_task(move |db| db.zset_diff(&keys))
+            .await
     }
 
     pub fn zset_union_or_inter(

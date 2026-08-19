@@ -24,6 +24,126 @@ struct HashSetPipelineKeyState<'a> {
 }
 
 impl Db {
+    async fn try_apply_hash_set_packed_batch_async<'a>(
+        &self,
+        mutations: &[HashSetBatchMutation<'a>],
+        keys: &[&'a str],
+        key_positions: &HashMap<&'a str, usize>,
+    ) -> Result<Option<Vec<Result<usize, Error>>>, Error> {
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            for key in keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut states = Vec::with_capacity(keys.len());
+            let mut has_split = false;
+            for observed in &observations {
+                states.push(match observed.value() {
+                    None => Ok((0u64, PackedHashFields::new(), false)),
+                    Some(raw) => {
+                        let Some(header) = decode_meta_header(raw) else {
+                            return Ok(None);
+                        };
+                        if header.type_tag != TYPE_HASH {
+                            Err(WRONG_TYPE_ERROR.to_string())
+                        } else {
+                            let meta = decode_hash_meta_checked(raw)?;
+                            if meta.packed {
+                                Ok((
+                                    meta.expire_ms,
+                                    decode_packed_hash(raw).ok_or_else(|| {
+                                        Error::msg("Failed to decode packed hash")
+                                    })?,
+                                    false,
+                                ))
+                            } else {
+                                has_split = true;
+                                Ok((meta.expire_ms, PackedHashFields::new(), false))
+                            }
+                        }
+                    }
+                });
+            }
+            if has_split {
+                for key in keys {
+                    self.promote_packed_hash_async(key).await?;
+                }
+                return Ok(None);
+            }
+
+            let mut replies = Vec::with_capacity(mutations.len());
+            let mut changed_commands = 0u64;
+            let mut overflow = false;
+            for mutation in mutations {
+                let state = &mut states[key_positions[mutation.key]];
+                let reply = match state {
+                    Err(message) => Err(Error::msg(message.clone())),
+                    Ok((_, fields, dirty)) => {
+                        let mut added = 0usize;
+                        let mut changed = false;
+                        let mut seen = HashSet::with_capacity(mutation.fields.len());
+                        for (field, value) in &mutation.fields {
+                            if seen.insert(*field) && !fields.contains_key(*field) {
+                                added += 1;
+                            }
+                            changed |= fields.get(*field).is_none_or(|old| old != *value);
+                            fields.insert((*field).to_string(), (*value).to_vec());
+                        }
+                        if changed {
+                            *dirty = true;
+                            changed_commands += 1;
+                        }
+                        Ok(added)
+                    }
+                };
+                if let Ok((expire_ms, fields, _)) = state
+                    && encode_packed_hash(*expire_ms, fields).is_none()
+                {
+                    overflow = true;
+                }
+                replies.push(reply);
+            }
+            if overflow {
+                for key in keys {
+                    self.promote_packed_hash_async(key).await?;
+                }
+                return Ok(None);
+            }
+            if changed_commands == 0 {
+                return Ok(Some(replies));
+            }
+
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::new();
+            let mut dirty_keys = Vec::new();
+            for (position, state) in states.iter().enumerate() {
+                let Ok((expire_ms, fields, true)) = state else {
+                    continue;
+                };
+                batch.put(
+                    &raw_keys[position],
+                    &encode_packed_hash(*expire_ms, fields)
+                        .expect("validated packed hash must encode"),
+                )?;
+                conditions.push(CompareCondition::from_observed(&observations[position]));
+                dirty_keys.push(keys[position]);
+            }
+            self.fulltext_enqueue_hash_upserts_to_batch(&mut batch, &dirty_keys)?;
+            if self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await?
+            {
+                self.changes.fetch_add(changed_commands, Ordering::Relaxed);
+                return Ok(Some(replies));
+            }
+        }
+        for key in keys {
+            self.promote_packed_hash_async(key).await?;
+        }
+        Ok(None)
+    }
+
     /// Applies an ordered HSET pipeline with one cross-key storage commit.
     ///
     /// Commands against the same key observe earlier commands in the pipeline,
@@ -121,6 +241,21 @@ impl Db {
                 return replies;
             }
             drop(structural_guards);
+        }
+
+        match self
+            .try_apply_hash_set_packed_batch_async(mutations, &keys, &key_positions)
+            .await
+        {
+            Ok(Some(replies)) => return replies,
+            Ok(None) => {}
+            Err(error) => {
+                let message = error.to_string();
+                return mutations
+                    .iter()
+                    .map(|_| Err(Error::msg(message.clone())))
+                    .collect();
+            }
         }
 
         let structural_shards =
@@ -588,7 +723,7 @@ impl Db {
         updates: &[(&str, &[u8])],
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
-        loop {
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
             let observed = self.store.get_raw_observed(&key_bytes);
             let (expire_ms, mut packed) = match observed.value() {
                 None => (0, PackedHashFields::new()),
@@ -639,6 +774,8 @@ impl Db {
                 return Ok(Some(added));
             }
         }
+        self.promote_packed_hash(key)?;
+        Ok(None)
     }
 
     pub async fn hash_set_many_async(
@@ -728,6 +865,15 @@ impl Db {
             }
         }
         drop(field_read_guards);
+        if self
+            .store
+            .get_raw_async(&self.mk(key))
+            .await
+            .as_deref()
+            .is_some_and(is_packed_hash_raw)
+        {
+            self.promote_packed_hash_async(key).await?;
+        }
         let _field_write_guards = self.lock_hash_field_write_shards(&field_shards).await;
         loop {
             match self

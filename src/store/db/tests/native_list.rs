@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::db::{SMALL_LIST_MAX_ITEMS, decode_list_meta, decode_packed_list};
 
 #[test]
 fn list_native_queue_ops_use_head_tail_metadata() {
@@ -15,6 +16,7 @@ fn list_native_queue_ops_use_head_tail_metadata() {
         4
     );
     assert_eq!(db.list_len("queue").unwrap(), 4);
+    assert!(decode_packed_list(&db.store.get_raw(&db.mk("queue")).unwrap()).is_some());
     assert!(matches!(
         db.get("queue"),
         Some(Structure::List(items))
@@ -25,6 +27,22 @@ fn list_native_queue_ops_use_head_tail_metadata() {
                 "b".to_string()
             ]
     ));
+}
+
+#[test]
+fn list_promotes_once_at_the_inline_item_limit() {
+    let db = test_db();
+    let values = (0..=SMALL_LIST_MAX_ITEMS)
+        .map(|index| format!("item-{index}"))
+        .collect::<Vec<_>>();
+    db.list_push_right("queue", &values, false).unwrap();
+    let raw = db.store.get_raw(&db.mk("queue")).unwrap();
+    let meta = decode_list_meta(&raw).unwrap();
+    assert_ne!(meta.version, 0);
+    assert!(decode_packed_list(&raw).is_none());
+
+    db.list_pop_right("queue").unwrap();
+    assert!(decode_packed_list(&db.store.get_raw(&db.mk("queue")).unwrap()).is_none());
 }
 
 #[test]
@@ -117,6 +135,7 @@ async fn insert_and_remove_preserve_nonzero_list_storage_boundaries() {
     )
     .await
     .unwrap();
+    db.promote_packed_list_async("shifted").await.unwrap();
     db.list_push_left_async("shifted", &["front".to_string()], false)
         .await
         .unwrap();
@@ -177,6 +196,7 @@ async fn streaming_list_remove_preserves_direction_counts_and_cross_zero_layout(
     )
     .await
     .unwrap();
+    db.promote_packed_list_async("stream-remove").await.unwrap();
     db.list_push_left_async(
         "stream-remove",
         &["left".to_string(), "x".to_string()],

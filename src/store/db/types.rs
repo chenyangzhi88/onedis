@@ -173,6 +173,8 @@ pub(crate) struct HashSetBatchMutation<'a> {
     pub(crate) fields: Vec<(&'a str, &'a [u8])>,
 }
 
+pub(crate) type StreamAddBatchCommand<'a> = (&'a str, Option<StreamId>, Vec<(&'a str, &'a str)>);
+
 impl SetBatchMutation<'_> {
     pub(crate) fn key(&self) -> &str {
         match self {
@@ -769,4 +771,5 @@ pub(in crate::store::db) struct SetMeta {
     pub(in crate::store::db) expire_ms: u64,
     pub(in crate::store::db) version: u64,
     pub(in crate::store::db) len: usize,
+    pub(in crate::store::db) packed: bool,
 }

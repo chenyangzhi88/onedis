@@ -48,6 +48,12 @@ impl Db {
             return;
         }
 
+        if is_packed_list_raw(raw) {
+            (batch.put(&main_key(target_db_index, target_key), raw))
+                .expect("write batch append invariant violated");
+            return;
+        }
+
         if let Some(meta) = decode_list_meta(raw) {
             (batch.put(
                 &main_key(target_db_index, target_key),
@@ -61,6 +67,12 @@ impl Db {
                 list_item_prefix(target_db_index, target_key, target_version),
             )
             .await;
+            return;
+        }
+
+        if is_packed_stream_raw(raw) {
+            (batch.put(&main_key(target_db_index, target_key), raw))
+                .expect("write batch append invariant violated");
             return;
         }
 
@@ -120,6 +132,11 @@ impl Db {
                 .await;
             }
             TYPE_SORTED_SET => {
+                if is_packed_zset_raw(raw) {
+                    (batch.put(&main_key(target_db_index, target_key), raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(target_db_index, target_key),
                     &encode_zset_meta(header.expire_ms, target_version),
@@ -144,6 +161,11 @@ impl Db {
                 let Some(meta) = decode_set_meta(raw) else {
                     return;
                 };
+                if meta.packed {
+                    (batch.put(&main_key(target_db_index, target_key), raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(target_db_index, target_key),
                     &encode_set_meta(meta.expire_ms, target_version, meta.len),
@@ -158,6 +180,11 @@ impl Db {
                 .await;
             }
             TYPE_JSON => {
+                if is_packed_json_raw(raw) {
+                    (batch.put(&main_key(target_db_index, target_key), raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(target_db_index, target_key),
                     &re_encode_meta_with_version(raw, target_version),
@@ -172,6 +199,11 @@ impl Db {
                 .await;
             }
             TYPE_LIST => {
+                if is_packed_list_raw(raw) {
+                    (batch.put(&main_key(target_db_index, target_key), raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(target_db_index, target_key),
                     &re_encode_meta_with_version(raw, target_version),

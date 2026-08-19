@@ -10,6 +10,59 @@ pub(in crate::store::db) struct JsonIndexedSetRequest<'a> {
 }
 
 impl Db {
+    fn try_json_set_packed(
+        &self,
+        key: &str,
+        tokens: &[JsonPathToken],
+        new_value: &JsonValue,
+        condition: SetCondition,
+    ) -> Result<Option<bool>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(None);
+            };
+            let Some(mut document) = decode_packed_json(raw) else {
+                return Ok(None);
+            };
+            let target_exists = json_value_at_path(&document, tokens).is_some();
+            let condition_matches = match condition {
+                SetCondition::Always => true,
+                SetCondition::Nx => !target_exists,
+                SetCondition::Xx => target_exists,
+            };
+            if !condition_matches {
+                return Ok(Some(false));
+            }
+            if !set_json_value_at_path(&mut document, tokens, new_value.clone()) {
+                return Ok(Some(false));
+            }
+            let encoded_bytes = serde_json::to_vec(&document)?.len();
+            validate_json_value_limits(&document, encoded_bytes)?;
+            let header = decode_meta_header(raw).ok_or_else(|| Error::msg("Type parsing error"))?;
+            let mut batch = WriteBatch::new();
+            self.write_json_document_to_batch(
+                &mut batch,
+                key,
+                &document,
+                header.expire_ms,
+                self.next_version(),
+            )?;
+            self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                self.fulltext_request_json_refresh(key)?;
+                return Ok(Some(true));
+            }
+        }
+        self.promote_packed_json(key)?;
+        Ok(None)
+    }
+
     /// Applies every JSON.MSET entry to an in-memory view first, then publishes
     /// all affected documents with one conditional kv-engine batch. A missing
     /// path, wrong type, invalid value, or write conflict leaves every key
@@ -89,14 +142,12 @@ impl Db {
             let encoded_bytes = serde_json::to_vec(document)?.len();
             validate_json_value_limits(document, encoded_bytes)?;
             let version = self.next_version_async().await;
-            self.touch_json_meta_to_batch(&mut batch, key, expires[position], version)?;
-            write_json_subtree_to_batch(
+            self.write_json_document_to_batch(
                 &mut batch,
-                self.db_index,
                 key,
-                version,
-                &mut Vec::new(),
                 document,
+                expires[position],
+                version,
             )?;
             self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
             if expires[position] > 0 {
@@ -148,7 +199,37 @@ impl Db {
         let Some(raw) = observed.value() else {
             return Ok(None);
         };
-        let (_, version) = Self::decode_json_meta(raw)?;
+        let (expire_ms, version) = Self::decode_json_meta(raw)?;
+        if version == 0 {
+            let mut document =
+                decode_packed_json(raw).ok_or_else(|| Error::msg("Type parsing error"))?;
+            let Some(value) = json_value_at_path_mut(&mut document, &tokens) else {
+                return Ok(None);
+            };
+            let result = update(value)?;
+            validate_json_value_limits(&document, serde_json::to_vec(&document)?.len())?;
+            let mut batch = WriteBatch::new();
+            self.write_json_document_to_batch(
+                &mut batch,
+                key,
+                &document,
+                expire_ms,
+                self.next_version_async().await,
+            )?;
+            self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
+            if !self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                return Err(Error::msg("ERR json write conflict"));
+            }
+            self.changes.fetch_add(1, Ordering::Relaxed);
+            self.fulltext_request_json_refresh(key)?;
+            return Ok(Some(result));
+        }
         let Some(mut value) = self
             .read_json_value_at_path_async(key, version, &tokens)
             .await?
@@ -160,7 +241,6 @@ impl Db {
         let meta_condition = CompareCondition::from_observed(&observed);
 
         let committed = if tokens.is_empty() {
-            let (expire_ms, _) = Self::decode_json_meta(raw)?;
             self.write_json_value_cas_async(
                 key,
                 &value,
@@ -268,28 +348,12 @@ impl Db {
                 .as_ref()
                 .expect("final JSON batch command was parsed successfully");
             let mut key_batch = WriteBatch::new();
-            if let Err(error) = self.touch_json_meta_to_batch(
+            if let Err(error) = self.write_json_document_to_batch(
                 &mut key_batch,
                 key,
+                value,
                 expires[position],
                 versions[position],
-            ) {
-                let message = error.to_string();
-                for (index, (command_key, _)) in commands.iter().enumerate() {
-                    if command_key == key && replies[index].is_ok() {
-                        replies[index] = Err(Error::msg(message.clone()));
-                    }
-                }
-                continue;
-            }
-            let mut path = Vec::new();
-            if let Err(error) = write_json_subtree_to_batch(
-                &mut key_batch,
-                self.db_index,
-                key,
-                versions[position],
-                &mut path,
-                value,
             ) {
                 let message = error.to_string();
                 for (index, (command_key, _)) in commands.iter().enumerate() {
@@ -368,6 +432,9 @@ impl Db {
         validate_json_value_limits(&new_value, json.len())?;
 
         self.expire_if_needed(key);
+        if let Some(result) = self.try_json_set_packed(key, &tokens, &new_value, condition)? {
+            return Ok(result);
+        }
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
             if !tokens.is_empty() || condition == SetCondition::Xx {
                 return Ok(false);
@@ -569,6 +636,49 @@ impl Db {
             };
 
             let (_, version) = Self::decode_json_meta(&raw)?;
+
+            if version == 0 {
+                let mut document =
+                    decode_packed_json(&raw).ok_or_else(|| Error::msg("Type parsing error"))?;
+                let target_exists = json_value_at_path(&document, &tokens).is_some();
+                let condition_matches = match condition {
+                    SetCondition::Always => true,
+                    SetCondition::Nx => !target_exists,
+                    SetCondition::Xx => target_exists,
+                };
+                if !condition_matches {
+                    return Ok(false);
+                }
+                if !set_json_value_at_path(&mut document, &tokens, new_value.clone()) {
+                    return Ok(false);
+                }
+                let encoded_bytes = serde_json::to_vec(&document)?.len();
+                validate_json_value_limits(&document, encoded_bytes)?;
+                let expire_ms = decode_meta_header(&raw)
+                    .ok_or_else(|| Error::msg("Type parsing error"))?
+                    .expire_ms;
+                let mut batch = WriteBatch::new();
+                self.write_json_document_to_batch(
+                    &mut batch,
+                    key,
+                    &document,
+                    expire_ms,
+                    self.next_version_async().await,
+                )?;
+                self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
+                if self
+                    .compare_and_write_batch_if_not_empty_async(&[meta_condition], &batch)
+                    .await?
+                {
+                    self.changes.fetch_add(1, Ordering::Relaxed);
+                    self.fulltext_request_json_refresh(key)?;
+                    return Ok(true);
+                }
+                if attempt + 1 == SMALL_INLINE_CAS_ATTEMPTS {
+                    self.promote_packed_json_async(key).await?;
+                }
+                continue;
+            }
 
             match self
                 .json_set_indexed_async(JsonIndexedSetRequest {

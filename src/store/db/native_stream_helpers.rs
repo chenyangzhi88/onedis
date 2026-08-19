@@ -1,6 +1,70 @@
 use super::*;
 
 impl Db {
+    pub(in crate::store::db) fn promote_packed_stream(&self, key: &str) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let Some((mut meta, entries)) = decode_packed_stream(raw) else {
+                return Ok(());
+            };
+            meta.version = self.next_version();
+            let mut batch = WriteBatch::new();
+            batch.put(&key_bytes, &encode_stream_meta(meta))?;
+            for (id, value) in entries {
+                batch.put(
+                    &stream_entry_key(self.db_index, key, meta.version, id),
+                    &value,
+                )?;
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                return Ok(());
+            }
+        }
+        Err(Error::msg("ERR stream layout promotion conflict"))
+    }
+
+    pub(in crate::store::db) async fn promote_packed_stream_async(
+        &self,
+        key: &str,
+    ) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let Some((mut meta, entries)) = decode_packed_stream(raw) else {
+                return Ok(());
+            };
+            meta.version = self.next_version_async().await;
+            let mut batch = WriteBatch::new();
+            batch.put(&key_bytes, &encode_stream_meta(meta))?;
+            for (id, value) in entries {
+                batch.put(
+                    &stream_entry_key(self.db_index, key, meta.version, id),
+                    &value,
+                )?;
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(Error::msg("ERR stream layout promotion conflict"))
+    }
+
     pub(in crate::store::db) fn stream_meta(&self, key: &str) -> Result<Option<StreamMeta>, Error> {
         self.expire_if_needed(key);
         let Some(raw) = self.store.get_raw(&self.mk(key)) else {
@@ -59,6 +123,15 @@ impl Db {
         key: &str,
         version: u64,
     ) -> Vec<(StreamId, Vec<u8>)> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_stream)
+                .map(|(_, entries)| entries)
+                .unwrap_or_default();
+        }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw(&prefix)
@@ -74,6 +147,16 @@ impl Db {
         key: &str,
         version: u64,
     ) -> Vec<(StreamId, Vec<u8>)> {
+        if version == 0 {
+            return self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_stream)
+                .map(|(_, entries)| entries)
+                .unwrap_or_default();
+        }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         self.store
             .scan_prefix_raw_async(&prefix)
@@ -138,6 +221,14 @@ impl Db {
         if limit == 0 || start > end {
             return Vec::new();
         }
+        if version == 0 {
+            return self
+                .stream_entries_between_async(key, version, start, end)
+                .await
+                .into_iter()
+                .take(limit)
+                .collect();
+        }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         let lower = stream_entry_key(self.db_index, key, version, start);
         let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
@@ -171,6 +262,12 @@ impl Db {
         if limit == 0 || start > end {
             return Vec::new();
         }
+        if version == 0 {
+            let mut entries = self.stream_entries_between(key, version, start, end);
+            entries.reverse();
+            entries.truncate(limit);
+            return entries;
+        }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         let lower = stream_entry_key(self.db_index, key, version, start);
         let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
@@ -203,6 +300,14 @@ impl Db {
         if limit == 0 || start > end {
             return Vec::new();
         }
+        if version == 0 {
+            let mut entries = self
+                .stream_entries_between_async(key, version, start, end)
+                .await;
+            entries.reverse();
+            entries.truncate(limit);
+            return entries;
+        }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         let lower = stream_entry_key(self.db_index, key, version, start);
         let upper = if end.ms == u64::MAX && end.seq == u64::MAX {
@@ -230,6 +335,18 @@ impl Db {
         version: u64,
         id: StreamId,
     ) -> Option<StreamEntry> {
+        if version == 0 {
+            let (_, entries) = self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_stream)?;
+            let (_, raw) = entries.into_iter().find(|(entry_id, _)| *entry_id == id)?;
+            return Some(StreamEntry {
+                id: id.to_redis_id(),
+                fields: decode_stream_entry(&raw)?,
+            });
+        }
         let raw = self
             .store
             .get_raw(&stream_entry_key(self.db_index, key, version, id))?;
@@ -245,6 +362,19 @@ impl Db {
         version: u64,
         id: StreamId,
     ) -> Option<StreamEntry> {
+        if version == 0 {
+            let (_, entries) = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_stream)?;
+            let (_, raw) = entries.into_iter().find(|(entry_id, _)| *entry_id == id)?;
+            return Some(StreamEntry {
+                id: id.to_redis_id(),
+                fields: decode_stream_entry(&raw)?,
+            });
+        }
         let raw = self
             .store
             .get_raw_async(&stream_entry_key(self.db_index, key, version, id))

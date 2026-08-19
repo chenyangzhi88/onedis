@@ -1,4 +1,7 @@
 use super::*;
+use crate::store::db::{
+    SMALL_SET_MAX_MEMBERS, SMALL_ZSET_MAX_MEMBERS, decode_packed_zset, decode_set_meta,
+};
 
 #[test]
 fn set_is_stored_and_loaded_via_kv_entries() {
@@ -31,9 +34,41 @@ fn set_native_ops_use_member_level_storage() {
     assert!(db.set_contains("tags", "rust").unwrap());
     assert!(!db.set_contains("tags", "redis").unwrap());
 
+    let raw = db.store.get_raw(&db.mk("tags")).unwrap();
+    let meta = decode_set_meta(&raw).unwrap();
+    assert!(meta.packed);
+    assert_eq!(
+        db.store
+            .scan_prefix_raw(&set_member_prefix(db.db_index, "tags", 0))
+            .len(),
+        0
+    );
+
     let mut members = db.set_members("tags").unwrap();
     members.sort();
     assert_eq!(members, vec!["db".to_string(), "rust".to_string()]);
+}
+
+#[test]
+fn set_promotes_once_when_the_inline_member_limit_is_exceeded() {
+    let db = test_db();
+    let members = (0..=SMALL_SET_MAX_MEMBERS)
+        .map(|index| format!("member-{index:03}"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(db.set_add("large-set", &members).unwrap(), members.len());
+    let meta = db.set_meta("large-set").unwrap().unwrap();
+    assert!(!meta.packed);
+    assert_ne!(meta.version, 0);
+    assert_eq!(
+        db.store
+            .scan_prefix_raw(&set_member_prefix(db.db_index, "large-set", meta.version))
+            .len(),
+        members.len()
+    );
+
+    db.set_remove("large-set", &members[1..]).unwrap();
+    assert!(!db.set_meta("large-set").unwrap().unwrap().packed);
 }
 
 #[test]
@@ -163,6 +198,7 @@ fn zset_native_ops_use_dual_index_storage() {
     assert_eq!(db.zset_card("leaders").unwrap(), 2);
     assert_eq!(db.zset_score("leaders", "alice").unwrap(), Some(1.0));
     assert_eq!(db.zset_score("leaders", "bob").unwrap(), Some(4.0));
+    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap()).is_some());
 
     assert_eq!(
         db.zset_add("leaders", &[(3.0, "alice".to_string())])
@@ -170,6 +206,33 @@ fn zset_native_ops_use_dual_index_storage() {
         0
     );
     assert_eq!(db.zset_score("leaders", "alice").unwrap(), Some(3.0));
+}
+
+#[tokio::test]
+async fn zset_pipeline_stays_packed_then_promotes_once_at_the_member_limit() {
+    let db = test_db();
+    let members = (0..SMALL_ZSET_MAX_MEMBERS)
+        .map(|index| format!("member-{index}"))
+        .collect::<Vec<_>>();
+    let commands = members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| ("leaders", vec![(index as f64, member.as_str())]))
+        .collect::<Vec<_>>();
+    let replies = db.zset_add_batch_async(&commands).await;
+    assert!(replies.iter().all(Result::is_ok));
+    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap()).is_some());
+
+    db.zset_add("leaders", &[(100.0, "overflow".to_string())])
+        .unwrap();
+    let raw = db.store.get_raw(&db.mk("leaders")).unwrap();
+    let header = decode_meta_header(&raw).unwrap();
+    assert_ne!(header.version, 0);
+    assert!(decode_packed_zset(&raw).is_none());
+
+    db.zset_remove("leaders", &["overflow".to_string()])
+        .unwrap();
+    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap()).is_none());
 }
 
 #[test]

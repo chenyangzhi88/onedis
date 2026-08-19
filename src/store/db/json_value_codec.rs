@@ -8,6 +8,115 @@ pub(in crate::store::db) enum JsonPathToken {
 
 const MAX_JSON_PATH_BYTES: usize = 4 * 1024;
 const MAX_JSON_PATH_DEPTH: usize = 128;
+pub(in crate::store::db) const SMALL_JSON_MAX_ENCODED_BYTES: usize = 16 * 1024;
+pub(in crate::store::db) const SMALL_JSON_MAX_NODES: usize = 256;
+const PACKED_JSON_MAGIC: [u8; 4] = [0xf1, b'J', b'P', 1];
+const PACKED_JSON_HEADER_LEN: usize = 17 + PACKED_JSON_MAGIC.len() + 4;
+
+pub(in crate::store::db) fn is_packed_json_raw(raw: &[u8]) -> bool {
+    raw.len() >= PACKED_JSON_HEADER_LEN
+        && raw.get(16) == Some(&TYPE_JSON)
+        && raw[17..17 + PACKED_JSON_MAGIC.len()] == PACKED_JSON_MAGIC
+}
+
+pub(in crate::store::db) fn decode_packed_json(raw: &[u8]) -> Option<JsonValue> {
+    if !is_packed_json_raw(raw) {
+        return None;
+    }
+    let offset = 17 + PACKED_JSON_MAGIC.len();
+    let len = u32::from_be_bytes(raw.get(offset..offset + 4)?.try_into().ok()?) as usize;
+    let payload = raw.get(offset + 4..offset + 4 + len)?;
+    if offset + 4 + len != raw.len() {
+        return None;
+    }
+    serde_json::from_slice(payload).ok()
+}
+
+pub(in crate::store::db) fn encode_packed_json(
+    expire_ms: u64,
+    value: &JsonValue,
+) -> Option<Vec<u8>> {
+    if json_node_count(value) > SMALL_JSON_MAX_NODES {
+        return None;
+    }
+    let payload = serde_json::to_vec(value).ok()?;
+    let encoded_len = PACKED_JSON_HEADER_LEN.checked_add(payload.len())?;
+    if encoded_len > SMALL_JSON_MAX_ENCODED_BYTES {
+        return None;
+    }
+    let mut raw = Vec::with_capacity(encoded_len);
+    raw.extend_from_slice(&expire_ms.to_be_bytes());
+    raw.extend_from_slice(&0u64.to_be_bytes());
+    raw.push(TYPE_JSON);
+    raw.extend_from_slice(&PACKED_JSON_MAGIC);
+    raw.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    raw.extend_from_slice(&payload);
+    Some(raw)
+}
+
+pub(in crate::store::db) fn json_node_count(value: &JsonValue) -> usize {
+    let mut count = 0usize;
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        count = count.saturating_add(1);
+        match value {
+            JsonValue::Array(values) => pending.extend(values),
+            JsonValue::Object(values) => pending.extend(values.values()),
+            _ => {}
+        }
+    }
+    count
+}
+
+pub(in crate::store::db) fn json_value_at_path<'a>(
+    root: &'a JsonValue,
+    tokens: &[JsonPathToken],
+) -> Option<&'a JsonValue> {
+    let mut current = root;
+    for token in tokens {
+        current = match (token, current) {
+            (JsonPathToken::Field(field), JsonValue::Object(object)) => object.get(field)?,
+            (JsonPathToken::Index(index), JsonValue::Array(array)) => array.get(*index)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+pub(in crate::store::db) fn json_value_at_path_mut<'a>(
+    root: &'a mut JsonValue,
+    tokens: &[JsonPathToken],
+) -> Option<&'a mut JsonValue> {
+    let mut current = root;
+    for token in tokens {
+        current = match (token, current) {
+            (JsonPathToken::Field(field), JsonValue::Object(object)) => object.get_mut(field)?,
+            (JsonPathToken::Index(index), JsonValue::Array(array)) => array.get_mut(*index)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+pub(in crate::store::db) fn remove_json_value_at_path(
+    root: &mut JsonValue,
+    tokens: &[JsonPathToken],
+) -> bool {
+    let Some((last, parents)) = tokens.split_last() else {
+        return false;
+    };
+    let Some(parent) = json_value_at_path_mut(root, parents) else {
+        return false;
+    };
+    match (last, parent) {
+        (JsonPathToken::Field(field), JsonValue::Object(object)) => object.remove(field).is_some(),
+        (JsonPathToken::Index(index), JsonValue::Array(array)) if *index < array.len() => {
+            array.remove(*index);
+            true
+        }
+        _ => false,
+    }
+}
 
 pub(in crate::store::db) fn parse_json_path(path: &str) -> Result<Vec<JsonPathToken>, Error> {
     if path.is_empty() || path.len() > MAX_JSON_PATH_BYTES {

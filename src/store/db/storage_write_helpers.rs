@@ -269,6 +269,11 @@ impl Db {
                 }
             }
             Structure::SortedSet(set) => {
+                if let Some(raw) = encode_packed_zset(expire_ms, set) {
+                    (batch.put(&main_key(db_index, key), &raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(db_index, key),
                     &encode_zset_meta(expire_ms, version),
@@ -289,6 +294,12 @@ impl Db {
                 }
             }
             Structure::Set(set) => {
+                let packed = set.iter().cloned().collect::<PackedSetMembers>();
+                if let Some(raw) = encode_packed_set(expire_ms, &packed) {
+                    (batch.put(&main_key(db_index, key), &raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(db_index, key),
                     &encode_set_meta(expire_ms, version, set.len()),
@@ -304,6 +315,15 @@ impl Db {
                 }
             }
             Structure::List(list) => {
+                let packed = list
+                    .iter()
+                    .map(|value| value.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                if let Some(raw) = encode_packed_list(expire_ms, &packed) {
+                    (batch.put(&main_key(db_index, key), &raw))
+                        .expect("write batch append invariant violated");
+                    return;
+                }
                 (batch.put(
                     &main_key(db_index, key),
                     &encode_list_meta(expire_ms, version, 0, list.len() as i64),
@@ -328,6 +348,22 @@ impl Db {
                         encoded_entries.push((id, entry.fields.clone()));
                         last_id = id;
                     }
+                }
+                let meta = StreamMeta {
+                    expire_ms,
+                    version: 0,
+                    last_id,
+                    length: encoded_entries.len() as u64,
+                    entries_added: encoded_entries.len() as u64,
+                };
+                let packed_entries = encoded_entries
+                    .iter()
+                    .map(|(id, fields)| (*id, encode_stream_entry(fields)))
+                    .collect::<Vec<_>>();
+                if let Some(raw) = encode_packed_stream(meta, &packed_entries) {
+                    (batch.put(&main_key(db_index, key), &raw))
+                        .expect("write batch append invariant violated");
+                    return;
                 }
                 (batch.put(
                     &main_key(db_index, key),

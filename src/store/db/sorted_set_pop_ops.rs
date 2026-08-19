@@ -4,6 +4,131 @@ pub type ZsetEntry = (String, f64);
 pub type ZsetMultiPopResult = Option<(String, Vec<ZsetEntry>)>;
 
 impl Db {
+    fn try_zset_pop_packed(
+        &self,
+        key: &str,
+        min: bool,
+        count: usize,
+    ) -> Result<Option<Vec<ZsetEntry>>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            self.expire_if_needed(key);
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(Some(Vec::new()));
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode sorted set metadata"))?;
+            if header.type_tag != TYPE_SORTED_SET {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let Some(mut packed) = decode_packed_zset(raw) else {
+                return Ok(None);
+            };
+            let mut ranked = packed
+                .iter()
+                .map(|(member, score)| (member.clone(), *score))
+                .collect::<Vec<_>>();
+            ranked.sort_by(|(left_member, left_score), (right_member, right_score)| {
+                left_score
+                    .total_cmp(right_score)
+                    .then_with(|| left_member.cmp(right_member))
+            });
+            if !min {
+                ranked.reverse();
+            }
+            let selected = ranked.into_iter().take(count).collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Ok(Some(Vec::new()));
+            }
+            for (member, _) in &selected {
+                packed.remove(member);
+            }
+            let mut batch = WriteBatch::new();
+            if packed.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            } else {
+                batch.put(
+                    &key_bytes,
+                    &encode_packed_zset(header.expire_ms, &packed)
+                        .expect("removing entries cannot overflow packed sorted set"),
+                )?;
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(selected));
+            }
+        }
+        Err(Error::msg("ERR sorted set pop write conflict"))
+    }
+
+    async fn try_zset_pop_packed_async(
+        &self,
+        key: &str,
+        min: bool,
+        count: usize,
+    ) -> Result<Option<Vec<ZsetEntry>>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            self.expire_if_needed_async(key).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(Some(Vec::new()));
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode sorted set metadata"))?;
+            if header.type_tag != TYPE_SORTED_SET {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let Some(mut packed) = decode_packed_zset(raw) else {
+                return Ok(None);
+            };
+            let mut ranked = packed
+                .iter()
+                .map(|(member, score)| (member.clone(), *score))
+                .collect::<Vec<_>>();
+            ranked.sort_by(|(left_member, left_score), (right_member, right_score)| {
+                left_score
+                    .total_cmp(right_score)
+                    .then_with(|| left_member.cmp(right_member))
+            });
+            if !min {
+                ranked.reverse();
+            }
+            let selected = ranked.into_iter().take(count).collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Ok(Some(Vec::new()));
+            }
+            for (member, _) in &selected {
+                packed.remove(member);
+            }
+            let mut batch = WriteBatch::new();
+            if packed.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            } else {
+                batch.put(
+                    &key_bytes,
+                    &encode_packed_zset(header.expire_ms, &packed)
+                        .expect("removing entries cannot overflow packed sorted set"),
+                )?;
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(selected));
+            }
+        }
+        Err(Error::msg("ERR sorted set pop write conflict"))
+    }
+
     /// Apply ordered ZPOPMIN/ZPOPMAX commands with at most one bounded scan from each end/key.
     pub(crate) async fn zset_pop_batch_async(
         &self,
@@ -34,6 +159,16 @@ impl Db {
         let shards =
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
         let _write_guards = self.lock_write_shards(&shards).await;
+
+        for key in &keys {
+            if let Err(error) = self.promote_packed_zset_async(key).await {
+                let message = error.to_string();
+                return commands
+                    .iter()
+                    .map(|_| Err(Error::msg(message.clone())))
+                    .collect();
+            }
+        }
 
         for _ in 0..64 {
             for key in &keys {
@@ -192,6 +327,9 @@ impl Db {
         if count == 0 {
             return Ok(Vec::new());
         }
+        if let Some(entries) = self.try_zset_pop_packed_async(key, min, count).await? {
+            return Ok(entries);
+        }
         let Some((expire_ms, version)) = self.zset_expire_ms_async(key).await? else {
             return Ok(Vec::new());
         };
@@ -224,6 +362,9 @@ impl Db {
     ) -> Result<Vec<ZsetEntry>, Error> {
         if count == 0 {
             return Ok(Vec::new());
+        }
+        if let Some(entries) = self.try_zset_pop_packed(key, min, count)? {
+            return Ok(entries);
         }
         let Some((expire_ms, version)) = self.zset_expire_ms(key)? else {
             return Ok(Vec::new());

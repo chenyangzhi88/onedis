@@ -42,8 +42,27 @@ pub(in crate::store::db) fn encode_raw_string(value: &[u8], expire_ms: u64) -> V
 }
 
 pub(in crate::store::db) fn decode_entry(raw: &[u8]) -> Option<(u64, u64, Structure)> {
+    if let Some(items) = decode_packed_list(raw) {
+        let list = items
+            .into_iter()
+            .map(|item| String::from_utf8(item).ok())
+            .collect::<Option<Vec<_>>>()?;
+        return Some((decode_expire_ms(raw), 0, Structure::List(list)));
+    }
     if decode_list_meta(raw).is_some() {
         return None;
+    }
+    if let Some((meta, entries)) = decode_packed_stream(raw) {
+        let entries = entries
+            .into_iter()
+            .map(|(id, raw)| {
+                Some(StreamEntry {
+                    id: id.to_redis_id(),
+                    fields: decode_stream_entry(&raw)?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        return Some((meta.expire_ms, 0, Structure::Stream(entries)));
     }
     if decode_stream_meta(raw).is_some() {
         return None;
@@ -56,6 +75,24 @@ pub(in crate::store::db) fn decode_entry(raw: &[u8]) -> Option<(u64, u64, Struct
             .filter_map(|(field, value)| String::from_utf8(value).ok().map(|value| (field, value)))
             .collect();
         return Some((meta.expire_ms, 0, Structure::Hash(hash)));
+    }
+    if let Some(set) = decode_packed_set(raw) {
+        let expire_ms = decode_expire_ms(raw);
+        return Some((
+            expire_ms,
+            0,
+            Structure::Set(set.into_iter().collect::<HashSet<_>>()),
+        ));
+    }
+    if let Some(zset) = decode_packed_zset(raw) {
+        return Some((decode_expire_ms(raw), 0, Structure::SortedSet(zset)));
+    }
+    if let Some(json) = decode_packed_json(raw) {
+        return Some((
+            decode_expire_ms(raw),
+            0,
+            Structure::Json(serde_json::to_string(&json).ok()?),
+        ));
     }
     if raw.len() < 17 {
         return None;

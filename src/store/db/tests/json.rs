@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::db::is_packed_json_raw;
 use crate::store::db::{JsonNodeSnapshot, JsonPathToken};
 
 #[test]
@@ -141,8 +142,10 @@ async fn root_json_set_batch_reports_build_failure_for_every_command_on_the_key(
     let replies = db
         .json_set_root_batch_async(&[(&partial_key, &json), (&partial_key, &json)])
         .await;
-    assert!(replies.iter().all(Result::is_err));
-    assert!(db.store.get_raw(&db.mk(&partial_key)).is_none());
+    assert!(replies.iter().all(Result::is_ok));
+    assert!(is_packed_json_raw(
+        &db.store.get_raw(&db.mk(&partial_key)).unwrap()
+    ));
 }
 
 #[test]
@@ -160,15 +163,14 @@ fn json_paths_reject_ambiguous_and_resource_amplifying_inputs() {
 #[test]
 fn json_partial_update_uses_indexed_subtree_storage() {
     let db = test_db();
+    let padding = "x".repeat(17 * 1024);
+    let document = format!(
+        r#"{{"profile":{{"name":"alice","city":"Paris"}},"stats":{{"count":1}},"padding":"{padding}"}}"#
+    );
 
     assert!(
-        db.json_set(
-            "doc",
-            "$",
-            r#"{"profile":{"name":"alice","city":"Paris"},"stats":{"count":1}}"#,
-            SetCondition::Always,
-        )
-        .unwrap()
+        db.json_set("doc", "$", &document, SetCondition::Always,)
+            .unwrap()
     );
     let raw = db.store.get_raw(&db.mk("doc")).unwrap();
     let (_, version, structure) = super::decode_entry(&raw).unwrap();
@@ -201,15 +203,13 @@ fn json_partial_update_uses_indexed_subtree_storage() {
 #[test]
 fn json_array_delete_keeps_later_element_storage_keys_and_root_delete_cleans_nodes() {
     let db = test_db();
+    let padding = "x".repeat(17 * 1024);
+    let document =
+        format!(r#"{{"tags":["a","b","c"],"profile":{{"name":"alice"}},"padding":"{padding}"}}"#);
 
     assert!(
-        db.json_set(
-            "doc",
-            "$",
-            r#"{"tags":["a","b","c"],"profile":{"name":"alice"}}"#,
-            SetCondition::Always,
-        )
-        .unwrap()
+        db.json_set("doc", "$", &document, SetCondition::Always,)
+            .unwrap()
     );
     let raw = db.store.get_raw(&db.mk("doc")).unwrap();
     let header = super::decode_meta_header(&raw).unwrap();
@@ -446,17 +446,16 @@ async fn json_command_async_path_uses_json_store() {
 #[tokio::test]
 async fn json_indexed_async_updates_deletes_and_conditions_cover_edges() {
     let db = test_db();
+    let padding = "x".repeat(17 * 1024);
+    let document = format!(
+        r#"{{"profile":{{"name":"alice","city":"Paris"}},"tags":["a","b","c"],"stats":{{"count":1}},"padding":"{padding}"}}"#
+    );
 
     assert!(
-            db.json_set_async(
-                "doc",
-                "$",
-                r#"{"profile":{"name":"alice","city":"Paris"},"tags":["a","b","c"],"stats":{"count":1}}"#,
-                SetCondition::Always,
-            )
+        db.json_set_async("doc", "$", &document, SetCondition::Always,)
             .await
             .unwrap()
-        );
+    );
     let raw = db.store.get_raw(&db.mk("doc")).unwrap();
     let (_, _, structure) = super::decode_entry(&raw).unwrap();
     assert!(matches!(
@@ -588,14 +587,12 @@ async fn concurrent_json_updates_preserve_independent_paths_and_watch_visibility
 #[tokio::test]
 async fn concurrent_json_ancestor_replacement_and_descendant_updates_stay_consistent() {
     let db = Arc::new(test_db());
-    db.json_set_async(
-        "doc",
-        "$",
-        r#"{"branch":{"leaf":{"value":0},"other":1}}"#,
-        SetCondition::Always,
-    )
-    .await
-    .unwrap();
+    let padding = "x".repeat(17 * 1024);
+    let document =
+        format!(r#"{{"branch":{{"leaf":{{"value":0}},"other":1}},"padding":"{padding}"}}"#);
+    db.json_set_async("doc", "$", &document, SetCondition::Always)
+        .await
+        .unwrap();
 
     let replace_db = db.clone();
     let replace = tokio::spawn(async move {
@@ -647,13 +644,10 @@ async fn concurrent_json_ancestor_replacement_and_descendant_updates_stay_consis
 #[test]
 fn json_root_replacement_switches_version_without_eager_old_subtree_delete() {
     let db = test_db();
-    db.json_set(
-        "doc",
-        "$",
-        r#"{"wide":{"a":1,"b":2},"items":[1,2,3]}"#,
-        SetCondition::Always,
-    )
-    .unwrap();
+    let padding = "x".repeat(17 * 1024);
+    let document = format!(r#"{{"wide":{{"a":1,"b":2}},"items":[1,2,3],"padding":"{padding}"}}"#);
+    db.json_set("doc", "$", &document, SetCondition::Always)
+        .unwrap();
     let old_raw = db.store.get_raw(&db.mk("doc")).unwrap();
     let old_version = super::decode_meta_header(&old_raw).unwrap().version;
     let old_prefix = super::json_node_prefix(db.db_index, "doc", old_version);

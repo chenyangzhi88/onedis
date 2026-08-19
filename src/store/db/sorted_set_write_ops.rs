@@ -31,6 +31,497 @@ enum ZsetAddBatchKeyState {
 }
 
 impl Db {
+    async fn try_zset_add_batch_packed_async<'a>(
+        &self,
+        commands: &[(&'a str, Vec<(f64, &'a str)>)],
+        keys: &[&'a str],
+        key_positions: &HashMap<&'a str, usize>,
+    ) -> Result<Option<Vec<Result<usize, Error>>>, Error> {
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            for key in keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut states = Vec::with_capacity(keys.len());
+            let mut has_split = false;
+            for observed in &observations {
+                states.push(match observed.value() {
+                    None => Ok((0u64, PackedZsetEntries::new(), false)),
+                    Some(raw) => {
+                        let Some(header) = decode_meta_header(raw) else {
+                            return Ok(None);
+                        };
+                        if header.type_tag != TYPE_SORTED_SET {
+                            Err(WRONG_TYPE_ERROR.to_string())
+                        } else if let Some(entries) = decode_packed_zset(raw) {
+                            Ok((header.expire_ms, entries, false))
+                        } else {
+                            has_split = true;
+                            Ok((header.expire_ms, PackedZsetEntries::new(), false))
+                        }
+                    }
+                });
+            }
+            if has_split {
+                for key in keys {
+                    self.promote_packed_zset_async(key).await?;
+                }
+                return Ok(None);
+            }
+
+            let mut replies = Vec::with_capacity(commands.len());
+            let mut changed_commands = 0u64;
+            let mut overflow = false;
+            for (key, members) in commands {
+                let state = &mut states[key_positions[key]];
+                let reply = match state {
+                    Err(message) => Err(Error::msg(message.clone())),
+                    Ok((_, entries, dirty)) => {
+                        if members.iter().any(|(score, _)| score.is_nan()) {
+                            Err(Error::msg("ERR value is not a valid float"))
+                        } else {
+                            let mut seen = HashSet::with_capacity(members.len());
+                            let mut added = 0usize;
+                            let mut changed = false;
+                            for (score, member) in members.iter().rev() {
+                                if !seen.insert(*member) {
+                                    continue;
+                                }
+                                let previous = entries.insert((*member).to_string(), *score);
+                                added += usize::from(previous.is_none());
+                                changed |= previous != Some(*score);
+                            }
+                            if changed {
+                                *dirty = true;
+                                changed_commands += 1;
+                            }
+                            Ok(added)
+                        }
+                    }
+                };
+                if let Ok((expire_ms, entries, _)) = state
+                    && encode_packed_zset(*expire_ms, entries).is_none()
+                {
+                    overflow = true;
+                }
+                replies.push(reply);
+            }
+            if overflow {
+                for key in keys {
+                    self.promote_packed_zset_async(key).await?;
+                }
+                return Ok(None);
+            }
+            if changed_commands == 0 {
+                return Ok(Some(replies));
+            }
+
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::new();
+            for (position, state) in states.iter().enumerate() {
+                let Ok((expire_ms, entries, true)) = state else {
+                    continue;
+                };
+                batch.put(
+                    &raw_keys[position],
+                    &encode_packed_zset(*expire_ms, entries)
+                        .expect("validated packed sorted set must encode"),
+                )?;
+                conditions.push(CompareCondition::from_observed(&observations[position]));
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await?
+            {
+                self.changes.fetch_add(changed_commands, Ordering::Relaxed);
+                return Ok(Some(replies));
+            }
+        }
+        for key in keys {
+            self.promote_packed_zset_async(key).await?;
+        }
+        Ok(None)
+    }
+
+    async fn try_zset_increment_batch_packed_async<'a>(
+        &self,
+        commands: &[(&'a str, f64, &'a str)],
+        keys: &[&'a str],
+        key_positions: &HashMap<&'a str, usize>,
+    ) -> Result<Option<Vec<Result<f64, Error>>>, Error> {
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            for key in keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut states = Vec::with_capacity(keys.len());
+            let mut has_split = false;
+            for observed in &observations {
+                states.push(match observed.value() {
+                    None => Ok((0u64, PackedZsetEntries::new(), false)),
+                    Some(raw) => {
+                        let Some(header) = decode_meta_header(raw) else {
+                            return Ok(None);
+                        };
+                        if header.type_tag != TYPE_SORTED_SET {
+                            Err(WRONG_TYPE_ERROR.to_string())
+                        } else if let Some(entries) = decode_packed_zset(raw) {
+                            Ok((header.expire_ms, entries, false))
+                        } else {
+                            has_split = true;
+                            Ok((header.expire_ms, PackedZsetEntries::new(), false))
+                        }
+                    }
+                });
+            }
+            if has_split {
+                for key in keys {
+                    self.promote_packed_zset_async(key).await?;
+                }
+                return Ok(None);
+            }
+
+            let mut replies = Vec::with_capacity(commands.len());
+            let mut changed_commands = 0u64;
+            let mut overflow = false;
+            for (key, increment, member) in commands {
+                let state = &mut states[key_positions[key]];
+                let reply = match state {
+                    Err(message) => Err(Error::msg(message.clone())),
+                    Ok((_, entries, dirty)) => {
+                        let score = entries.get(*member).copied().unwrap_or(0.0) + increment;
+                        if increment.is_nan() || score.is_nan() {
+                            Err(Error::msg("ERR resulting score is not a number (NaN)"))
+                        } else {
+                            entries.insert((*member).to_string(), score);
+                            *dirty = true;
+                            changed_commands += 1;
+                            Ok(score)
+                        }
+                    }
+                };
+                if let Ok((expire_ms, entries, _)) = state
+                    && encode_packed_zset(*expire_ms, entries).is_none()
+                {
+                    overflow = true;
+                }
+                replies.push(reply);
+            }
+            if overflow {
+                for key in keys {
+                    self.promote_packed_zset_async(key).await?;
+                }
+                return Ok(None);
+            }
+            if changed_commands == 0 {
+                return Ok(Some(replies));
+            }
+
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::new();
+            for (position, state) in states.iter().enumerate() {
+                let Ok((expire_ms, entries, true)) = state else {
+                    continue;
+                };
+                batch.put(
+                    &raw_keys[position],
+                    &encode_packed_zset(*expire_ms, entries)
+                        .expect("validated packed sorted set must encode"),
+                )?;
+                conditions.push(CompareCondition::from_observed(&observations[position]));
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await?
+            {
+                self.changes.fetch_add(changed_commands, Ordering::Relaxed);
+                return Ok(Some(replies));
+            }
+        }
+        for key in keys {
+            self.promote_packed_zset_async(key).await?;
+        }
+        Ok(None)
+    }
+
+    fn try_zset_add_packed(
+        &self,
+        key: &str,
+        members: &[(f64, String)],
+        options: ZsetAddOptions,
+    ) -> Result<Option<ZsetAddOutcome>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed(key);
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let (expire_ms, mut entries) = match observed.value() {
+                None => (0, PackedZsetEntries::new()),
+                Some(raw) => {
+                    let header = decode_meta_header(raw)
+                        .ok_or_else(|| Error::msg("Failed to decode sorted set metadata"))?;
+                    if header.type_tag != TYPE_SORTED_SET {
+                        return Err(Error::msg(WRONG_TYPE_ERROR));
+                    }
+                    let Some(entries) = decode_packed_zset(raw) else {
+                        return Ok(None);
+                    };
+                    (header.expire_ms, entries)
+                }
+            };
+            let mut outcome = ZsetAddOutcome::default();
+            let mut seen = HashSet::with_capacity(members.len());
+            for (input_score, member) in members.iter().rev() {
+                if input_score.is_nan() {
+                    return Err(Error::msg("ERR value is not a valid float"));
+                }
+                if !seen.insert(member.as_str()) {
+                    continue;
+                }
+                let previous = entries.get(member).copied();
+                let score = if options.increment {
+                    let score = previous.unwrap_or(0.0) + input_score;
+                    if score.is_nan() {
+                        return Err(Error::msg("ERR resulting score is not a number (NaN)"));
+                    }
+                    score
+                } else {
+                    *input_score
+                };
+                if !zset_add_condition_matches(previous, score, options) {
+                    continue;
+                }
+                outcome.applied = true;
+                outcome.score = options.increment.then_some(score);
+                outcome.added += usize::from(previous.is_none());
+                if previous != Some(score) {
+                    outcome.changed += 1;
+                    entries.insert(member.clone(), score);
+                }
+            }
+            if outcome.changed == 0 {
+                return Ok(Some(outcome));
+            }
+            let mut batch = WriteBatch::new();
+            if let Some(raw) = encode_packed_zset(expire_ms, &entries) {
+                batch.put(&key_bytes, &raw)?;
+            } else {
+                let version = self.next_version();
+                batch.put(&key_bytes, &encode_zset_meta(expire_ms, version))?;
+                for (member, score) in &entries {
+                    batch.put(
+                        &zset_member_key(self.db_index, key, version, member),
+                        &score.to_be_bytes(),
+                    )?;
+                    batch.put(
+                        &zset_rank_key(self.db_index, key, version, *score, member),
+                        INDEX_MARKER_VALUE,
+                    )?;
+                }
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(outcome));
+            }
+        }
+        self.promote_packed_zset(key)?;
+        Ok(None)
+    }
+
+    async fn try_zset_add_packed_async(
+        &self,
+        key: &str,
+        members: &[(f64, String)],
+        options: ZsetAddOptions,
+    ) -> Result<Option<ZsetAddOutcome>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed_async(key).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let (expire_ms, mut entries) = match observed.value() {
+                None => (0, PackedZsetEntries::new()),
+                Some(raw) => {
+                    let header = decode_meta_header(raw)
+                        .ok_or_else(|| Error::msg("Failed to decode sorted set metadata"))?;
+                    if header.type_tag != TYPE_SORTED_SET {
+                        return Err(Error::msg(WRONG_TYPE_ERROR));
+                    }
+                    let Some(entries) = decode_packed_zset(raw) else {
+                        return Ok(None);
+                    };
+                    (header.expire_ms, entries)
+                }
+            };
+            let mut outcome = ZsetAddOutcome::default();
+            let mut seen = HashSet::with_capacity(members.len());
+            for (input_score, member) in members.iter().rev() {
+                if input_score.is_nan() {
+                    return Err(Error::msg("ERR value is not a valid float"));
+                }
+                if !seen.insert(member.as_str()) {
+                    continue;
+                }
+                let previous = entries.get(member).copied();
+                let score = if options.increment {
+                    let score = previous.unwrap_or(0.0) + input_score;
+                    if score.is_nan() {
+                        return Err(Error::msg("ERR resulting score is not a number (NaN)"));
+                    }
+                    score
+                } else {
+                    *input_score
+                };
+                if !zset_add_condition_matches(previous, score, options) {
+                    continue;
+                }
+                outcome.applied = true;
+                outcome.score = options.increment.then_some(score);
+                outcome.added += usize::from(previous.is_none());
+                if previous != Some(score) {
+                    outcome.changed += 1;
+                    entries.insert(member.clone(), score);
+                }
+            }
+            if outcome.changed == 0 {
+                return Ok(Some(outcome));
+            }
+            let mut batch = WriteBatch::new();
+            if let Some(raw) = encode_packed_zset(expire_ms, &entries) {
+                batch.put(&key_bytes, &raw)?;
+            } else {
+                let version = self.next_version_async().await;
+                batch.put(&key_bytes, &encode_zset_meta(expire_ms, version))?;
+                for (member, score) in &entries {
+                    batch.put(
+                        &zset_member_key(self.db_index, key, version, member),
+                        &score.to_be_bytes(),
+                    )?;
+                    batch.put(
+                        &zset_rank_key(self.db_index, key, version, *score, member),
+                        INDEX_MARKER_VALUE,
+                    )?;
+                }
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(outcome));
+            }
+        }
+        self.promote_packed_zset_async(key).await?;
+        Ok(None)
+    }
+
+    fn try_zset_remove_packed(
+        &self,
+        key: &str,
+        members: &[String],
+    ) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed(key);
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(Some(0));
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode sorted set metadata"))?;
+            if header.type_tag != TYPE_SORTED_SET {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let Some(mut entries) = decode_packed_zset(raw) else {
+                return Ok(None);
+            };
+            let mut removed = 0usize;
+            for member in members {
+                removed += usize::from(entries.remove(member).is_some());
+            }
+            if removed == 0 {
+                return Ok(Some(0));
+            }
+            let mut batch = WriteBatch::new();
+            if entries.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            } else {
+                batch.put(
+                    &key_bytes,
+                    &encode_packed_zset(header.expire_ms, &entries)
+                        .expect("removing entries cannot overflow packed sorted set"),
+                )?;
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(removed));
+            }
+        }
+        self.promote_packed_zset(key)?;
+        Ok(None)
+    }
+
+    async fn try_zset_remove_packed_async(
+        &self,
+        key: &str,
+        members: &[String],
+    ) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed_async(key).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(Some(0));
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode sorted set metadata"))?;
+            if header.type_tag != TYPE_SORTED_SET {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let Some(mut entries) = decode_packed_zset(raw) else {
+                return Ok(None);
+            };
+            let mut removed = 0usize;
+            for member in members {
+                removed += usize::from(entries.remove(member).is_some());
+            }
+            if removed == 0 {
+                return Ok(Some(0));
+            }
+            let mut batch = WriteBatch::new();
+            if entries.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            } else {
+                batch.put(
+                    &key_bytes,
+                    &encode_packed_zset(header.expire_ms, &entries)
+                        .expect("removing entries cannot overflow packed sorted set"),
+                )?;
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(removed));
+            }
+        }
+        self.promote_packed_zset_async(key).await?;
+        Ok(None)
+    }
+
     /// Apply plain ZADD commands in pipeline order with one read per distinct member and one
     /// conditional commit. Duplicate members inside one command retain the last supplied score,
     /// matching the ordinary ZADD path.
@@ -52,6 +543,32 @@ impl Db {
         }
         let key_shards =
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        {
+            let _promotion_guards = self.lock_write_shards(&key_shards).await;
+            match self
+                .try_zset_add_batch_packed_async(commands, &keys, &key_positions)
+                .await
+            {
+                Ok(Some(replies)) => return replies,
+                Ok(None) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    return commands
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+            for key in &keys {
+                if let Err(error) = self.promote_packed_zset_async(key).await {
+                    let message = error.to_string();
+                    return commands
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+        }
         let _structural_guards = self.lock_read_shards(&key_shards).await;
 
         let mut member_shards = commands
@@ -422,6 +939,32 @@ impl Db {
         }
         let key_shards =
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
+        {
+            let _promotion_guards = self.lock_write_shards(&key_shards).await;
+            match self
+                .try_zset_increment_batch_packed_async(commands, &keys, &key_positions)
+                .await
+            {
+                Ok(Some(replies)) => return replies,
+                Ok(None) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    return commands
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+            for key in &keys {
+                if let Err(error) = self.promote_packed_zset_async(key).await {
+                    let message = error.to_string();
+                    return commands
+                        .iter()
+                        .map(|_| Err(Error::msg(message.clone())))
+                        .collect();
+                }
+            }
+        }
         let _structural_guards = self.lock_read_shards(&key_shards).await;
 
         let mut member_shards = commands
@@ -615,6 +1158,9 @@ impl Db {
     }
 
     pub fn zset_add(&self, key: &str, members: &[(f64, String)]) -> Result<usize, Error> {
+        if let Some(outcome) = self.try_zset_add_packed(key, members, ZsetAddOptions::default())? {
+            return Ok(outcome.added);
+        }
         let exists = self.zset_expire_ms(key)?;
         let version = match exists {
             Some((_, v)) => v,
@@ -685,6 +1231,9 @@ impl Db {
         members: &[(f64, String)],
         options: ZsetAddOptions,
     ) -> Result<ZsetAddOutcome, Error> {
+        if let Some(outcome) = self.try_zset_add_packed(key, members, options)? {
+            return Ok(outcome);
+        }
         let exists = self.zset_expire_ms(key)?;
         let version = match exists {
             Some((_, version)) => version,
@@ -760,6 +1309,12 @@ impl Db {
         members: &[(f64, String)],
         options: ZsetAddOptions,
     ) -> Result<ZsetAddOutcome, Error> {
+        if let Some(outcome) = self
+            .try_zset_add_packed_async(key, members, options)
+            .await?
+        {
+            return Ok(outcome);
+        }
         for _ in 0..ZSET_ADD_SHARED_CAS_ATTEMPTS {
             let structural_guard = self.set_write_lock(key).read().await;
             match self
@@ -939,6 +1494,12 @@ impl Db {
         key: &str,
         members: &[(f64, String)],
     ) -> Result<usize, Error> {
+        if let Some(outcome) = self
+            .try_zset_add_packed_async(key, members, ZsetAddOptions::default())
+            .await?
+        {
+            return Ok(outcome.added);
+        }
         let exists = self.zset_expire_ms_async(key).await?;
         let version = match exists {
             Some((_, v)) => v,
@@ -995,6 +1556,9 @@ impl Db {
 
     /// 删除 zset members，返回实际删除数量。
     pub fn zset_remove(&self, key: &str, members: &[String]) -> Result<usize, Error> {
+        if let Some(removed) = self.try_zset_remove_packed(key, members)? {
+            return Ok(removed);
+        }
         let meta = self.zset_expire_ms(key)?;
         let Some((expire_ms, version)) = meta else {
             return Ok(0);
@@ -1054,6 +1618,9 @@ impl Db {
         key: &str,
         members: &[String],
     ) -> Result<usize, Error> {
+        if let Some(removed) = self.try_zset_remove_packed_async(key, members).await? {
+            return Ok(removed);
+        }
         let meta = self.zset_expire_ms_async(key).await?;
         let Some((expire_ms, version)) = meta else {
             return Ok(0);

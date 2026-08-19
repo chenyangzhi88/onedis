@@ -9,12 +9,87 @@ pub(in crate::store::db) struct JsonObservedTarget {
 }
 
 impl Db {
+    pub(in crate::store::db) fn promote_packed_json(&self, key: &str) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let Some(document) = decode_packed_json(raw) else {
+                return Ok(());
+            };
+            let header = decode_meta_header(raw).ok_or_else(|| Error::msg("Type parsing error"))?;
+            let version = self.next_version();
+            let mut batch = WriteBatch::new();
+            self.touch_json_meta_to_batch(&mut batch, key, header.expire_ms, version)?;
+            write_json_subtree_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                version,
+                &mut Vec::new(),
+                &document,
+            )?;
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                return Ok(());
+            }
+        }
+        Err(Error::msg("ERR json layout promotion conflict"))
+    }
+
+    pub(in crate::store::db) async fn promote_packed_json_async(
+        &self,
+        key: &str,
+    ) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let Some(document) = decode_packed_json(raw) else {
+                return Ok(());
+            };
+            let header = decode_meta_header(raw).ok_or_else(|| Error::msg("Type parsing error"))?;
+            let version = self.next_version_async().await;
+            let mut batch = WriteBatch::new();
+            self.touch_json_meta_to_batch(&mut batch, key, header.expire_ms, version)?;
+            write_json_subtree_to_batch(
+                &mut batch,
+                self.db_index,
+                key,
+                version,
+                &mut Vec::new(),
+                &document,
+            )?;
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(Error::msg("ERR json layout promotion conflict"))
+    }
+
     pub(in crate::store::db) fn decode_json_meta(raw: &[u8]) -> Result<(u64, u64), Error> {
         let Some(header) = decode_meta_header(raw) else {
             return Err(Error::msg("Type parsing error"));
         };
         if header.type_tag != TYPE_JSON {
             return Err(Error::msg(WRONG_TYPE_ERROR));
+        }
+        if is_packed_json_raw(raw) {
+            return decode_packed_json(raw)
+                .map(|_| (header.expire_ms, 0))
+                .ok_or_else(|| Error::msg("Type parsing error"));
         }
         let Some((expire_ms, version, Structure::Json(json))) = decode_entry(raw) else {
             return Err(Error::msg("Type parsing error"));
@@ -253,6 +328,14 @@ impl Db {
         version: u64,
         tokens: &[JsonPathToken],
     ) -> Result<Option<JsonValue>, Error> {
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_json)
+                .and_then(|value| json_value_at_path(&value, tokens).cloned()));
+        }
         let Some(storage_tokens) = self.resolve_json_storage_path(key, version, tokens)? else {
             return Ok(None);
         };
@@ -285,6 +368,15 @@ impl Db {
         version: u64,
         tokens: &[JsonPathToken],
     ) -> Result<Option<JsonValue>, Error> {
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_json)
+                .and_then(|value| json_value_at_path(&value, tokens).cloned()));
+        }
         let Some(storage_tokens) = self
             .resolve_json_storage_path_async(key, version, tokens)
             .await?
@@ -324,6 +416,14 @@ impl Db {
         version: u64,
         tokens: &[JsonPathToken],
     ) -> Result<Option<&'static str>, Error> {
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_json)
+                .and_then(|value| json_value_at_path(&value, tokens).map(json_type_name)));
+        }
         let Some(storage_tokens) = self.resolve_json_storage_path(key, version, tokens)? else {
             return Ok(None);
         };
@@ -343,6 +443,15 @@ impl Db {
         version: u64,
         tokens: &[JsonPathToken],
     ) -> Result<Option<&'static str>, Error> {
+        if version == 0 {
+            return Ok(self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_json)
+                .and_then(|value| json_value_at_path(&value, tokens).map(json_type_name)));
+        }
         let Some(storage_tokens) = self
             .resolve_json_storage_path_async(key, version, tokens)
             .await?
@@ -381,6 +490,30 @@ impl Db {
             .map_err(|error| Error::msg(error.to_string()))
     }
 
+    pub(in crate::store::db) fn write_json_document_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        key: &str,
+        value: &JsonValue,
+        expire_ms: u64,
+        split_version: u64,
+    ) -> Result<(), Error> {
+        if let Some(raw) = encode_packed_json(expire_ms, value) {
+            return batch
+                .put(&self.mk(key), &raw)
+                .map_err(|error| Error::msg(error.to_string()));
+        }
+        self.touch_json_meta_to_batch(batch, key, expire_ms, split_version)?;
+        write_json_subtree_to_batch(
+            batch,
+            self.db_index,
+            key,
+            split_version,
+            &mut Vec::new(),
+            value,
+        )
+    }
+
     pub(in crate::store::db) fn write_json_value(
         &self,
         key: &str,
@@ -395,9 +528,7 @@ impl Db {
         };
         self.changes.fetch_add(1, Ordering::Relaxed);
         let mut batch = WriteBatch::new();
-        self.touch_json_meta_to_batch(&mut batch, key, expire_ms, version)?;
-        let mut path = Vec::new();
-        write_json_subtree_to_batch(&mut batch, self.db_index, key, version, &mut path, value)?;
+        self.write_json_document_to_batch(&mut batch, key, value, expire_ms, version)?;
         self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
         if expire_ms > 0 {
             self.ttl_manager
@@ -426,9 +557,7 @@ impl Db {
             version
         };
         let mut batch = WriteBatch::new();
-        self.touch_json_meta_to_batch(&mut batch, key, expire_ms, version)?;
-        let mut path = Vec::new();
-        write_json_subtree_to_batch(&mut batch, self.db_index, key, version, &mut path, value)?;
+        self.write_json_document_to_batch(&mut batch, key, value, expire_ms, version)?;
         self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
         if expire_ms > 0 {
             self.ttl_manager

@@ -7,44 +7,37 @@ impl Db {
                 "ERR wrong number of arguments for 'sintercard' command",
             ));
         }
-        let mut metas = Vec::with_capacity(keys.len());
+        let mut sets = Vec::with_capacity(keys.len());
         for key in keys {
-            metas.push(self.set_meta(key)?);
+            let Some(set) = self.get(key) else {
+                return Ok(0);
+            };
+            let Structure::Set(set) = set else {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            };
+            sets.push(set);
         }
-        let Some(metas) = metas.into_iter().collect::<Option<Vec<_>>>() else {
-            return Ok(0);
-        };
-        let smallest = metas
+        let Some((smallest, rest)) = sets
             .iter()
             .enumerate()
-            .min_by_key(|(_, meta)| meta.len)
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        let prefix = set_member_prefix(self.db_index, &keys[smallest], metas[smallest].version);
+            .min_by_key(|(_, set)| set.len())
+            .map(|(index, set)| (set, index))
+        else {
+            return Ok(0);
+        };
         let mut count = 0usize;
-        self.store.scan_range_raw_visit(
-            &prefix,
-            prefix_exclusive_upper_bound(&prefix),
-            usize::MAX,
-            |member_key, _| {
-                let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
-                    return true;
-                };
-                let present_everywhere = keys.iter().enumerate().all(|(idx, key)| {
-                    idx == smallest
-                        || self.store.contains_key(&set_member_key_bytes(
-                            self.db_index,
-                            key,
-                            metas[idx].version,
-                            member,
-                        ))
-                });
-                if present_everywhere {
-                    count = count.saturating_add(1);
+        for member in smallest {
+            if sets
+                .iter()
+                .enumerate()
+                .all(|(index, set)| index == rest || set.contains(member))
+            {
+                count = count.saturating_add(1);
+                if limit > 0 && count >= limit {
+                    break;
                 }
-                limit == 0 || count < limit
-            },
-        );
+            }
+        }
         Ok(count)
     }
 
@@ -87,51 +80,14 @@ impl Db {
     }
 
     pub async fn set_diff_async(&self, keys: &[String]) -> Result<HashSet<String>, Error> {
-        let Some((first_key, _)) = keys.split_first() else {
+        let Some((_, _)) = keys.split_first() else {
             return Err(Error::msg(
                 "ERR wrong number of arguments for 'sdiff' command",
             ));
         };
         let keys = keys.to_vec();
-        let first_key = first_key.clone();
-        self.run_blocking_store_task(move |db| {
-            let Some(first_meta) = db.set_meta(&first_key)? else {
-                return Ok(HashSet::new());
-            };
-            let mut other_metas = Vec::with_capacity(keys.len().saturating_sub(1));
-            for key in &keys[1..] {
-                other_metas.push(db.set_meta(key)?);
-            }
-            let mut difference = HashSet::new();
-            let prefix = set_member_prefix(db.db_index, &first_key, first_meta.version);
-            db.store.scan_range_raw_visit(
-                &prefix,
-                prefix_exclusive_upper_bound(&prefix),
-                usize::MAX,
-                |member_key, _| {
-                    let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
-                        return true;
-                    };
-                    let present_elsewhere =
-                        keys[1..].iter().zip(&other_metas).any(|(key, meta)| {
-                            meta.is_some_and(|meta| {
-                                db.store.contains_key(&set_member_key_bytes(
-                                    db.db_index,
-                                    key,
-                                    meta.version,
-                                    member,
-                                ))
-                            })
-                        });
-                    if !present_elsewhere && let Ok(member) = String::from_utf8(member.to_vec()) {
-                        difference.insert(member);
-                    }
-                    true
-                },
-            );
-            Ok(difference)
-        })
-        .await
+        self.run_blocking_store_task(move |db| db.set_diff(&keys))
+            .await
     }
 
     /// 计算 set 差集并写入目标 key，返回写入成员数量。
@@ -188,48 +144,8 @@ impl Db {
             ));
         }
         let keys = keys.to_vec();
-        self.run_blocking_store_task(move |db| {
-            let mut metas = Vec::with_capacity(keys.len());
-            for key in &keys {
-                metas.push(db.set_meta(key)?);
-            }
-            let Some(metas) = metas.into_iter().collect::<Option<Vec<_>>>() else {
-                return Ok(HashSet::new());
-            };
-            let smallest = metas
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, meta)| meta.len)
-                .map(|(index, _)| index)
-                .unwrap_or(0);
-            let prefix = set_member_prefix(db.db_index, &keys[smallest], metas[smallest].version);
-            let mut intersection = HashSet::new();
-            db.store.scan_range_raw_visit(
-                &prefix,
-                prefix_exclusive_upper_bound(&prefix),
-                usize::MAX,
-                |member_key, _| {
-                    let Some(member) = member_key.strip_prefix(prefix.as_slice()) else {
-                        return true;
-                    };
-                    let present_everywhere = keys.iter().enumerate().all(|(index, key)| {
-                        index == smallest
-                            || db.store.contains_key(&set_member_key_bytes(
-                                db.db_index,
-                                key,
-                                metas[index].version,
-                                member,
-                            ))
-                    });
-                    if present_everywhere && let Ok(member) = String::from_utf8(member.to_vec()) {
-                        intersection.insert(member);
-                    }
-                    true
-                },
-            );
-            Ok(intersection)
-        })
-        .await
+        self.run_blocking_store_task(move |db| db.set_intersection(&keys))
+            .await
     }
 
     pub fn set_intersection_store(

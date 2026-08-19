@@ -166,6 +166,28 @@ impl Db {
             return Ok(None);
         }
         let (picks, unique) = random_member_ordinals(meta.len, count);
+        if meta.packed {
+            let members = self.set_members_raw(key, meta.version);
+            let by_ordinal = unique
+                .into_iter()
+                .filter_map(|ordinal| {
+                    String::from_utf8(members.get(ordinal)?.clone())
+                        .ok()
+                        .map(|member| (ordinal, member))
+                })
+                .collect::<HashMap<_, _>>();
+            return Ok(Some(
+                picks
+                    .into_iter()
+                    .map(|ordinal| {
+                        by_ordinal
+                            .get(&ordinal)
+                            .expect("selected packed set ordinal is present")
+                            .clone()
+                    })
+                    .collect(),
+            ));
+        }
         let selected = self.select_set_members_at_ordinals(key, meta.version, &unique)?;
         let by_ordinal = unique
             .into_iter()
@@ -195,6 +217,28 @@ impl Db {
             return Ok(None);
         }
         let (picks, unique) = random_member_ordinals(meta.len, count);
+        if meta.packed {
+            let members = self.set_members_raw_async(key, meta.version).await;
+            let by_ordinal = unique
+                .into_iter()
+                .filter_map(|ordinal| {
+                    String::from_utf8(members.get(ordinal)?.clone())
+                        .ok()
+                        .map(|member| (ordinal, member))
+                })
+                .collect::<HashMap<_, _>>();
+            return Ok(Some(
+                picks
+                    .into_iter()
+                    .map(|ordinal| {
+                        by_ordinal
+                            .get(&ordinal)
+                            .expect("selected packed set ordinal is present")
+                            .clone()
+                    })
+                    .collect(),
+            ));
+        }
         let selected = self
             .select_set_members_at_ordinals_async(key, meta.version, &unique)
             .await?;
@@ -226,6 +270,42 @@ impl Db {
         let target_count = count.min(meta.len);
         if target_count == 0 {
             return Ok(Vec::new());
+        }
+
+        if meta.packed {
+            for _ in 0..64 {
+                let observed = self.store.get_raw_observed(&self.mk(key));
+                let Some(raw) = observed.value() else {
+                    return Ok(Vec::new());
+                };
+                let Some(mut packed) = decode_packed_set(raw) else {
+                    break;
+                };
+                let ordinals = sample_distinct_ordinals(packed.len(), target_count);
+                let selected = ordinals
+                    .into_iter()
+                    .filter_map(|ordinal| packed.iter().nth(ordinal).cloned())
+                    .collect::<Vec<_>>();
+                for member in &selected {
+                    packed.remove(member);
+                }
+                let mut batch = WriteBatch::new();
+                if packed.is_empty() {
+                    self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
+                } else {
+                    let encoded = encode_packed_set(meta.expire_ms, &packed)
+                        .expect("removing members cannot overflow packed set");
+                    batch.put(&self.mk(key), &encoded)?;
+                }
+                if self.compare_and_write_batch_if_not_empty(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )? {
+                    self.changes.fetch_add(1, Ordering::Relaxed);
+                    return Ok(selected);
+                }
+            }
+            return Err(Error::msg("ERR set pop write conflict"));
         }
 
         let popped = self.select_set_members_for_pop(key, meta.version, meta.len, target_count)?;
@@ -268,6 +348,45 @@ impl Db {
             return Ok(Vec::new());
         }
 
+        if meta.packed {
+            for _ in 0..64 {
+                let observed = self.store.get_raw_observed_async(&self.mk(key)).await;
+                let Some(raw) = observed.value() else {
+                    return Ok(Vec::new());
+                };
+                let Some(mut packed) = decode_packed_set(raw) else {
+                    break;
+                };
+                let ordinals = sample_distinct_ordinals(packed.len(), target_count);
+                let selected = ordinals
+                    .into_iter()
+                    .filter_map(|ordinal| packed.iter().nth(ordinal).cloned())
+                    .collect::<Vec<_>>();
+                for member in &selected {
+                    packed.remove(member);
+                }
+                let mut batch = WriteBatch::new();
+                if packed.is_empty() {
+                    self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
+                } else {
+                    let encoded = encode_packed_set(meta.expire_ms, &packed)
+                        .expect("removing members cannot overflow packed set");
+                    batch.put(&self.mk(key), &encoded)?;
+                }
+                if self
+                    .compare_and_write_batch_if_not_empty_async(
+                        &[CompareCondition::from_observed(&observed)],
+                        &batch,
+                    )
+                    .await?
+                {
+                    self.changes.fetch_add(1, Ordering::Relaxed);
+                    return Ok(selected);
+                }
+            }
+            return Err(Error::msg("ERR set pop write conflict"));
+        }
+
         let popped = self
             .select_set_members_for_pop_async(key, meta.version, meta.len, target_count)
             .await?;
@@ -307,6 +426,21 @@ impl Db {
         let Some(meta) = self.set_meta(key)? else {
             return Ok((0, Vec::new()));
         };
+        if meta.packed {
+            let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+            let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+            let mut state = SetScanState::new(cursor, count);
+            for member in self
+                .set_members_raw(key, meta.version)
+                .into_iter()
+                .skip(offset)
+            {
+                if !state.visit(&member, matcher.as_ref()) {
+                    break;
+                }
+            }
+            return state.finish();
+        }
         let prefix = set_member_prefix(self.db_index, key, meta.version);
         let upper = prefix_exclusive_upper_bound(&prefix);
         let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
@@ -338,6 +472,22 @@ impl Db {
         let Some(meta) = self.set_meta_async(key).await? else {
             return Ok((0, Vec::new()));
         };
+        if meta.packed {
+            let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
+            let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+            let mut state = SetScanState::new(cursor, count);
+            for member in self
+                .set_members_raw_async(key, meta.version)
+                .await
+                .into_iter()
+                .skip(offset)
+            {
+                if !state.visit(&member, matcher.as_ref()) {
+                    break;
+                }
+            }
+            return state.finish();
+        }
         let prefix = set_member_prefix(self.db_index, key, meta.version);
         let upper = prefix_exclusive_upper_bound(&prefix);
         let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;

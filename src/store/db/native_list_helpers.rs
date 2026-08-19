@@ -1,6 +1,80 @@
 use super::*;
 
 impl Db {
+    pub(in crate::store::db) fn promote_packed_list(&self, key: &str) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let Some(items) = decode_packed_list(raw) else {
+                return Ok(());
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode list metadata"))?;
+            let version = self.next_version();
+            let mut batch = WriteBatch::new();
+            batch.put(
+                &key_bytes,
+                &encode_list_meta(header.expire_ms, version, 0, items.len() as i64),
+            )?;
+            for (index, item) in items.into_iter().enumerate() {
+                batch.put(
+                    &list_item_key(self.db_index, key, version, index as i64),
+                    &item,
+                )?;
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                return Ok(());
+            }
+        }
+        Err(Error::msg("ERR list layout promotion conflict"))
+    }
+
+    pub(in crate::store::db) async fn promote_packed_list_async(
+        &self,
+        key: &str,
+    ) -> Result<(), Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..64 {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(());
+            };
+            let Some(items) = decode_packed_list(raw) else {
+                return Ok(());
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode list metadata"))?;
+            let version = self.next_version_async().await;
+            let mut batch = WriteBatch::new();
+            batch.put(
+                &key_bytes,
+                &encode_list_meta(header.expire_ms, version, 0, items.len() as i64),
+            )?;
+            for (index, item) in items.into_iter().enumerate() {
+                batch.put(
+                    &list_item_key(self.db_index, key, version, index as i64),
+                    &item,
+                )?;
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(Error::msg("ERR list layout promotion conflict"))
+    }
+
     pub(in crate::store::db) fn list_meta(&self, key: &str) -> Result<Option<ListMeta>, Error> {
         let key_bytes = self.mk(key);
         if !self.store.is_transactional()
@@ -196,6 +270,20 @@ impl Db {
         storage_start: i64,
         storage_end: i64,
     ) -> Vec<Vec<u8>> {
+        if version == 0 {
+            let items = self
+                .store
+                .get_raw(&self.mk(key))
+                .as_deref()
+                .and_then(decode_packed_list)
+                .unwrap_or_default();
+            let start = storage_start.max(0) as usize;
+            let end = storage_end.max(-1).saturating_add(1) as usize;
+            return items
+                .get(start..end.min(items.len()))
+                .unwrap_or_default()
+                .to_vec();
+        }
         let len = (storage_end - storage_start + 1) as usize;
         let mut values = Vec::with_capacity(len);
         if storage_start < 0 {
@@ -230,6 +318,21 @@ impl Db {
         storage_start: i64,
         storage_end: i64,
     ) -> Vec<Vec<u8>> {
+        if version == 0 {
+            let items = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .as_deref()
+                .and_then(decode_packed_list)
+                .unwrap_or_default();
+            let start = storage_start.max(0) as usize;
+            let end = storage_end.max(-1).saturating_add(1) as usize;
+            return items
+                .get(start..end.min(items.len()))
+                .unwrap_or_default()
+                .to_vec();
+        }
         let len = (storage_end - storage_start + 1) as usize;
         let mut values = Vec::with_capacity(len);
         if storage_start < 0 {
@@ -293,6 +396,20 @@ impl Db {
     where
         F: FnMut(&[u8]) -> bool + Send,
     {
+        if version == 0 {
+            let values = self
+                .list_range_raw_values_async(key, version, storage_start, storage_end)
+                .await;
+            let mut visitor = visitor;
+            let mut seen = 0usize;
+            for value in values {
+                seen += 1;
+                if !visitor(&value) {
+                    break;
+                }
+            }
+            return seen;
+        }
         let len = (storage_end - storage_start + 1) as usize;
         let mut seen = 0usize;
         let mut visitor = visitor;

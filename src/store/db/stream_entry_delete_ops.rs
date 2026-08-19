@@ -1,6 +1,85 @@
 use super::*;
 
 impl Db {
+    fn try_stream_delete_packed(
+        &self,
+        key: &str,
+        ids: &[StreamId],
+    ) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(Some(0));
+            };
+            let Some((mut meta, mut entries)) = decode_packed_stream(raw) else {
+                return Ok(None);
+            };
+            let ids = ids.iter().copied().collect::<BTreeSet<_>>();
+            let old_len = entries.len();
+            entries.retain(|(id, _)| !ids.contains(id));
+            let deleted = old_len - entries.len();
+            if deleted == 0 {
+                return Ok(Some(0));
+            }
+            meta.length = entries.len() as u64;
+            let encoded = encode_packed_stream(meta, &entries)
+                .ok_or_else(|| Error::msg("Failed to encode packed stream"))?;
+            let mut batch = WriteBatch::new();
+            batch.put(&key_bytes, &encoded)?;
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(deleted));
+            }
+        }
+        self.promote_packed_stream(key)?;
+        Ok(None)
+    }
+
+    async fn try_stream_delete_packed_async(
+        &self,
+        key: &str,
+        ids: &[StreamId],
+    ) -> Result<Option<usize>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let Some(raw) = observed.value() else {
+                return Ok(Some(0));
+            };
+            let Some((mut meta, mut entries)) = decode_packed_stream(raw) else {
+                return Ok(None);
+            };
+            let ids = ids.iter().copied().collect::<BTreeSet<_>>();
+            let old_len = entries.len();
+            entries.retain(|(id, _)| !ids.contains(id));
+            let deleted = old_len - entries.len();
+            if deleted == 0 {
+                return Ok(Some(0));
+            }
+            meta.length = entries.len() as u64;
+            let encoded = encode_packed_stream(meta, &entries)
+                .ok_or_else(|| Error::msg("Failed to encode packed stream"))?;
+            let mut batch = WriteBatch::new();
+            batch.put(&key_bytes, &encoded)?;
+            if self
+                .compare_and_write_batch_if_not_empty_async(
+                    &[CompareCondition::from_observed(&observed)],
+                    &batch,
+                )
+                .await?
+            {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(deleted));
+            }
+        }
+        self.promote_packed_stream_async(key).await?;
+        Ok(None)
+    }
+
     /// Apply ordered XDEL commands with one metadata read, one entry multi-get, and one write per
     /// pipeline. An ID deleted by an earlier command returns zero in later commands, matching the
     /// observable sequential command semantics.
@@ -23,6 +102,16 @@ impl Db {
         let shards =
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
         let _write_guards = self.lock_write_shards(&shards).await;
+
+        for key in &keys {
+            if let Err(error) = self.promote_packed_stream_async(key).await {
+                let message = error.to_string();
+                return commands
+                    .iter()
+                    .map(|_| Err(Error::msg(message.clone())))
+                    .collect();
+            }
+        }
 
         let mut states = Vec::with_capacity(keys.len());
         for key in &keys {
@@ -122,6 +211,10 @@ impl Db {
     }
 
     pub fn stream_delete(&self, key: &str, ids: &[StreamId]) -> Result<usize, Error> {
+        self.expire_if_needed(key);
+        if let Some(deleted) = self.try_stream_delete_packed(key, ids)? {
+            return Ok(deleted);
+        }
         let Some(mut meta) = self.stream_meta(key)? else {
             return Ok(0);
         };
@@ -158,6 +251,10 @@ impl Db {
         key: &str,
         ids: &[StreamId],
     ) -> Result<usize, Error> {
+        self.expire_if_needed_async(key).await;
+        if let Some(deleted) = self.try_stream_delete_packed_async(key, ids).await? {
+            return Ok(deleted);
+        }
         let Some(mut meta) = self.stream_meta_async(key).await? else {
             return Ok(0);
         };
@@ -191,6 +288,7 @@ impl Db {
     }
 
     pub fn stream_set_id(&self, key: &str, id: StreamId) -> Result<(), Error> {
+        self.promote_packed_stream(key)?;
         let mut meta = self
             .stream_meta(key)?
             .ok_or_else(|| Error::msg("ERR no such key"))?;
@@ -205,6 +303,7 @@ impl Db {
 
     pub async fn stream_set_id_async(&self, key: &str, id: StreamId) -> Result<(), Error> {
         let _stream_write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_stream_async(key).await?;
         let mut meta = self
             .stream_meta_async(key)
             .await?
@@ -224,6 +323,7 @@ impl Db {
         group: &str,
         ids: &[StreamId],
     ) -> Result<Vec<i64>, Error> {
+        self.promote_packed_stream(key)?;
         let Some(mut meta) = self.stream_meta(key)? else {
             return Ok(vec![-1; ids.len()]);
         };
@@ -270,6 +370,7 @@ impl Db {
         ids: &[StreamId],
     ) -> Result<Vec<i64>, Error> {
         let _stream_write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_stream_async(key).await?;
         let Some(mut meta) = self.stream_meta_async(key).await? else {
             return Ok(vec![-1; ids.len()]);
         };
@@ -329,6 +430,7 @@ impl Db {
         key: &str,
         ids: &[StreamId],
     ) -> Result<Vec<i64>, Error> {
+        self.promote_packed_stream(key)?;
         let Some(mut meta) = self.stream_meta(key)? else {
             return Ok(vec![-1; ids.len()]);
         };
@@ -361,6 +463,7 @@ impl Db {
         ids: &[StreamId],
     ) -> Result<Vec<i64>, Error> {
         let _stream_write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_stream_async(key).await?;
         let Some(mut meta) = self.stream_meta_async(key).await? else {
             return Ok(vec![-1; ids.len()]);
         };

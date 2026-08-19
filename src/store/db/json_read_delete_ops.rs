@@ -1,6 +1,46 @@
 use super::*;
 
 impl Db {
+    fn try_json_del_packed(
+        &self,
+        key: &str,
+        tokens: &[JsonPathToken],
+    ) -> Result<Option<i64>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(None);
+            };
+            let Some(mut document) = decode_packed_json(raw) else {
+                return Ok(None);
+            };
+            if !remove_json_value_at_path(&mut document, tokens) {
+                return Ok(Some(0));
+            }
+            let header = decode_meta_header(raw).ok_or_else(|| Error::msg("Type parsing error"))?;
+            let mut batch = WriteBatch::new();
+            self.write_json_document_to_batch(
+                &mut batch,
+                key,
+                &document,
+                header.expire_ms,
+                self.next_version(),
+            )?;
+            self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes.fetch_add(1, Ordering::Relaxed);
+                self.fulltext_request_json_refresh(key)?;
+                return Ok(Some(1));
+            }
+        }
+        self.promote_packed_json(key)?;
+        Ok(None)
+    }
+
     pub(crate) async fn json_get_batch_async(
         &self,
         commands: &[(&str, &str)],
@@ -101,6 +141,9 @@ impl Db {
         if tokens.is_empty() {
             return Ok(i64::from(self.delete_key_internal(key, true)));
         }
+        if let Some(deleted) = self.try_json_del_packed(key, &tokens)? {
+            return Ok(deleted);
+        }
         self.json_del_indexed(key, version, &tokens)
     }
 
@@ -127,6 +170,37 @@ impl Db {
                 return Ok(0);
             };
             let (_, version) = Self::decode_json_meta(&raw)?;
+            if version == 0 {
+                let mut document =
+                    decode_packed_json(&raw).ok_or_else(|| Error::msg("Type parsing error"))?;
+                if !remove_json_value_at_path(&mut document, &tokens) {
+                    return Ok(0);
+                }
+                let expire_ms = decode_meta_header(&raw)
+                    .ok_or_else(|| Error::msg("Type parsing error"))?
+                    .expire_ms;
+                let mut batch = WriteBatch::new();
+                self.write_json_document_to_batch(
+                    &mut batch,
+                    key,
+                    &document,
+                    expire_ms,
+                    self.next_version_async().await,
+                )?;
+                self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
+                if self
+                    .compare_and_write_batch_if_not_empty_async(&[cas_condition], &batch)
+                    .await?
+                {
+                    self.changes.fetch_add(1, Ordering::Relaxed);
+                    self.fulltext_request_json_refresh(key)?;
+                    return Ok(1);
+                }
+                if attempt + 1 == SMALL_INLINE_CAS_ATTEMPTS {
+                    self.promote_packed_json_async(key).await?;
+                }
+                continue;
+            }
             match self
                 .json_del_indexed_async(key, version, &tokens, cas_condition)
                 .await?

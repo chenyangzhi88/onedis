@@ -5,6 +5,160 @@ const LIST_POP_MERGE_BATCH_MAX: usize = 256;
 const LIST_POP_MERGE_ITEM_MAX: usize = 4_096;
 
 impl Db {
+    fn try_list_pop_packed(
+        &self,
+        key: &str,
+        left: bool,
+        count: usize,
+    ) -> Result<Option<Vec<Vec<u8>>>, Error> {
+        let key_bytes = self.mk(key);
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            self.expire_if_needed(key);
+            let observed = self.store.get_raw_observed(&key_bytes);
+            let Some(raw) = observed.value() else {
+                return Ok(Some(Vec::new()));
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("Failed to decode list metadata"))?;
+            if header.type_tag != TYPE_LIST {
+                return Err(Error::msg(WRONG_TYPE_ERROR));
+            }
+            let Some(mut items) = decode_packed_list(raw) else {
+                return Ok(None);
+            };
+            let pop_count = count.min(items.len());
+            let popped = if left {
+                items.drain(..pop_count).collect::<Vec<_>>()
+            } else {
+                (0..pop_count)
+                    .filter_map(|_| items.pop())
+                    .collect::<Vec<_>>()
+            };
+            if popped.is_empty() {
+                return Ok(Some(popped));
+            }
+            let mut batch = WriteBatch::new();
+            if items.is_empty() {
+                self.delete_main_key_with_ttl_to_batch(&mut batch, key, header.expire_ms);
+            } else {
+                batch.put(
+                    &key_bytes,
+                    &encode_packed_list(header.expire_ms, &items)
+                        .expect("removing items cannot overflow packed list"),
+                )?;
+            }
+            if self.compare_and_write_batch_if_not_empty(
+                &[CompareCondition::from_observed(&observed)],
+                &batch,
+            )? {
+                self.changes
+                    .fetch_add(popped.len() as u64, Ordering::Relaxed);
+                return Ok(Some(popped));
+            }
+        }
+        self.promote_packed_list(key)?;
+        Ok(None)
+    }
+
+    async fn try_list_pop_batch_packed_async<'a>(
+        &self,
+        commands: &[(&'a str, bool, usize)],
+        keys: &[&'a str],
+        key_positions: &HashMap<&'a str, usize>,
+    ) -> Result<Option<Vec<Result<Vec<Vec<u8>>, Error>>>, Error> {
+        for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
+            for key in keys {
+                self.expire_if_needed_async(key).await;
+            }
+            let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let mut states = Vec::with_capacity(keys.len());
+            for observed in &observations {
+                states.push(match observed.value() {
+                    None => Ok((0u64, PackedListItems::new(), false)),
+                    Some(raw) => {
+                        let Some(header) = decode_meta_header(raw) else {
+                            return Ok(None);
+                        };
+                        if header.type_tag != TYPE_LIST {
+                            Err(WRONG_TYPE_ERROR.to_string())
+                        } else if let Some(items) = decode_packed_list(raw) {
+                            Ok((header.expire_ms, items, false))
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                });
+            }
+            let mut replies = Vec::with_capacity(commands.len());
+            for (key, left, count) in commands {
+                let state = &mut states[key_positions[key]];
+                replies.push(match state {
+                    Err(message) => Err(Error::msg(message.clone())),
+                    Ok((_, items, dirty)) => {
+                        let pop_count = (*count).min(items.len());
+                        let popped = if *left {
+                            items.drain(..pop_count).collect::<Vec<_>>()
+                        } else {
+                            (0..pop_count)
+                                .filter_map(|_| items.pop())
+                                .collect::<Vec<_>>()
+                        };
+                        *dirty |= !popped.is_empty();
+                        Ok(popped)
+                    }
+                });
+            }
+            let dirty_positions = states
+                .iter()
+                .enumerate()
+                .filter_map(|(position, state)| {
+                    state
+                        .as_ref()
+                        .ok()
+                        .is_some_and(|(_, _, dirty)| *dirty)
+                        .then_some(position)
+                })
+                .collect::<Vec<_>>();
+            if dirty_positions.is_empty() {
+                return Ok(Some(replies));
+            }
+            let mut batch = WriteBatch::new();
+            let mut conditions = Vec::with_capacity(dirty_positions.len());
+            for position in dirty_positions {
+                let (expire_ms, items, _) = states[position]
+                    .as_ref()
+                    .expect("dirty packed list state is valid");
+                if items.is_empty() {
+                    self.delete_main_key_with_ttl_to_batch(&mut batch, keys[position], *expire_ms);
+                } else {
+                    batch.put(
+                        &raw_keys[position],
+                        &encode_packed_list(*expire_ms, items)
+                            .expect("removing items cannot overflow packed list"),
+                    )?;
+                }
+                conditions.push(CompareCondition::from_observed(&observations[position]));
+            }
+            if self
+                .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
+                .await?
+            {
+                let changed = replies
+                    .iter()
+                    .filter_map(|reply| reply.as_ref().ok())
+                    .map(Vec::len)
+                    .sum::<usize>() as u64;
+                self.changes.fetch_add(changed, Ordering::Relaxed);
+                return Ok(Some(replies));
+            }
+        }
+        for key in keys {
+            self.promote_packed_list_async(key).await?;
+        }
+        Ok(None)
+    }
+
     pub(in crate::store::db) fn list_pop_many(
         &self,
         key: &str,
@@ -13,6 +167,12 @@ impl Db {
     ) -> Result<Vec<String>, Error> {
         if count == 0 {
             return Ok(Vec::new());
+        }
+        if let Some(values) = self.try_list_pop_packed(key, left, count)? {
+            return Ok(values
+                .into_iter()
+                .filter_map(|value| String::from_utf8(value).ok())
+                .collect());
         }
         let Some(mut meta) = self.list_meta(key)? else {
             return Ok(Vec::new());
@@ -90,6 +250,7 @@ impl Db {
         if count == 0 {
             return Ok(Vec::new());
         }
+        self.promote_packed_list_async(key).await?;
         let Some(mut meta) = self.list_meta_async(key).await? else {
             return Ok(Vec::new());
         };
@@ -178,6 +339,30 @@ impl Db {
         let shards =
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
         let _write_guards = self.lock_write_shards(&shards).await;
+
+        match self
+            .try_list_pop_batch_packed_async(commands, &keys, &key_positions)
+            .await
+        {
+            Ok(Some(replies)) => return replies,
+            Ok(None) => {}
+            Err(error) => {
+                let message = error.to_string();
+                return commands
+                    .iter()
+                    .map(|_| Err(Error::msg(message.clone())))
+                    .collect();
+            }
+        }
+        for key in &keys {
+            if let Err(error) = self.promote_packed_list_async(key).await {
+                let message = error.to_string();
+                return commands
+                    .iter()
+                    .map(|_| Err(Error::msg(message.clone())))
+                    .collect();
+            }
+        }
 
         for key in &keys {
             self.expire_if_needed_async(key).await;
@@ -358,6 +543,12 @@ impl Db {
 
     /// 左侧出队。
     pub fn list_pop_left(&self, key: &str) -> Result<Option<String>, Error> {
+        if let Some(values) = self.try_list_pop_packed(key, true, 1)? {
+            return Ok(values
+                .into_iter()
+                .next()
+                .and_then(|value| String::from_utf8(value).ok()));
+        }
         let mut meta = match self.list_meta(key)? {
             Some(meta) => meta,
             None => return Ok(None),
@@ -410,6 +601,12 @@ impl Db {
 
     /// 右侧出队。
     pub fn list_pop_right(&self, key: &str) -> Result<Option<String>, Error> {
+        if let Some(values) = self.try_list_pop_packed(key, false, 1)? {
+            return Ok(values
+                .into_iter()
+                .next()
+                .and_then(|value| String::from_utf8(value).ok()));
+        }
         let mut meta = match self.list_meta(key)? {
             Some(meta) => meta,
             None => return Ok(None),

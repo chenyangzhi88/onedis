@@ -26,6 +26,28 @@ impl Db {
             return Ok(Vec::new());
         };
 
+        if version == 0 {
+            let mut entries = self
+                .zset_members_raw(key, version)
+                .into_iter()
+                .filter_map(|(member, score)| {
+                    let member = String::from_utf8(member).ok()?;
+                    if !zset_member_in_lex_range(&member, min, max) {
+                        return None;
+                    }
+                    Some((member, decode_zset_score(&score)?))
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                entries.reverse();
+            }
+            return Ok(entries
+                .into_iter()
+                .skip(offset)
+                .take(scan_limit.saturating_sub(offset))
+                .collect());
+        }
+
         let Some((prefix, lower, upper)) =
             zset_lex_scan_bounds(self.db_index, key, version, min, max)
         else {
@@ -79,6 +101,29 @@ impl Db {
             return Ok(Vec::new());
         };
 
+        if version == 0 {
+            let mut entries = self
+                .zset_members_raw_async(key, version)
+                .await
+                .into_iter()
+                .filter_map(|(member, score)| {
+                    let member = String::from_utf8(member).ok()?;
+                    if !zset_member_in_lex_range(&member, min, max) {
+                        return None;
+                    }
+                    Some((member, decode_zset_score(&score)?))
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                entries.reverse();
+            }
+            return Ok(entries
+                .into_iter()
+                .skip(offset)
+                .take(scan_limit.saturating_sub(offset))
+                .collect());
+        }
+
         let Some((prefix, lower, upper)) =
             zset_lex_scan_bounds(self.db_index, key, version, min, max)
         else {
@@ -119,6 +164,14 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(0);
         };
+        if version == 0 {
+            return Ok(self
+                .zset_members_raw(key, version)
+                .into_iter()
+                .filter_map(|(member, _)| String::from_utf8(member).ok())
+                .filter(|member| zset_member_in_lex_range(member, min, max))
+                .count());
+        }
         let Some((_, lower, upper)) = zset_lex_scan_bounds(self.db_index, key, version, min, max)
         else {
             return Ok(0);
@@ -136,6 +189,15 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(0);
         };
+        if version == 0 {
+            return Ok(self
+                .zset_members_raw_async(key, version)
+                .await
+                .into_iter()
+                .filter_map(|(member, _)| String::from_utf8(member).ok())
+                .filter(|member| zset_member_in_lex_range(member, min, max))
+                .count());
+        }
         let Some((_, lower, upper)) = zset_lex_scan_bounds(self.db_index, key, version, min, max)
         else {
             return Ok(0);
@@ -172,6 +234,30 @@ impl Db {
             .collect::<Vec<_>>();
         self.zset_remove_async_unlocked(key, &members).await
     }
+}
+
+fn zset_member_in_lex_range(
+    member: &str,
+    min: &crate::cmds::sorted_set::zrange::LexBound,
+    max: &crate::cmds::sorted_set::zrange::LexBound,
+) -> bool {
+    use crate::cmds::sorted_set::zrange::LexBound;
+
+    let above_min = match min {
+        LexBound::NegInfinity => true,
+        LexBound::PosInfinity => false,
+        LexBound::Value { value, inclusive } => {
+            member > value.as_str() || *inclusive && member == value
+        }
+    };
+    let below_max = match max {
+        LexBound::PosInfinity => true,
+        LexBound::NegInfinity => false,
+        LexBound::Value { value, inclusive } => {
+            member < value.as_str() || *inclusive && member == value
+        }
+    };
+    above_min && below_max
 }
 
 fn zset_range_scan_window(limit: Option<(i64, i64)>) -> Option<(usize, usize)> {

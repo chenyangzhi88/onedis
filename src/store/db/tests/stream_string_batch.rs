@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::db::{SMALL_STREAM_MAX_ENTRIES, decode_packed_stream, decode_stream_meta};
 
 #[tokio::test]
 async fn async_batch_string_overwrite_defers_old_subkeys_to_compaction() {
@@ -91,6 +92,7 @@ fn stream_add_len_and_range_use_ordered_ids() {
     assert_eq!(first.to_redis_id(), "1-0");
     assert_eq!(second.to_redis_id(), "2-0");
     assert_eq!(db.stream_len("events").unwrap(), 2);
+    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap()).is_some());
 
     let entries = db
         .stream_range(
@@ -111,6 +113,53 @@ fn stream_add_len_and_range_use_ordered_ids() {
             ("user".to_string(), "alice".to_string())
         ]
     );
+}
+
+#[test]
+fn stream_promotes_at_the_inline_limit_and_never_demotes() {
+    let db = test_db();
+    for seq in 0..=SMALL_STREAM_MAX_ENTRIES {
+        db.stream_add(
+            "events",
+            Some(StreamId {
+                ms: 1,
+                seq: seq as u64,
+            }),
+            &[("field".to_string(), format!("value-{seq}"))],
+        )
+        .unwrap();
+    }
+    let raw = db.store.get_raw(&db.mk("events")).unwrap();
+    let meta = decode_stream_meta(&raw).unwrap();
+    assert_ne!(meta.version, 0);
+    assert!(decode_packed_stream(&raw).is_none());
+
+    let ids = (1..=SMALL_STREAM_MAX_ENTRIES)
+        .map(|seq| StreamId {
+            ms: 1,
+            seq: seq as u64,
+        })
+        .collect::<Vec<_>>();
+    db.stream_delete("events", &ids).unwrap();
+    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap()).is_none());
+}
+
+#[test]
+fn creating_a_consumer_group_promotes_a_packed_stream() {
+    let db = test_db();
+    db.stream_add(
+        "events",
+        Some(StreamId { ms: 1, seq: 0 }),
+        &[("field".to_string(), "value".to_string())],
+    )
+    .unwrap();
+    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap()).is_some());
+
+    db.stream_group_create("events", "workers", StreamId { ms: 0, seq: 0 }, false)
+        .unwrap();
+    let raw = db.store.get_raw(&db.mk("events")).unwrap();
+    assert!(decode_packed_stream(&raw).is_none());
+    assert_ne!(decode_stream_meta(&raw).unwrap().version, 0);
 }
 
 #[tokio::test]

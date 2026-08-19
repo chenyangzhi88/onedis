@@ -8,6 +8,10 @@ impl Db {
         source_left: bool,
         destination_left: bool,
     ) -> Result<Option<String>, Error> {
+        self.promote_packed_list(source)?;
+        if source != destination {
+            self.promote_packed_list(destination)?;
+        }
         let Some(mut source_meta) = self.list_meta(source)? else {
             return Ok(None);
         };
@@ -145,6 +149,10 @@ impl Db {
         source_left: bool,
         destination_left: bool,
     ) -> Result<Option<String>, Error> {
+        self.promote_packed_list_async(source).await?;
+        if source != destination {
+            self.promote_packed_list_async(destination).await?;
+        }
         let Some(mut source_meta) = self.list_meta_async(source).await? else {
             return Ok(None);
         };
@@ -262,6 +270,7 @@ impl Db {
         pivot: &str,
         element: &str,
     ) -> Result<i64, Error> {
+        self.promote_packed_list(key)?;
         let meta = match self.list_meta(key)? {
             Some(meta) => meta,
             None => return Ok(0),
@@ -294,6 +303,7 @@ impl Db {
         element: &str,
     ) -> Result<i64, Error> {
         let _write_guard = self.set_write_lock(key).lock().await;
+        self.promote_packed_list_async(key).await?;
         let meta = match self.list_meta_async(key).await? {
             Some(meta) => meta,
             None => return Ok(0),

@@ -8,8 +8,9 @@ impl FullTextRuntimeRegistry {
     }
 
     pub(super) fn insert(&self, db_index: u16, index: &str, runtime: FullTextRuntime) {
-        self.indexes
-            .insert(Self::key(db_index, index), Arc::new(RwLock::new(runtime)));
+        let key = Self::key(db_index, index);
+        self.publish_search_generation(&key, runtime.search_generation());
+        self.indexes.insert(key, Arc::new(RwLock::new(runtime)));
     }
 
     pub(super) fn get_or_try_insert(
@@ -21,7 +22,9 @@ impl FullTextRuntimeRegistry {
         match self.indexes.entry(Self::key(db_index, index)) {
             Entry::Occupied(entry) => Ok(entry.get().clone()),
             Entry::Vacant(entry) => {
-                let runtime = Arc::new(RwLock::new(create()?));
+                let runtime = create()?;
+                self.publish_search_generation(entry.key(), runtime.search_generation());
+                let runtime = Arc::new(RwLock::new(runtime));
                 entry.insert(runtime.clone());
                 Ok(runtime)
             }
@@ -34,8 +37,41 @@ impl FullTextRuntimeRegistry {
             .map(|entry| entry.value().clone())
     }
 
+    pub(super) fn get_search_generation(
+        &self,
+        db_index: u16,
+        index: &str,
+    ) -> Option<Arc<FullTextSearchGeneration>> {
+        let slot = self.search_generations.get(&Self::key(db_index, index))?;
+        slot.load_full()
+    }
+
+    fn publish_search_generation(
+        &self,
+        key: &FullTextRuntimeKey,
+        generation: Arc<FullTextSearchGeneration>,
+    ) {
+        let slot = self
+            .search_generations
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(ArcSwapOption::empty()))
+            .clone();
+        if let Some(previous) = slot.swap(Some(generation)) {
+            previous.retire();
+        }
+    }
+
+    fn remove_search_generation(&self, key: &FullTextRuntimeKey) {
+        if let Some((_, slot)) = self.search_generations.remove(key)
+            && let Some(generation) = slot.swap(None)
+        {
+            generation.retire();
+        }
+    }
+
     pub(super) fn remove(&self, db_index: u16, index: &str) {
         let key = Self::key(db_index, index);
+        self.remove_search_generation(&key);
         self.indexes.remove(&key);
         self.outbox_mutations_since_compaction.remove(&key);
         self.outbox_pending.remove(&key);
@@ -67,6 +103,7 @@ impl FullTextRuntimeRegistry {
             Entry::Vacant(_) => false,
         };
         if removed {
+            self.remove_search_generation(&key);
             self.outbox_mutations_since_compaction.remove(&key);
             self.outbox_pending.remove(&key);
             self.latest_outbox_seq.remove(&key);
@@ -79,6 +116,13 @@ impl FullTextRuntimeRegistry {
     }
 
     pub(crate) fn remove_db(&self, db_index: u16) {
+        self.search_generations.retain(|key, slot| {
+            let retain = key.db_index != db_index;
+            if !retain && let Some(generation) = slot.swap(None) {
+                generation.retire();
+            }
+            retain
+        });
         self.indexes.retain(|key, _| key.db_index != db_index);
         self.outbox_mutations_since_compaction
             .retain(|key, _| key.db_index != db_index);

@@ -1,4 +1,7 @@
 use super::*;
+pub(super) const FULLTEXT_GEOSHAPE_OVERSIZE_CELL: &str = "__oversize";
+const FULLTEXT_GEOSHAPE_CELL_SIZE: f64 = 0.25;
+const FULLTEXT_GEOSHAPE_MAX_CELLS: usize = 256;
 #[derive(Clone, Debug)]
 pub(super) enum FullTextGeometry {
     Point((f64, f64)),
@@ -103,6 +106,35 @@ pub(super) fn fulltext_geometry_bounds(
             (min_x.min(*x), max_x.max(*x), min_y.min(*y), max_y.max(*y))
         },
     ))
+}
+
+/// Returns a bounded set of grid cells covering a geometry bounding box.
+/// `None` marks an oversized shape, which is indexed with a sentinel so small
+/// queries cannot accidentally exclude a large containing geometry.
+pub(super) fn fulltext_geoshape_cells(bounds: (f64, f64, f64, f64)) -> Option<Vec<String>> {
+    let (min_x, max_x, min_y, max_y) = bounds;
+    if ![min_x, max_x, min_y, max_y].into_iter().all(f64::is_finite) {
+        return None;
+    }
+    let min_cell_x = (min_x / FULLTEXT_GEOSHAPE_CELL_SIZE).floor() as i64;
+    let max_cell_x = (max_x / FULLTEXT_GEOSHAPE_CELL_SIZE).floor() as i64;
+    let min_cell_y = (min_y / FULLTEXT_GEOSHAPE_CELL_SIZE).floor() as i64;
+    let max_cell_y = (max_y / FULLTEXT_GEOSHAPE_CELL_SIZE).floor() as i64;
+    let width = max_cell_x.checked_sub(min_cell_x)?.checked_add(1)?;
+    let height = max_cell_y.checked_sub(min_cell_y)?.checked_add(1)?;
+    let count = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    if count > FULLTEXT_GEOSHAPE_MAX_CELLS {
+        return None;
+    }
+    let mut cells = Vec::with_capacity(count);
+    for x in min_cell_x..=max_cell_x {
+        for y in min_cell_y..=max_cell_y {
+            cells.push(format!("{x}:{y}"));
+        }
+    }
+    Some(cells)
 }
 
 pub(super) fn fulltext_point_in_polygon(point: (f64, f64), polygon: &[(f64, f64)]) -> bool {

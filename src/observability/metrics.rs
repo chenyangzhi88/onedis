@@ -21,7 +21,8 @@ const DURATION_BUCKETS_US: [u64; 10] = [
     u64::MAX,
 ];
 
-const FULLTEXT_SEARCH_STAGE_NAMES: [&str; 7] = [
+const FULLTEXT_SEARCH_STAGE_NAMES: [&str; 8] = [
+    "executor_queue",
     "resolve",
     "refresh_wait",
     "parse_plan",
@@ -33,13 +34,14 @@ const FULLTEXT_SEARCH_STAGE_NAMES: [&str; 7] = [
 
 #[derive(Clone, Copy, Debug)]
 pub enum FullTextSearchStage {
-    Resolve = 0,
-    RefreshWait = 1,
-    ParsePlan = 2,
-    IndexSearch = 3,
-    SourceLoad = 4,
-    PostProcess = 5,
-    Response = 6,
+    ExecutorQueue = 0,
+    Resolve = 1,
+    RefreshWait = 2,
+    ParsePlan = 3,
+    IndexSearch = 4,
+    SourceLoad = 5,
+    PostProcess = 6,
+    Response = 7,
 }
 
 const ERROR_CLASSES: [&str; 9] = [

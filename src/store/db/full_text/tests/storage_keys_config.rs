@@ -75,8 +75,25 @@ fn packed_mutation_records_round_trip_and_legacy_records_remain_readable() {
     assert_eq!(decoded[0].kind, FullTextMutationKind::UpsertKey);
     assert_eq!(decoded[0].key, "doc:1");
     assert_eq!(decoded[1].key, "doc:2");
+    assert!(decoded.iter().all(|record| record.projection.is_none()));
 
-    let legacy = encode_record(&FullTextMutationRecord {
+    let projected = encode_fulltext_projected_mutation_batch(
+        18,
+        vec![FullTextProjectedMutation {
+            key: "doc:projected".to_string(),
+            projection: FullTextIndexedProjection {
+                fields: vec![("title".to_string(), "hello".to_string())],
+                expires_at_ms: 123,
+            },
+        }],
+    )
+    .unwrap();
+    let projected = decode_fulltext_mutation_records(&projected).unwrap();
+    assert_eq!(projected[0].incarnation, 18);
+    assert_eq!(projected[0].key, "doc:projected");
+    assert_eq!(projected[0].projection.as_ref().unwrap().expires_at_ms, 123);
+
+    let legacy = encode_record(&FullTextMutationRecordV1 {
         incarnation: 9,
         kind: FullTextMutationKind::DeleteKey,
         key: "doc:old".to_string(),

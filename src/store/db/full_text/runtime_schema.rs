@@ -83,8 +83,13 @@ impl FullTextRuntime {
                         INDEXED,
                     ),
                 ];
-                geoshape_fields.insert(field.name.clone(), bounds);
-                geoshape_fields.insert(field.attribute_name().to_string(), bounds);
+                let cells = builder.add_text_field(
+                    &format!("{FULLTEXT_GEOSHAPE_FIELD_PREFIX}{schema_offset}_cells"),
+                    STRING,
+                );
+                let fields = FullTextGeoShapeFields { bounds, cells };
+                geoshape_fields.insert(field.name.clone(), fields);
+                geoshape_fields.insert(field.attribute_name().to_string(), fields);
             }
             if field.options.sortable && !field.options.noindex {
                 let sort_field = match field.kind {
@@ -199,27 +204,17 @@ impl FullTextRuntime {
         );
         merge_policy.set_del_docs_ratio_before_merge(config.merge_delete_ratio);
         writer.set_merge_policy(Box::new(merge_policy));
-        Ok(Self {
+        let search = Arc::new(FullTextSearchGeneration {
             incarnation: meta.incarnation,
             search_meta: meta.clone(),
             index,
             reader,
-            writer,
-            directory,
-            published_outbox_seq: meta.last_indexed_outbox_seq,
-            durable_outbox_seq: meta.last_indexed_outbox_seq,
-            published_backfill_cursor: meta.backfill_cursor.clone(),
-            backfill_complete: !matches!(
-                meta.state,
-                FullTextIndexState::Backfilling | FullTextIndexState::Rebuilding
-            ),
             key_field,
             expires_at_field,
             text_fields,
             text_variant_fields,
             text_field_settings,
             tag_field_settings,
-            synonyms,
             source_fields,
             query_fields,
             presence_fields,
@@ -234,8 +229,22 @@ impl FullTextRuntime {
             min_prefix: config.min_prefix,
             max_expansions: config.max_expansions,
             max_prefix_expansions: config.max_prefix_expansions,
-            has_expiring_documents,
+            has_expiring_documents: AtomicBool::new(has_expiring_documents),
+            retired: AtomicBool::new(false),
             expansion_terms: Mutex::new(HashMap::new()),
+        });
+        Ok(Self {
+            search,
+            writer,
+            directory,
+            published_outbox_seq: meta.last_indexed_outbox_seq,
+            durable_outbox_seq: meta.last_indexed_outbox_seq,
+            published_backfill_cursor: meta.backfill_cursor.clone(),
+            backfill_complete: !matches!(
+                meta.state,
+                FullTextIndexState::Backfilling | FullTextIndexState::Rebuilding
+            ),
+            writer_synonyms: synonyms,
             last_refresh_at: Instant::now(),
             last_checkpoint_at: Instant::now(),
         })

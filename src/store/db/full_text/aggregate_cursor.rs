@@ -198,7 +198,7 @@ impl Db {
     ) -> Result<Frame, Error> {
         let index = index.to_string();
         let query = query.to_string();
-        self.run_blocking_store_task(move |db| db.fulltext_aggregate(&index, &query, options))
+        self.run_fulltext_search_task(move |db| db.fulltext_aggregate(&index, &query, options))
             .await
     }
 

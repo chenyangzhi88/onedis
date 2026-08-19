@@ -22,7 +22,7 @@ impl Automaton for FullTextLevenshteinDfa {
     }
 }
 
-impl FullTextRuntime {
+impl FullTextSearchGeneration {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn build_query(
         &self,
@@ -609,21 +609,44 @@ impl FullTextRuntime {
             .ok_or_else(|| Error::msg("ERR invalid geoshape field"))?;
         let bounds = fulltext_geometry_bounds(&parse_fulltext_wkt(shape)?)
             .ok_or_else(|| Error::msg("ERR invalid WKT"))?;
-        let queries = match relation.to_ascii_uppercase().as_str() {
+        let bounds_fields = fields.bounds;
+        let mut queries = match relation.to_ascii_uppercase().as_str() {
             "WITHIN" => vec![
-                fulltext_f64_lower_query(fields[0], bounds.0),
-                fulltext_f64_upper_query(fields[1], bounds.1),
-                fulltext_f64_lower_query(fields[2], bounds.2),
-                fulltext_f64_upper_query(fields[3], bounds.3),
+                fulltext_f64_lower_query(bounds_fields[0], bounds.0),
+                fulltext_f64_upper_query(bounds_fields[1], bounds.1),
+                fulltext_f64_lower_query(bounds_fields[2], bounds.2),
+                fulltext_f64_upper_query(bounds_fields[3], bounds.3),
             ],
             "CONTAINS" => vec![
-                fulltext_f64_upper_query(fields[0], bounds.0),
-                fulltext_f64_lower_query(fields[1], bounds.1),
-                fulltext_f64_upper_query(fields[2], bounds.2),
-                fulltext_f64_lower_query(fields[3], bounds.3),
+                fulltext_f64_upper_query(bounds_fields[0], bounds.0),
+                fulltext_f64_lower_query(bounds_fields[1], bounds.1),
+                fulltext_f64_upper_query(bounds_fields[2], bounds.2),
+                fulltext_f64_lower_query(bounds_fields[3], bounds.3),
             ],
             _ => return Err(Error::msg("ERR invalid GEOSHAPE relation")),
         };
+        if let Some(cells) = fulltext_geoshape_cells(bounds) {
+            let mut cell_queries = cells
+                .into_iter()
+                .map(|cell| {
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(fields.cells, &cell),
+                            IndexRecordOption::Basic,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect::<Vec<_>>();
+            cell_queries.push((
+                Occur::Should,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.cells, FULLTEXT_GEOSHAPE_OVERSIZE_CELL),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+            queries.push(Box::new(BooleanQuery::new(cell_queries)));
+        }
         Ok(Box::new(BooleanQuery::new(
             queries
                 .into_iter()

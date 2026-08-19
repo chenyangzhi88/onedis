@@ -162,19 +162,7 @@ pub(in crate::store::db) fn encode_packed_hash(
     expire_ms: u64,
     fields: &PackedHashFields,
 ) -> Option<Vec<u8>> {
-    if fields.len() > SMALL_HASH_MAX_FIELDS {
-        return None;
-    }
-    let encoded_len = fields
-        .iter()
-        .try_fold(PACKED_HASH_HEADER_LEN, |len, (field, value)| {
-            u16::try_from(field.len()).ok()?;
-            u32::try_from(value.len()).ok()?;
-            len.checked_add(2 + 4 + field.len() + value.len())
-        })?;
-    if encoded_len > SMALL_HASH_MAX_ENCODED_BYTES {
-        return None;
-    }
+    let encoded_len = packed_hash_encoded_len(fields)?;
     let mut raw = Vec::with_capacity(encoded_len);
     raw.extend_from_slice(&expire_ms.to_be_bytes());
     raw.extend_from_slice(&0u64.to_be_bytes());
@@ -189,6 +177,27 @@ pub(in crate::store::db) fn encode_packed_hash(
         raw.extend_from_slice(value);
     }
     Some(raw)
+}
+
+pub(in crate::store::db) fn hash_uses_packed_layout(fields: &PackedHashFields) -> bool {
+    packed_hash_encoded_len(fields).is_some()
+}
+
+fn packed_hash_encoded_len(fields: &PackedHashFields) -> Option<usize> {
+    if fields.len() > SMALL_HASH_MAX_FIELDS {
+        return None;
+    }
+    let encoded_len = fields
+        .iter()
+        .try_fold(PACKED_HASH_HEADER_LEN, |len, (field, value)| {
+            u16::try_from(field.len()).ok()?;
+            u32::try_from(value.len()).ok()?;
+            len.checked_add(2 + 4 + field.len() + value.len())
+        })?;
+    if encoded_len > SMALL_HASH_MAX_ENCODED_BYTES {
+        return None;
+    }
+    Some(encoded_len)
 }
 
 pub(in crate::store::db) fn decode_hash_meta(raw: &[u8]) -> Option<HashMeta> {

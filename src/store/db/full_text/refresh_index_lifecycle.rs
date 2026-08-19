@@ -43,7 +43,18 @@ impl Db {
                         .is_none_or(|field| !schema.get_field_entry(field).is_fast())
                 })
         });
-        Ok(missing_expiration || key_is_not_fast || geo_is_not_fast)
+        let geoshape_cell_index_is_missing =
+            meta.schema.iter().enumerate().any(|(offset, field)| {
+                matches!(field.kind, FullTextFieldKind::GeoShape)
+                    && !field.options.noindex
+                    && schema
+                        .get_field(&format!("{FULLTEXT_GEOSHAPE_FIELD_PREFIX}{offset}_cells"))
+                        .is_err()
+            });
+        Ok(missing_expiration
+            || key_is_not_fast
+            || geo_is_not_fast
+            || geoshape_cell_index_is_missing)
     }
 
     pub(super) fn fulltext_refresh_index_inner(

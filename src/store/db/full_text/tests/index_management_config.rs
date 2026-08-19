@@ -367,6 +367,7 @@ fn recreated_index_ignores_late_outbox_records_from_the_dropped_incarnation() {
             incarnation: old_incarnation,
             kind: FullTextMutationKind::UpsertKey,
             key: "doc:late".to_string(),
+            projection: None,
         })
         .unwrap(),
     );

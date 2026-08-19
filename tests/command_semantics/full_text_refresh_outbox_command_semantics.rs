@@ -162,6 +162,9 @@ fn ft_outbox_compaction_keeps_latest_mutation_per_key() {
         "0"
     );
 
+    // Outbox compaction belongs to the publication/maintenance coordinator;
+    // source writes only append source + outbox atomically and update the watermark.
+    let _ = apply(&db, &["FT.SEARCH", "idx", "latest"]);
     let info = array(apply(&db, &["FT.INFO", "idx"]));
     let Some(Frame::Integer(pending)) = info_value(&info, "pending_outbox") else {
         panic!("missing pending_outbox");

@@ -33,7 +33,7 @@ impl Db {
     ) -> Result<Frame, Error> {
         let index = index.to_string();
         let query = query.to_string();
-        self.run_blocking_store_task(move |db| db.fulltext_search(&index, &query, options))
+        self.run_fulltext_search_task(move |db| db.fulltext_search(&index, &query, options))
             .await
     }
 
@@ -182,7 +182,7 @@ impl Db {
         let index = index.to_string();
         let search_query = search_query.to_string();
         let vector_query = vector_query.to_string();
-        self.run_blocking_store_task(move |db| {
+        self.run_fulltext_search_task(move |db| {
             db.fulltext_hybrid(&index, &search_query, &vector_query, options)
         })
         .await

@@ -98,7 +98,15 @@ impl Db {
                         }
                     }
                 }
-                if let Err(error) = self.fulltext_enqueue_hash_upserts_to_batch(&mut batch, &keys) {
+                let projected_documents = keys
+                    .iter()
+                    .copied()
+                    .zip(packed_fields.iter())
+                    .collect::<Vec<_>>();
+                if let Err(error) = self.fulltext_enqueue_new_hash_projections_to_batch(
+                    &mut batch,
+                    &projected_documents,
+                ) {
                     let message = error.to_string();
                     return mutations
                         .iter()

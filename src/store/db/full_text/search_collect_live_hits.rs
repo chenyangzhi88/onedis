@@ -72,21 +72,21 @@ impl Db {
             FullTextSearchStage::RefreshWait,
             elapsed_us(refresh_started),
         );
-        // Refresh publication is serialized separately. Queries only retain a
-        // lifecycle read lease, so no durable checkpoint or lifecycle write
-        // lock is part of the search critical path.
-        let _lifecycle_guard = lifecycle_lock
-            .read()
-            .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-        let runtime = self
-            .fulltext_runtimes
-            .get(self.db_index, &index)
-            .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
-        let meta = runtime
-            .read()
-            .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
-            .search_meta
-            .clone();
+        // Capture one immutable generation atomically under the lifecycle
+        // lease. Query planning, collection and source materialization never
+        // acquire or retain the mutable writer lock.
+        let generation = {
+            let _lifecycle_guard = lifecycle_lock
+                .read()
+                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
+            let generation = self
+                .fulltext_runtimes
+                .get_search_generation(self.db_index, &index)
+                .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
+            generation.ensure_active()?;
+            generation
+        };
+        let meta = generation.search_meta.clone();
         if (options.highlight.is_some() || options.summarize.is_some())
             && (meta.index_options.no_hl || meta.index_options.no_offsets)
         {
@@ -138,7 +138,7 @@ impl Db {
             let hits = self.fulltext_vector_hits(
                 &index,
                 &meta,
-                &runtime,
+                &generation,
                 &ast,
                 options,
                 FullTextSearchLimits {
@@ -151,6 +151,7 @@ impl Db {
                 },
             )?;
             fulltext_validate_collected_hit_budget(&hits, result_cap, reader_budget)?;
+            generation.ensure_active()?;
             return Ok(FullTextCollectedHits {
                 total: hits.len(),
                 hits,
@@ -181,10 +182,7 @@ impl Db {
                 .checked_div(std::mem::size_of::<FullTextSearchHit>().max(1))
                 .unwrap_or(0)
                 .max(result_cap);
-            let runtime_guard = runtime
-                .read()
-                .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
-            let candidates = runtime_guard.search_ast(
+            let candidates = generation.search_ast(
                 &geo_ast,
                 options,
                 candidate_limit.saturating_add(1),
@@ -204,11 +202,10 @@ impl Db {
             let candidates = candidates
                 .into_iter()
                 .map(|candidate| {
-                    let exact = runtime_guard.fast_geo_matches(&geo_ast, candidate.address)?;
+                    let exact = generation.fast_geo_matches(&geo_ast, candidate.address)?;
                     Ok((candidate, exact))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            drop(runtime_guard);
             let mut hits = Vec::new();
             for (candidate, fast_exact) in candidates {
                 if let Some(exact) = fast_exact {
@@ -249,6 +246,7 @@ impl Db {
                 }
             }
             fulltext_validate_collected_hit_budget(&hits, result_cap, reader_budget)?;
+            generation.ensure_active()?;
             return Ok(FullTextCollectedHits {
                 total: hits.len(),
                 hits,
@@ -273,15 +271,7 @@ impl Db {
         } else {
             Some(options.offset.saturating_add(options.limit))
         };
-        let runtime_guard = runtime
-            .read()
-            .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
-        let segment_count = runtime_guard
-            .reader
-            .searcher()
-            .segment_readers()
-            .len()
-            .max(1);
+        let segment_count = generation.reader.searcher().segment_readers().len().max(1);
         if fetch_limit
             .unwrap_or(usize::MAX)
             .saturating_mul(std::mem::size_of::<super::runtime_search::FullTextScoredDoc>())
@@ -299,7 +289,7 @@ impl Db {
             0
         };
         let candidate_hits = if fast_sort {
-            runtime_guard.search_sorted_ast(
+            generation.search_sorted_ast(
                 &ast,
                 options,
                 fetch_limit.unwrap_or(0),
@@ -310,7 +300,7 @@ impl Db {
                 },
             )?
         } else if page_offset_applied {
-            runtime_guard.search_ast_page_hits(
+            generation.search_ast_page_hits(
                 &ast,
                 options,
                 fetch_limit.unwrap_or(0),
@@ -321,7 +311,7 @@ impl Db {
                 },
             )?
         } else {
-            runtime_guard.search_ast_hits(
+            generation.search_ast_hits(
                 &ast,
                 options,
                 fetch_limit,
@@ -335,7 +325,6 @@ impl Db {
             FullTextSearchStage::IndexSearch,
             elapsed_us(index_search_started),
         );
-        drop(runtime_guard);
         if fetch_all && candidate_hits.hits.len() > result_cap {
             return Err(Error::msg("ERR fulltext result limit exceeded"));
         }
@@ -388,6 +377,7 @@ impl Db {
                 segment_count,
                 fetch_all,
             );
+            generation.ensure_active()?;
             return Ok(FullTextCollectedHits {
                 total: if fetch_all || bounded_window.is_some() {
                     live.len()
@@ -467,6 +457,7 @@ impl Db {
             segment_count,
             fetch_all,
         );
+        generation.ensure_active()?;
         Ok(FullTextCollectedHits {
             total: if fetch_all || bounded_window.is_some() {
                 live.len()

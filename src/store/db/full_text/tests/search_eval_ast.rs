@@ -29,6 +29,14 @@ fn geo_geoshape_numeric_filter_and_ast_matching_cover_edges() {
     assert!(parse_fulltext_wkt_point("1").is_err());
     assert!(fulltext_geoshape_relation_matches("POINT(1 1)", "BAD", "POINT(1 1)").is_err());
 
+    let point_cells = fulltext_geoshape_cells((1.0, 1.0, 1.0, 1.0)).unwrap();
+    assert_eq!(point_cells, vec!["4:4"]);
+    let local_cells = fulltext_geoshape_cells((0.0, 0.5, 0.0, 0.5)).unwrap();
+    assert_eq!(local_cells.len(), 9);
+    assert!(local_cells.iter().any(|cell| cell == "0:0"));
+    assert!(local_cells.iter().any(|cell| cell == "2:2"));
+    assert!(fulltext_geoshape_cells((-180.0, 180.0, -90.0, 90.0)).is_none());
+
     assert!(fulltext_numeric_bound_allows(
         5.0,
         FullTextNumericBound::Inclusive(5.0),

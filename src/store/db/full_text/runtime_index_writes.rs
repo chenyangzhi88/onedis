@@ -71,14 +71,23 @@ impl FullTextRuntime {
                 doc.add_f64(*lon_field, lon);
                 doc.add_f64(*lat_field, lat);
             }
-            if let Some(bounds_fields) = self.geoshape_fields.get(name)
+            if let Some(geoshape_fields) = self.geoshape_fields.get(name)
                 && let Ok(geometry) = parse_fulltext_wkt(value)
                 && let Some((min_x, max_x, min_y, max_y)) = fulltext_geometry_bounds(&geometry)
             {
+                let bounds_fields = geoshape_fields.bounds;
                 doc.add_f64(bounds_fields[0], min_x);
                 doc.add_f64(bounds_fields[1], max_x);
                 doc.add_f64(bounds_fields[2], min_y);
                 doc.add_f64(bounds_fields[3], max_y);
+                match fulltext_geoshape_cells((min_x, max_x, min_y, max_y)) {
+                    Some(cells) => {
+                        for cell in cells {
+                            doc.add_text(geoshape_fields.cells, cell);
+                        }
+                    }
+                    None => doc.add_text(geoshape_fields.cells, FULLTEXT_GEOSHAPE_OVERSIZE_CELL),
+                }
             }
             if let Some((sort_field, kind)) = self.sortable_fields.get(name)
                 && marked_sort_fields.insert(*sort_field)
@@ -120,7 +129,7 @@ impl FullTextRuntime {
                             fulltext_materialize_text_with_synonyms(
                                 value,
                                 &settings,
-                                &self.synonyms,
+                                &self.writer_synonyms,
                             )
                         })
                         .unwrap_or_else(|| (value.clone(), value.clone()));
@@ -169,7 +178,8 @@ impl FullTextRuntime {
         prepared: FullTextPreparedDocument,
     ) -> Result<(), Error> {
         if prepared.expires_at_ms > 0 {
-            self.has_expiring_documents = true;
+            self.has_expiring_documents
+                .store(true, AtomicOrdering::Release);
         }
         self.writer
             .delete_term(Term::from_field_text(self.key_field, &prepared.key));
@@ -185,13 +195,16 @@ impl FullTextRuntime {
     pub(super) fn publish(&mut self) -> Result<(), Error> {
         self.writer.commit()?;
         self.reader.reload()?;
-        self.has_expiring_documents = self.reader.searcher().search(
-            &RangeQuery::new(
-                Bound::Excluded(Term::from_field_u64(self.expires_at_field, 0)),
-                Bound::Unbounded,
-            ),
-            &Count,
-        )? > 0;
+        self.has_expiring_documents.store(
+            self.reader.searcher().search(
+                &RangeQuery::new(
+                    Bound::Excluded(Term::from_field_u64(self.expires_at_field, 0)),
+                    Bound::Unbounded,
+                ),
+                &Count,
+            )? > 0,
+            AtomicOrdering::Release,
+        );
         self.expansion_terms
             .lock()
             .map_err(|_| Error::msg("ERR fulltext expansion cache lock poisoned"))?

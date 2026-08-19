@@ -1,5 +1,6 @@
 use super::*;
 const FULLTEXT_MUTATION_BATCH_MAGIC: &[u8; 8] = b"\0ODFTB01";
+const FULLTEXT_PROJECTED_MUTATION_BATCH_MAGIC: &[u8; 8] = b"\0ODFTB02";
 
 pub(super) fn encode_record<T: Encode>(value: &T) -> Result<Vec<u8>, Error> {
     bincode::encode_to_vec(value, bincode::config::standard())
@@ -23,11 +24,52 @@ pub(super) fn encode_fulltext_mutation_batch(
     Ok(raw)
 }
 
+pub(super) fn encode_fulltext_projected_mutation_batch(
+    incarnation: u64,
+    mutations: Vec<FullTextProjectedMutation>,
+) -> Result<Vec<u8>, Error> {
+    let record = FullTextProjectedMutationBatchRecord {
+        incarnation,
+        kind: FullTextMutationKind::UpsertKey,
+        mutations,
+    };
+    let encoded = encode_record(&record)?;
+    let mut raw = Vec::with_capacity(FULLTEXT_PROJECTED_MUTATION_BATCH_MAGIC.len() + encoded.len());
+    raw.extend_from_slice(FULLTEXT_PROJECTED_MUTATION_BATCH_MAGIC);
+    raw.extend_from_slice(&encoded);
+    Ok(raw)
+}
+
 pub(super) fn decode_fulltext_mutation_records(
     raw: &[u8],
 ) -> Result<Vec<FullTextMutationRecord>, Error> {
+    if let Some(encoded) = raw.strip_prefix(FULLTEXT_PROJECTED_MUTATION_BATCH_MAGIC) {
+        let batch = decode_record::<FullTextProjectedMutationBatchRecord>(encoded)?;
+        if batch.mutations.is_empty() {
+            return Err(Error::msg("ERR empty fulltext projected mutation batch"));
+        }
+        return Ok(batch
+            .mutations
+            .into_iter()
+            .map(|mutation| FullTextMutationRecord {
+                incarnation: batch.incarnation,
+                kind: batch.kind,
+                key: mutation.key,
+                projection: Some(mutation.projection),
+            })
+            .collect());
+    }
     let Some(encoded) = raw.strip_prefix(FULLTEXT_MUTATION_BATCH_MAGIC) else {
-        return decode_record(raw).map(|record| vec![record]);
+        return decode_record(raw).map(|record| vec![record]).or_else(|_| {
+            decode_record::<FullTextMutationRecordV1>(raw).map(|record| {
+                vec![FullTextMutationRecord {
+                    incarnation: record.incarnation,
+                    kind: record.kind,
+                    key: record.key,
+                    projection: None,
+                }]
+            })
+        });
     };
     let batch = decode_record::<FullTextMutationBatchRecord>(encoded)?;
     if batch.keys.is_empty() {
@@ -40,6 +82,7 @@ pub(super) fn decode_fulltext_mutation_records(
             incarnation: batch.incarnation,
             kind: batch.kind,
             key,
+            projection: None,
         })
         .collect())
 }

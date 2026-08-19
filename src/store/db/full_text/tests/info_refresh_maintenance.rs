@@ -92,15 +92,11 @@ async fn packed_hset_outbox_is_one_record_and_publishes_the_whole_batch() {
     let replies = db.apply_hash_set_batch_mutations_async(&mutations).await;
     assert!(replies.iter().all(|reply| matches!(reply, Ok(1))));
     let prefix = fulltext_outbox_prefix(0, "idx");
-    assert_eq!(
-        db.store.scan_range_raw_visit(
-            &prefix,
-            prefix_exclusive_upper_bound(&prefix),
-            usize::MAX,
-            |_, _| true,
-        ),
-        1
-    );
+    let outbox = db.store.scan_prefix_raw(&prefix);
+    assert_eq!(outbox.len(), 1);
+    let packed = decode_fulltext_mutation_records(&outbox[0].1).unwrap();
+    assert_eq!(packed.len(), 200);
+    assert!(packed.iter().all(|record| record.projection.is_none()));
 
     db.fulltext_maintenance_tick().unwrap();
     assert_eq!(
@@ -113,6 +109,44 @@ async fn packed_hset_outbox_is_one_record_and_publishes_the_whole_batch() {
         .unwrap()
         .total,
         200
+    );
+}
+
+#[tokio::test]
+async fn separated_hash_outbox_carries_only_the_indexed_projection() {
+    let db = lifecycle_test_db("separated-hash-projection");
+    db.fulltext_create("idx", lifecycle_test_options()).unwrap();
+    let padding = vec![b'x'; 9 * 1024];
+    let mutation = [HashSetBatchMutation {
+        key: "doc:large",
+        fields: vec![
+            ("title", b"projected mutation".as_slice()),
+            ("padding", padding.as_slice()),
+        ],
+    }];
+
+    let replies = db.apply_hash_set_batch_mutations_async(&mutation).await;
+    assert!(matches!(replies.as_slice(), [Ok(2)]));
+    let outbox = db.store.scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"));
+    assert_eq!(outbox.len(), 1);
+    let projected = decode_fulltext_mutation_records(&outbox[0].1).unwrap();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(
+        projected[0].projection.as_ref().unwrap().fields,
+        vec![("title".to_string(), "projected mutation".to_string())]
+    );
+
+    db.fulltext_maintenance_tick().unwrap();
+    assert_eq!(
+        db.fulltext_collect_live_hits(
+            "idx",
+            "projected",
+            &search_options(),
+            FullTextCollectMode::Page,
+        )
+        .unwrap()
+        .total,
+        1
     );
 }
 

@@ -345,7 +345,7 @@ impl Db {
                 runtime
                     .write()
                     .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
-                    .synonyms =
+                    .writer_synonyms =
                     load_fulltext_synonyms_from_store(&self.store, self.db_index, &index)?;
             }
         } else {

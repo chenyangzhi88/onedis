@@ -6,15 +6,13 @@ pub(super) use std::{
     ops::Bound,
     sync::{
         Arc, Mutex, OnceLock, RwLock, Weak,
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-pub(super) use std::sync::atomic::AtomicBool;
-
 pub(super) use anyhow::Error;
+pub(super) use arc_swap::ArcSwapOption;
 pub(super) use bincode::{Decode, Encode};
 pub(super) use common::types::status::Status;
 pub(super) use common::types::write_batch::WriteBatch;
@@ -45,8 +43,9 @@ pub(super) use unicode_segmentation::UnicodeSegmentation;
 pub(super) use super::super::full_text_directory::KvTantivyDirectory;
 pub(super) use super::super::{
     Db, FULLTEXT_FILE_NAMESPACE, FULLTEXT_META_NAMESPACE, FULLTEXT_OUTBOX_NAMESPACE,
-    VectorCreateOptions, VectorSearchOptions, VectorSearchResult, internal_prefix,
-    logical_main_key_from_raw_key, prefix_exclusive_upper_bound,
+    PackedHashFields, VectorCreateOptions, VectorSearchOptions, VectorSearchResult,
+    hash_uses_packed_layout, internal_prefix, logical_main_key_from_raw_key,
+    prefix_exclusive_upper_bound,
 };
 pub(super) use crate::frame::Frame;
 pub(super) use crate::observability::metrics::{FullTextSearchStage, elapsed_us, global_metrics};

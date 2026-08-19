@@ -38,6 +38,7 @@ struct FullTextPreparedRefreshMutation {
 struct FullTextHashSourceSnapshot {
     fields: Vec<(String, String)>,
     expires_at_ms: u64,
+    source_exists: bool,
 }
 
 impl Db {
@@ -53,8 +54,10 @@ impl Db {
             return keys
                 .iter()
                 .map(|key| {
+                    let fields = self.hash_get_all(key)?;
                     Ok(FullTextHashSourceSnapshot {
-                        fields: self.hash_get_all(key)?,
+                        source_exists: !fields.is_empty(),
+                        fields,
                         expires_at_ms: self.fulltext_source_expire_ms(key),
                     })
                 })
@@ -138,6 +141,7 @@ impl Db {
             .map(|hash_meta| FullTextHashSourceSnapshot {
                 fields: Vec::with_capacity(field_names.len()),
                 expires_at_ms: hash_meta.map_or(0, |hash_meta| hash_meta.expire_ms),
+                source_exists: hash_meta.is_some(),
             })
             .collect::<Vec<_>>();
         for (key_offset, field, value) in packed_values {
@@ -336,15 +340,30 @@ impl Db {
             }
             let mut pending = latest_by_key.into_values().collect::<Vec<_>>();
             pending.sort_by_key(|(seq, _)| *seq);
-            let hash_snapshots = matches!(meta.source_type, FullTextSourceType::Hash)
-                .then(|| {
-                    let keys = pending
+            let hash_snapshots = if matches!(meta.source_type, FullTextSourceType::Hash) {
+                let missing = pending
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, record))| record.projection.is_none())
+                    .map(|(offset, (_, record))| (offset, record.key.clone()))
+                    .collect::<Vec<_>>();
+                let loaded = self.fulltext_hash_sources_for_refresh(
+                    meta,
+                    &missing
                         .iter()
-                        .map(|(_, record)| record.key.clone())
-                        .collect::<Vec<_>>();
-                    self.fulltext_hash_sources_for_refresh(meta, &keys)
-                })
-                .transpose()?;
+                        .map(|(_, key)| key.clone())
+                        .collect::<Vec<_>>(),
+                )?;
+                let mut snapshots = std::iter::repeat_with(|| None)
+                    .take(pending.len())
+                    .collect::<Vec<_>>();
+                for ((offset, _), snapshot) in missing.into_iter().zip(loaded) {
+                    snapshots[offset] = Some(snapshot);
+                }
+                Some(snapshots)
+            } else {
+                None
+            };
             let mut current_seq = None;
             let mut stop_after_seq = None;
             for (pending_offset, (seq, record)) in pending.into_iter().enumerate() {
@@ -364,16 +383,32 @@ impl Db {
                         if !matches!(meta.source_type, FullTextSourceType::Hash) {
                             FullTextPendingSourceAction::Noop
                         } else {
-                            let snapshot = &hash_snapshots
-                                .as_ref()
-                                .expect("hash refresh snapshots were loaded")[pending_offset];
-                            let fields = snapshot.fields.clone();
-                            if fields.is_empty() || !fulltext_index_filter_matches(meta, &fields)? {
+                            let (fields, expires_at_ms, source_exists) = if let Some(projection) =
+                                record.projection
+                            {
+                                (projection.fields, projection.expires_at_ms, true)
+                            } else {
+                                let snapshot = hash_snapshots
+                                    .as_ref()
+                                    .expect("hash refresh snapshots were loaded")[pending_offset]
+                                    .as_ref()
+                                    .expect("missing hash refresh snapshot was loaded");
+                                (
+                                    snapshot.fields.clone(),
+                                    snapshot.expires_at_ms,
+                                    snapshot.source_exists,
+                                )
+                            };
+                            // An empty projection still represents a live HASH: it can
+                            // legitimately omit every indexed field and must remain in
+                            // the index for `ismissing(@field)`. Only an empty source
+                            // snapshot proves that the key disappeared.
+                            if !source_exists || !fulltext_index_filter_matches(meta, &fields)? {
                                 FullTextPendingSourceAction::Delete
                             } else {
                                 FullTextPendingSourceAction::Upsert {
                                     fields,
-                                    expires_at_ms: snapshot.expires_at_ms,
+                                    expires_at_ms,
                                     json_root: None,
                                 }
                             }

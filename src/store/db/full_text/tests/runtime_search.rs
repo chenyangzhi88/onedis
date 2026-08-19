@@ -30,7 +30,7 @@ fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
     ]);
     let mut runtime =
         FullTextRuntime::new(store.clone(), 0, "idx", "idx", &meta, &runtime_config()).unwrap();
-    assert_eq!(runtime.synonyms.get("car").unwrap().len(), 1);
+    assert_eq!(runtime.writer_synonyms.get("car").unwrap().len(), 1);
     assert!(runtime.refresh_due(&FullTextRefreshPolicy {
         refresh_interval_ms: 0,
         ..FullTextRefreshPolicy::default()

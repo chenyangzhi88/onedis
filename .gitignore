@@ -1,9 +1,12 @@
 Cargo.lock
 !/benchmarks/search/Cargo.lock
 !/benchmarks/vector/Cargo.lock
+!/benchmarks/core/Cargo.lock
 /target
 /benchmarks/search/target
 /benchmarks/vector/target
+/benchmarks/core/target
+/benchmarks/.cache
 /uni5db-kv-engine
 /data
 /log

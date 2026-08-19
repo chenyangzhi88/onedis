@@ -2,6 +2,11 @@ use super::*;
 #[derive(Default)]
 pub struct FullTextRuntimeRegistry {
     pub(super) indexes: DashMap<FullTextRuntimeKey, Arc<RwLock<FullTextRuntime>>>,
+    /// Query-facing generations are published separately from mutable writers.
+    /// A query briefly resolves the slot in the registry and then takes one
+    /// atomic Arc snapshot without acquiring the writer lock.
+    pub(super) search_generations:
+        DashMap<FullTextRuntimeKey, Arc<ArcSwapOption<FullTextSearchGeneration>>>,
     pub(super) outbox_mutations_since_compaction: DashMap<FullTextRuntimeKey, usize>,
     pub(super) lifecycle_locks: DashMap<FullTextRuntimeKey, Weak<RwLock<()>>>,
     pub(super) refresh_locks: DashMap<FullTextRuntimeKey, Weak<Mutex<()>>>,

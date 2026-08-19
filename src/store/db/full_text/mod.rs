@@ -27,6 +27,7 @@ mod refresh_backfill_progress;
 mod refresh_index_lifecycle;
 mod refresh_outbox_compaction;
 mod refresh_outbox_enqueue;
+mod runtime_executor;
 mod runtime_index_writes;
 mod runtime_query_planner;
 mod runtime_registry;

@@ -1,5 +1,5 @@
 use super::*;
-impl FullTextRuntime {
+impl FullTextSearchGeneration {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn search(
         &self,
@@ -92,6 +92,7 @@ impl FullTextRuntime {
         key_offset: usize,
         deadline: FullTextSearchDeadline,
     ) -> Result<FullTextSearchHits, Error> {
+        self.ensure_active()?;
         let sort_by = options
             .sort_by
             .as_ref()
@@ -167,6 +168,7 @@ impl FullTextRuntime {
                 });
             }
         }
+        self.ensure_active()?;
         Ok(FullTextSearchHits {
             total,
             hits,
@@ -200,6 +202,7 @@ impl FullTextRuntime {
         deadline: FullTextSearchDeadline,
         requires_scoring: bool,
     ) -> Result<FullTextSearchHits, Error> {
+        self.ensure_active()?;
         let query = self.with_live_documents_query(query);
         let result = if requires_scoring && fetch_limit > 0 {
             searcher.search(
@@ -243,6 +246,7 @@ impl FullTextRuntime {
                 .total_cmp(&left.score)
                 .then_with(|| left.key.cmp(&right.key))
         });
+        self.ensure_active()?;
         Ok(FullTextSearchHits {
             total: result.total,
             hits,
@@ -254,7 +258,7 @@ impl FullTextRuntime {
         // Keep the common no-TTL path as the original query. Wrapping every query in
         // a dynamic range filter prevents Tantivy from using its specialized
         // Block-WAND scorers for score-sorted TopK collection.
-        if !self.has_expiring_documents {
+        if !self.has_expiring_documents.load(AtomicOrdering::Acquire) {
             return query;
         }
         // Source TTL is indexed with every published document. Applying the
@@ -291,6 +295,7 @@ impl FullTextRuntime {
         ast: &FullTextQueryAst,
         address: DocAddress,
     ) -> Result<Option<bool>, Error> {
+        self.ensure_active()?;
         let searcher = self.reader.searcher();
         let segment = &searcher.segment_readers()[address.segment_ord as usize];
         self.fast_geo_ast_matches(ast, segment, address.doc_id)

@@ -5,7 +5,7 @@ impl Db {
         &self,
         index: &str,
         meta: &FullTextIndexMeta,
-        runtime: &Arc<RwLock<FullTextRuntime>>,
+        generation: &Arc<FullTextSearchGeneration>,
         ast: &FullTextQueryAst,
         options: &FullTextSearchOptions,
         limits: FullTextSearchLimits,
@@ -27,9 +27,7 @@ impl Db {
         {
             let scalar_filter = plan.filter.clone().unwrap_or(FullTextQueryAst::All);
             let hits = if options.geo_filters.is_empty() {
-                runtime
-                    .read()
-                    .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?
+                generation
                     .search_ast(
                         &scalar_filter,
                         options,

@@ -12,7 +12,7 @@ fn transaction_view_uses_repeatable_read_snapshot() {
 
     let txn_db = db.transactional_view().unwrap();
     assert!(matches!(
-        txn_db.get("rr-key"),
+        txn_db.get("rr-key").unwrap(),
         Some(Structure::String(value)) if value == "v1"
     ));
 
@@ -23,13 +23,13 @@ fn transaction_view_uses_repeatable_read_snapshot() {
     .unwrap();
 
     assert!(matches!(
-        txn_db.get("rr-key"),
+        txn_db.get("rr-key").unwrap(),
         Some(Structure::String(value)) if value == "v1"
     ));
     txn_db.commit_transaction().unwrap();
 
     assert!(matches!(
-        db.get("rr-key"),
+        db.get("rr-key").unwrap(),
         Some(Structure::String(value)) if value == "v2"
     ));
 }
@@ -46,7 +46,7 @@ fn long_transaction_commit_conflicts_with_autocommit_write() {
 
     let txn_db = db.transactional_view().unwrap();
     assert!(matches!(
-        txn_db.get("conflict-key"),
+        txn_db.get("conflict-key").unwrap(),
         Some(Structure::String(value)) if value == "v1"
     ));
 
@@ -56,14 +56,16 @@ fn long_transaction_commit_conflicts_with_autocommit_write() {
     )
     .unwrap();
 
-    txn_db.update(
-        "conflict-key".to_string(),
-        Structure::String("v3".to_string()),
-    );
+    txn_db
+        .update(
+            "conflict-key".to_string(),
+            Structure::String("v3".to_string()),
+        )
+        .unwrap();
 
     assert!(txn_db.commit_transaction().is_err());
     assert!(matches!(
-        db.get("conflict-key"),
+        db.get("conflict-key").unwrap(),
         Some(Structure::String(value)) if value == "v2"
     ));
 }
@@ -84,7 +86,7 @@ fn long_transaction_commit_conflicts_with_direct_write() {
 
     let txn_db = db.transactional_view().unwrap();
     assert!(matches!(
-        txn_db.get("direct-conflict-key"),
+        txn_db.get("direct-conflict-key").unwrap(),
         Some(Structure::String(value)) if value == "v1"
     ));
 
@@ -98,14 +100,16 @@ fn long_transaction_commit_conflicts_with_direct_write() {
     )
     .unwrap();
 
-    txn_db.update(
-        "direct-conflict-key".to_string(),
-        Structure::String("v3".to_string()),
-    );
+    txn_db
+        .update(
+            "direct-conflict-key".to_string(),
+            Structure::String("v3".to_string()),
+        )
+        .unwrap();
 
     assert!(txn_db.commit_transaction().is_err());
     assert!(matches!(
-        db.get("direct-conflict-key"),
+        db.get("direct-conflict-key").unwrap(),
         Some(Structure::String(value)) if value == "v2"
     ));
 }
@@ -118,23 +122,24 @@ fn set_over_complex_type_hides_old_subkeys_and_compaction_cleans_after_rebuild()
     db.promote_packed_hash("reuse-key").unwrap();
     let old_version = db.version_counter.current();
     let old_field_key = hash_field_key(db.db_index, "reuse-key", old_version, "old-field");
-    assert!(db.store.contains_key(&old_field_key));
+    assert!(db.store.contains_key(&old_field_key).unwrap());
 
-    db.insert_string("reuse-key".to_string(), "plain-string".to_string(), None);
-    assert!(db.store.contains_key(&old_field_key));
+    db.insert_string("reuse-key".to_string(), "plain-string".to_string(), None)
+        .unwrap();
+    assert!(db.store.contains_key(&old_field_key).unwrap());
     assert!(matches!(
-        db.get("reuse-key"),
+        db.get("reuse-key").unwrap(),
         Some(Structure::String(value)) if value == "plain-string"
     ));
 
     let rebuilt_ttl = TtlManager::new(db.store.clone(), TtlConfig::default());
     let rebuilt_counter = Arc::new(VersionCounter::new());
-    rebuilt_ttl.rebuild_from_store(1, &rebuilt_counter);
+    rebuilt_ttl.rebuild_from_store(1, &rebuilt_counter).unwrap();
     assert!(rebuilt_counter.current() >= old_version);
 
     let rebuilt_db = Db::new(db.db_index, db.store.clone(), rebuilt_counter, rebuilt_ttl);
     assert!(matches!(
-        rebuilt_db.remove("reuse-key"),
+        rebuilt_db.remove("reuse-key").unwrap(),
         Some(Structure::String(value)) if value == "plain-string"
     ));
     assert!(
@@ -145,7 +150,7 @@ fn set_over_complex_type_hides_old_subkeys_and_compaction_cleans_after_rebuild()
     assert_eq!(rebuilt_db.hash_get("reuse-key", "old-field").unwrap(), None);
     assert_eq!(rebuilt_db.refresh_retired_versions_once(usize::MAX), 1);
     rebuilt_db.store.manual_compaction().unwrap();
-    assert!(!rebuilt_db.store.contains_key(&old_field_key));
+    assert!(!rebuilt_db.store.contains_key(&old_field_key).unwrap());
 
     let fields: HashMap<_, _> = rebuilt_db
         .hash_get_all("reuse-key")

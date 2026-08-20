@@ -127,7 +127,7 @@ fn redis_call(
         }
         return Err(mlua::Error::runtime(err));
     }
-    let is_write = command.propagate_aof_if_needed();
+    let is_write = command.is_mutating();
     if read_only && is_write {
         let err = "ERR write command is not allowed from read-only script";
         if protected {

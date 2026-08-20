@@ -38,7 +38,8 @@ impl Db {
             source,
             source_meta.version,
             source_index,
-        )) else {
+        ))?
+        else {
             return Ok(None);
         };
         let value = String::from_utf8(raw_value)
@@ -103,7 +104,7 @@ impl Db {
             ),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if source != destination {
             if source_meta.head >= source_meta.tail {
                 self.remove_list_meta_cache_if_non_transactional(source);
@@ -184,7 +185,7 @@ impl Db {
                 source_meta.version,
                 source_index,
             ))
-            .await
+            .await?
         else {
             return Ok(None);
         };
@@ -250,7 +251,7 @@ impl Db {
             ),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         if source != destination {
             if source_meta.head >= source_meta.tail {
                 self.remove_list_meta_cache_if_non_transactional(source);
@@ -275,7 +276,7 @@ impl Db {
             Some(meta) => meta,
             None => return Ok(0),
         };
-        let items = self.list_range_raw_values(key, meta.version, meta.head, meta.tail - 1);
+        let items = self.list_range_raw_values(key, meta.version, meta.head, meta.tail - 1)?;
         let Some(pivot_index) = items
             .iter()
             .position(|value| value.as_slice() == pivot.as_bytes())
@@ -289,10 +290,10 @@ impl Db {
         };
         let (batch, updated) =
             self.build_list_insert_batch(key, meta, &items, insert_index, element)?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.cache_list_meta_if_non_transactional(key, updated);
         self.changes.fetch_add(1, Ordering::Relaxed);
-        Ok((updated.tail - updated.head) as i64)
+        Ok(updated.tail - updated.head)
     }
 
     pub async fn list_insert_async(
@@ -310,7 +311,7 @@ impl Db {
         };
         let items = self
             .list_range_raw_values_async(key, meta.version, meta.head, meta.tail - 1)
-            .await;
+            .await?;
         let Some(pivot_index) = items
             .iter()
             .position(|value| value.as_slice() == pivot.as_bytes())
@@ -325,10 +326,10 @@ impl Db {
         let (batch, updated) =
             self.build_list_insert_batch(key, meta, &items, insert_index, element)?;
         self.write_existing_version_batch_if_not_empty_async(&batch)
-            .await;
+            .await?;
         self.cache_list_meta_if_non_transactional(key, updated);
         self.changes.fetch_add(1, Ordering::Relaxed);
-        Ok((updated.tail - updated.head) as i64)
+        Ok(updated.tail - updated.head)
     }
 
     /// Shift only the shorter side of the insertion point. The previous implementation rewrote

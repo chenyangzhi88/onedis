@@ -82,57 +82,16 @@ pub(crate) async fn apply_command_async(db: &Db, args: &[&str]) -> Frame {
     .unwrap()
 }
 
-pub(crate) fn apply_frame(db: &Db, frame: Frame) -> Frame {
-    let command = Command::parse_from_frame(frame).unwrap();
-    onedis_server::command_dispatch::handle_command(db, command).unwrap()
-}
-
-pub(crate) fn array_contains_bulk(frame: &Frame, expected: &str) -> bool {
-    match frame {
-        Frame::Array(values) => values
-            .iter()
-            .any(|value| matches!(value, Frame::BulkString(text) if text.as_slice() == expected.as_bytes())),
-        _ => false,
-    }
-}
-
-pub(crate) fn test_args_with_databases(databases: usize) -> Arc<ResolvedArgs> {
+fn isolated_config(databases: usize, prefix: &str) -> String {
+    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
     let unique = format!(
-        "onedis-handler-smoke-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        "{prefix}-{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
-    );
-    let dir = test_root(unique);
-    std::fs::create_dir_all(&dir).unwrap();
-    Arc::new(ResolvedArgs {
-        config: "config/onedis.toml".to_string(),
-        requirepass: None,
-        bind: "127.0.0.1".to_string(),
-        databases,
-        hz: 10.0,
-        port: 0,
-        loglevel: "info".to_string(),
-        maxclients: 0,
-        observability_enabled: false,
-        metrics_bind: "127.0.0.1".to_string(),
-        metrics_port: 0,
-        slow_command_threshold_ms: 10,
-        shutdown_timeout_ms: 30_000,
-    })
-}
-
-pub(crate) fn test_args_with_config(
-    databases: usize,
-    requirepass: Option<&str>,
-) -> Arc<ResolvedArgs> {
-    let unique = format!(
-        "onedis-config-smoke-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
     );
     let root = test_root(unique);
     let db_path = root.join("db");
@@ -163,9 +122,47 @@ maxclients = 0
         ),
     )
     .unwrap();
+    config.to_string_lossy().into_owned()
+}
 
+pub(crate) fn apply_frame(db: &Db, frame: Frame) -> Frame {
+    let command = Command::parse_from_frame(frame).unwrap();
+    onedis_server::command_dispatch::handle_command(db, command).unwrap()
+}
+
+pub(crate) fn array_contains_bulk(frame: &Frame, expected: &str) -> bool {
+    match frame {
+        Frame::Array(values) => values
+            .iter()
+            .any(|value| matches!(value, Frame::BulkString(text) if text.as_slice() == expected.as_bytes())),
+        _ => false,
+    }
+}
+
+pub(crate) fn test_args_with_databases(databases: usize) -> Arc<ResolvedArgs> {
+    Arc::new(ResolvedArgs {
+        config: isolated_config(databases, "onedis-handler-smoke"),
+        requirepass: None,
+        bind: "127.0.0.1".to_string(),
+        databases,
+        hz: 10.0,
+        port: 0,
+        loglevel: "info".to_string(),
+        maxclients: 0,
+        observability_enabled: false,
+        metrics_bind: "127.0.0.1".to_string(),
+        metrics_port: 0,
+        slow_command_threshold_ms: 10,
+        shutdown_timeout_ms: 30_000,
+    })
+}
+
+pub(crate) fn test_args_with_config(
+    databases: usize,
+    requirepass: Option<&str>,
+) -> Arc<ResolvedArgs> {
     let mut args = (*test_args_with_databases(databases)).clone();
-    args.config = config.to_string_lossy().into_owned();
+    args.config = isolated_config(databases, "onedis-config-smoke");
     args.requirepass = requirepass.map(ToString::to_string);
     Arc::new(args)
 }

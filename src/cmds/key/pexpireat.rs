@@ -40,7 +40,7 @@ impl PexpireAt {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let ttl = expiration_ttl_ms(self.timestamp)?;
-        let changed = db.expire_with_condition(self.key, ttl, self.condition);
+        let changed = db.expire_with_condition(self.key, ttl, self.condition)?;
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
 
@@ -48,7 +48,7 @@ impl PexpireAt {
         let ttl = expiration_ttl_ms(self.timestamp)?;
         let changed = db
             .expire_with_condition_async(self.key, ttl, self.condition)
-            .await;
+            .await?;
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
 }

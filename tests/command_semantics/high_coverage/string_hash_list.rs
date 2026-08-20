@@ -212,7 +212,7 @@ async fn string_key_hash_and_list_commands_cover_sync_async_and_errors() {
         Frame::Array(values) if values.is_empty()
     ));
 
-    db.insert("wrong".to_string(), Structure::String("value".to_string()));
+    db.insert("wrong".to_string(), Structure::String("value".to_string())).unwrap();
     assert!(matches!(
         apply(&db, &["HGET", "wrong", "field"]),
         Frame::Error(_)

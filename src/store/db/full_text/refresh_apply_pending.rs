@@ -1,4 +1,14 @@
 use super::*;
+
+pub(super) struct FullTextApplyPending<'a> {
+    pub(super) index: &'a str,
+    pub(super) meta: &'a mut FullTextIndexMeta,
+    pub(super) expected_meta_raw: &'a [u8],
+    pub(super) runtime: &'a Arc<RwLock<FullTextRuntime>>,
+    pub(super) policy: &'a FullTextRefreshPolicy,
+    pub(super) deadline: Instant,
+    pub(super) durable_checkpoint: bool,
+}
 use crate::store::db::{
     decode_hash_meta_checked, decode_packed_hash, decode_u64_be, hash_field_expire_key,
     hash_field_key, now_ms,
@@ -58,7 +68,7 @@ impl Db {
                     Ok(FullTextHashSourceSnapshot {
                         source_exists: !fields.is_empty(),
                         fields,
-                        expires_at_ms: self.fulltext_source_expire_ms(key),
+                        expires_at_ms: self.fulltext_source_expire_ms(key)?,
                     })
                 })
                 .collect();
@@ -76,7 +86,7 @@ impl Db {
         field_names.dedup();
 
         let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        let raw_metas = self.store.multi_get_raw(&meta_keys);
+        let raw_metas = self.store.multi_get_raw(&meta_keys)?;
         let now = now_ms();
         let hash_metas = raw_metas
             .iter()
@@ -84,13 +94,13 @@ impl Db {
                 let Some(raw) = raw.as_ref() else {
                     return Ok(None);
                 };
-                let header = decode_meta_header(&raw)
+                let header = decode_meta_header(raw)
                     .ok_or_else(|| Error::msg("Failed to decode hash metadata"))?;
                 if header.type_tag != TYPE_HASH || (header.expire_ms > 0 && now >= header.expire_ms)
                 {
                     return Ok(None);
                 }
-                Ok(Some(decode_hash_meta_checked(&raw)?))
+                Ok(Some(decode_hash_meta_checked(raw)?))
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
@@ -135,7 +145,7 @@ impl Db {
                 lookups.push((key_offset, *field, value_offset, expire_offset));
             }
         }
-        let values = self.store.multi_get_raw(&lookup_keys);
+        let values = self.store.multi_get_raw(&lookup_keys)?;
         let mut snapshots = hash_metas
             .iter()
             .map(|hash_meta| FullTextHashSourceSnapshot {
@@ -172,14 +182,17 @@ impl Db {
 
     pub(super) fn fulltext_apply_pending(
         &self,
-        index: &str,
-        meta: &mut FullTextIndexMeta,
-        expected_meta_raw: &[u8],
-        runtime: &Arc<RwLock<FullTextRuntime>>,
-        policy: &FullTextRefreshPolicy,
-        deadline: Instant,
-        durable_checkpoint: bool,
+        request: FullTextApplyPending<'_>,
     ) -> Result<(), Error> {
+        let FullTextApplyPending {
+            index,
+            meta,
+            expected_meta_raw,
+            runtime,
+            policy,
+            deadline,
+            durable_checkpoint,
+        } = request;
         let mut changed = false;
         let mut indexed_docs = 0usize;
         let mut indexed_bytes = 0usize;
@@ -216,7 +229,7 @@ impl Db {
                         } else {
                             FullTextPendingSourceAction::Upsert {
                                 fields,
-                                expires_at_ms: self.fulltext_source_expire_ms(&key),
+                                expires_at_ms: self.fulltext_source_expire_ms(&key)?,
                                 json_root: None,
                             }
                         }
@@ -227,7 +240,7 @@ impl Db {
                             if fulltext_index_filter_matches(meta, &fields)? {
                                 FullTextPendingSourceAction::Upsert {
                                     fields,
-                                    expires_at_ms: self.fulltext_source_expire_ms(&key),
+                                    expires_at_ms: self.fulltext_source_expire_ms(&key)?,
                                     json_root: Some(root),
                                 }
                             } else {
@@ -307,16 +320,14 @@ impl Db {
                 .checked_add(1)
                 .map(|seq| fulltext_outbox_key(self.db_index, index, seq));
             let remaining_docs = policy.max_docs.saturating_sub(indexed_docs);
-            let entries = start
-                .into_iter()
-                .flat_map(|start| {
-                    self.store.scan_range_raw_limited(
-                        &start,
-                        prefix_exclusive_upper_bound(&prefix),
-                        remaining_docs.max(1),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let entries = match start {
+                Some(start) => self.store.scan_range_raw_limited(
+                    &start,
+                    prefix_exclusive_upper_bound(&prefix),
+                    remaining_docs.max(1),
+                )?,
+                None => Vec::new(),
+            };
             let mut latest_by_key = HashMap::<String, (u64, FullTextMutationRecord)>::new();
             for (outbox_key, raw) in entries {
                 let Some(seq) = fulltext_outbox_seq_from_key(self.db_index, index, &outbox_key)
@@ -422,7 +433,7 @@ impl Db {
                             if fulltext_index_filter_matches(meta, &fields)? {
                                 FullTextPendingSourceAction::Upsert {
                                     fields,
-                                    expires_at_ms: self.fulltext_source_expire_ms(&record.key),
+                                    expires_at_ms: self.fulltext_source_expire_ms(&record.key)?,
                                     json_root: Some(root),
                                 }
                             } else {
@@ -564,6 +575,7 @@ impl Db {
                 ));
             }
         }
+        self.fulltext_runtimes.notify_progress(self.db_index, index);
 
         let Some((directory, checkpoint_seq, checkpoint_cursor, backfill_complete)) =
             checkpoint_state
@@ -595,7 +607,7 @@ impl Db {
             }
         }
         if checkpointed {
-            meta.indexed_bytes = self.fulltext_file_bytes(&meta.active_storage) as u64;
+            meta.indexed_bytes = self.fulltext_file_bytes(&meta.active_storage)? as u64;
         }
         if checkpointed
             || meta.last_indexed_outbox_seq != previous_durable_seq

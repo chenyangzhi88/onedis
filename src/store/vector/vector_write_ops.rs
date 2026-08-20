@@ -38,7 +38,7 @@ impl Db {
         } else {
             self.mk(index)
         };
-        if let Some(raw) = self.store.get_raw(&raw_key) {
+        if let Some(raw) = self.store.get_raw(&raw_key)? {
             let header =
                 decode_meta_header(&raw).ok_or_else(|| Error::msg("Type parsing error"))?;
             if header.type_tag == TYPE_VECTOR {
@@ -252,7 +252,7 @@ impl Db {
                 index,
                 version,
                 id,
-            ))
+            ))?
             .map(|raw| decode_record::<VectorDocRecord>(&raw))
             .transpose()?
             .filter(|doc| !doc.deleted);
@@ -347,15 +347,15 @@ impl Db {
                 attrs.as_ref().expect("schema requires parsed attributes"),
             )?;
         }
-        self.commit_vector_batch_with_state_if_unchanged(
+        self.commit_vector_batch_with_state_if_unchanged(VectorStateCommit {
             index,
-            meta.internal,
+            internal: meta.internal,
             version,
-            &expected_marker,
-            &expected_meta,
+            expected_marker: &expected_marker,
+            expected_meta: &expected_meta,
             expected_state,
-            &batch,
-        )?;
+            batch: &batch,
+        })?;
         self.record_public_vector_mutation(index, meta.internal);
         if meta.algorithm == VectorIndexAlgorithm::Hnsw {
             self.vector_runtimes.upsert(
@@ -385,10 +385,10 @@ impl Db {
         let mut point_reads = 0usize;
         let internal = is_internal_fulltext_vector_index(index);
         if !internal {
-            self.expire_if_needed_async(index).await;
+            self.expire_if_needed_async(index).await?;
         }
         let marker_key = self.vector_marker_key(index, internal);
-        let Some(expected_marker) = self.store.get_raw_async(&marker_key).await else {
+        let Some(expected_marker) = self.store.get_raw_async(&marker_key).await? else {
             return Err(Error::msg("ERR vector index does not exist"));
         };
         point_reads += 1;
@@ -403,7 +403,7 @@ impl Db {
         let version = header.version;
         let state_key =
             vector_mutable_state_key(self.key_layout, self.db_index, index, version);
-        let mut expected_state = self.store.get_raw_async(&state_key).await;
+        let mut expected_state = self.store.get_raw_async(&state_key).await?;
         point_reads += 1;
         let mut state = expected_state
             .as_deref()
@@ -445,7 +445,7 @@ impl Db {
         let old_doc = self
             .store
             .get_raw_async(&doc_key)
-            .await
+            .await?
             .map(|raw| decode_record::<VectorDocRecord>(&raw))
             .transpose()?
             .filter(|doc| !doc.deleted);
@@ -570,11 +570,14 @@ impl Db {
         id: &str,
         vector: Vec<f32>,
         attrs_json: Option<String>,
-        m: Option<usize>,
-        ef_construction: Option<usize>,
-        quantization: Option<VectorQuantization>,
-        reduce_dim: Option<usize>,
+        options: VectorAutocreateOptions,
     ) -> Result<bool, Error> {
+        let VectorAutocreateOptions {
+            m,
+            ef_construction,
+            quantization,
+            reduce_dim,
+        } = options;
         if (quantization.is_some() || reduce_dim.is_some())
             && let Ok((_, _, meta)) = self.read_vector_meta(index)
         {
@@ -625,11 +628,14 @@ impl Db {
         id: &str,
         vector: Vec<f32>,
         attrs_json: Option<String>,
-        m: Option<usize>,
-        ef_construction: Option<usize>,
-        quantization: Option<VectorQuantization>,
-        reduce_dim: Option<usize>,
+        options: VectorAutocreateOptions,
     ) -> Result<bool, Error> {
+        let VectorAutocreateOptions {
+            m,
+            ef_construction,
+            quantization,
+            reduce_dim,
+        } = options;
         match self.read_vector_meta_async(index).await {
             Ok((_, _, meta)) => {
                 if quantization.is_some_and(|requested| requested != meta.quantization) {
@@ -713,7 +719,7 @@ impl Db {
             .iter()
             .map(|(id, _)| vector_doc_key(self.key_layout, self.db_index, index, version, id))
             .collect::<Vec<_>>();
-        let old_docs = self.store.multi_get_raw(&keys);
+        let old_docs = self.store.multi_get_raw(&keys)?;
         let mut batch = WriteBatch::new();
         let mut changed_docs = Vec::new();
         for (((id, vector), key), old_raw) in mutations
@@ -789,15 +795,15 @@ impl Db {
             &vector_mutable_state_key(self.key_layout, self.db_index, index, version),
             &encode_record(&VectorMutableState::from_meta(&meta))?,
         )?;
-        self.commit_vector_batch_with_state_if_unchanged(
+        self.commit_vector_batch_with_state_if_unchanged(VectorStateCommit {
             index,
-            true,
+            internal: true,
             version,
-            &expected_marker,
-            &expected_meta,
+            expected_marker: &expected_marker,
+            expected_meta: &expected_meta,
             expected_state,
-            &batch,
-        )?;
+            batch: &batch,
+        })?;
         if meta.algorithm == VectorIndexAlgorithm::Hnsw {
             self.vector_runtimes.apply_docs(
                 self.db_index,
@@ -841,7 +847,7 @@ impl Db {
             .collect::<Vec<_>>();
         let current_docs = ids
             .into_iter()
-            .zip(self.store.multi_get_raw(&keys))
+            .zip(self.store.multi_get_raw(&keys)?)
             .filter_map(|(id, raw)| raw.map(|raw| (id, raw)))
             .map(|(id, raw)| Ok((id, decode_record::<VectorDocRecord>(&raw)?)))
             .filter_map(|result: Result<_, Error>| match result {
@@ -898,15 +904,15 @@ impl Db {
                 &vector_mutable_state_key(self.key_layout, self.db_index, index, version),
                 &encode_record(&VectorMutableState::from_meta(&meta))?,
             )?;
-            self.commit_vector_batch_with_state_if_unchanged(
+            self.commit_vector_batch_with_state_if_unchanged(VectorStateCommit {
                 index,
-                meta.internal,
+                internal: meta.internal,
                 version,
-                &expected_marker,
-                &expected_meta,
+                expected_marker: &expected_marker,
+                expected_meta: &expected_meta,
                 expected_state,
-                &batch,
-            )?;
+                batch: &batch,
+            })?;
             self.record_public_vector_mutation(index, meta.internal);
             if meta.algorithm == VectorIndexAlgorithm::Hnsw {
                 for doc in deleted_docs {
@@ -946,7 +952,7 @@ impl Db {
             .collect::<Vec<_>>();
         let current_docs = ids
             .into_iter()
-            .zip(self.store.multi_get_raw_async(&keys).await)
+            .zip(self.store.multi_get_raw_async(&keys).await?)
             .filter_map(|(id, raw)| raw.map(|raw| (id, raw)))
             .map(|(id, raw)| Ok((id, decode_record::<VectorDocRecord>(&raw)?)))
             .filter_map(|result: Result<_, Error>| match result {

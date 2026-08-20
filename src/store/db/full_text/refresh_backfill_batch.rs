@@ -55,7 +55,7 @@ impl Db {
             bytes_since_publish = bytes_since_publish.saturating_add(runtime.upsert_fields(
                 key,
                 &fields,
-                self.fulltext_source_expire_ms(key),
+                self.fulltext_source_expire_ms(key)?,
             )?);
             match old_meta.source_type {
                 FullTextSourceType::Hash => {
@@ -154,7 +154,7 @@ impl Db {
                             bytes += runtime.upsert_hash(
                                 &key,
                                 &fields,
-                                self.fulltext_source_expire_ms(&key),
+                                self.fulltext_source_expire_ms(&key)?,
                             )?;
                             self.fulltext_collect_vector_mutations(
                                 index,
@@ -181,7 +181,7 @@ impl Db {
                             bytes += runtime.upsert_fields(
                                 &key,
                                 &fields,
-                                self.fulltext_source_expire_ms(&key),
+                                self.fulltext_source_expire_ms(&key)?,
                             )?;
                             self.fulltext_collect_vector_mutations(
                                 index,

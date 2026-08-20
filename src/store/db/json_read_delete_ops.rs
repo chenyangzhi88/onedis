@@ -8,7 +8,7 @@ impl Db {
     ) -> Result<Option<i64>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(None);
             };
@@ -54,7 +54,10 @@ impl Db {
             }
         }
         let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let metas = match self.store.multi_get_raw_async(&meta_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         let now = now_ms();
         let mut pair_positions = HashMap::new();
         let mut pairs = Vec::new();
@@ -99,8 +102,8 @@ impl Db {
 
     pub fn json_get(&self, key: &str, path: &str) -> Result<Option<String>, Error> {
         let tokens = parse_json_path(path)?;
-        self.expire_if_needed(key);
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        self.expire_if_needed(key)?;
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
             return Ok(None);
         };
         let (_, version) = Self::decode_json_meta(&raw)?;
@@ -115,8 +118,8 @@ impl Db {
 
     pub async fn json_get_async(&self, key: &str, path: &str) -> Result<Option<String>, Error> {
         let tokens = parse_json_path(path)?;
-        self.expire_if_needed_async(key).await;
-        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
+        self.expire_if_needed_async(key).await?;
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
             return Ok(None);
         };
         let (_, version) = Self::decode_json_meta(&raw)?;
@@ -133,13 +136,13 @@ impl Db {
 
     pub fn json_del(&self, key: &str, path: &str) -> Result<i64, Error> {
         let tokens = parse_json_path(path)?;
-        self.expire_if_needed(key);
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        self.expire_if_needed(key)?;
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
             return Ok(0);
         };
         let (_, version) = Self::decode_json_meta(&raw)?;
         if tokens.is_empty() {
-            return Ok(i64::from(self.delete_key_internal(key, true)));
+            return Ok(i64::from(self.delete_key_internal(key, true)?));
         }
         if let Some(deleted) = self.try_json_del_packed(key, &tokens)? {
             return Ok(deleted);
@@ -151,20 +154,20 @@ impl Db {
         let tokens = parse_json_path(path)?;
         if tokens.is_empty() {
             let _write_guard = self.set_write_lock(key).lock().await;
-            self.expire_if_needed_async(key).await;
-            let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
+            self.expire_if_needed_async(key).await?;
+            let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
                 return Ok(0);
             };
             Self::decode_json_meta(&raw)?;
-            return Ok(i64::from(self.delete_key_internal_async(key, true).await));
+            return Ok(i64::from(self.delete_key_internal_async(key, true).await?));
         }
         let _structural_guard = self.set_write_lock(key).read().await;
         let parent_lock_route = format!("json:{:?}", &tokens[..tokens.len() - 1]);
         let mut conflict_guard = None;
         for attempt in 0..64 {
-            self.expire_if_needed_async(key).await;
+            self.expire_if_needed_async(key).await?;
             let key_bytes = self.mk(key);
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let cas_condition = CompareCondition::from_observed(&observed);
             let Some(raw) = observed.value().map(|value| value.to_vec()) else {
                 return Ok(0);
@@ -224,8 +227,8 @@ impl Db {
 
     pub fn json_type(&self, key: &str, path: &str) -> Result<Option<&'static str>, Error> {
         let tokens = parse_json_path(path)?;
-        self.expire_if_needed(key);
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        self.expire_if_needed(key)?;
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
             return Ok(None);
         };
         let (_, version) = Self::decode_json_meta(&raw)?;
@@ -238,8 +241,8 @@ impl Db {
         path: &str,
     ) -> Result<Option<&'static str>, Error> {
         let tokens = parse_json_path(path)?;
-        self.expire_if_needed_async(key).await;
-        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
+        self.expire_if_needed_async(key).await?;
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
             return Ok(None);
         };
         let (_, version) = Self::decode_json_meta(&raw)?;
@@ -257,7 +260,7 @@ impl Db {
         else {
             return Ok(0);
         };
-        if !self.json_node_exists(key, version, &storage_tokens) {
+        if !self.json_node_exists(key, version, &storage_tokens)? {
             return Ok(0);
         }
 
@@ -286,7 +289,7 @@ impl Db {
             )
             .map_err(|error| Error::msg(error.to_string()))?;
         self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         self.fulltext_request_json_refresh(key)?;
         Ok(1)

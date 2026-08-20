@@ -25,16 +25,23 @@ fn scan_request_with_projection(
     }
 }
 
-fn collect_scan_cursor(mut cursor: KvScanCursor, limit: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn collect_scan_cursor(
+    mut cursor: KvScanCursor,
+    limit: usize,
+) -> KvResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let mut entries = Vec::new();
     collect_scan_cursor_into(&mut cursor, limit, |key, value| {
         entries.push((key.to_vec(), value.to_vec()));
         true
-    });
-    entries
+    })?;
+    Ok(entries)
 }
 
-fn collect_scan_cursor_into<F>(cursor: &mut KvScanCursor, limit: usize, mut visitor: F) -> usize
+fn collect_scan_cursor_into<F>(
+    cursor: &mut KvScanCursor,
+    limit: usize,
+    mut visitor: F,
+) -> KvResult<usize>
 where
     F: FnMut(&[u8], &[u8]) -> bool,
 {
@@ -47,14 +54,10 @@ where
                 }
             }
             Ok(None) => break,
-            Err(error) => {
-                crate::store::health::storage_health()
-                    .record_failure("advance scan cursor", error);
-                break;
-            }
+            Err(error) => return Err(error),
         }
     }
-    seen
+    Ok(seen)
 }
 
 fn visit_scan_batch<F>(batch: &KvBatch, limit: usize, seen: &mut usize, visitor: &mut F) -> bool

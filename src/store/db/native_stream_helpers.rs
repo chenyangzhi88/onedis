@@ -4,7 +4,7 @@ impl Db {
     pub(in crate::store::db) fn promote_packed_stream(&self, key: &str) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -36,7 +36,7 @@ impl Db {
     ) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -66,8 +66,8 @@ impl Db {
     }
 
     pub(in crate::store::db) fn stream_meta(&self, key: &str) -> Result<Option<StreamMeta>, Error> {
-        self.expire_if_needed(key);
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        self.expire_if_needed(key)?;
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
             return Ok(None);
         };
 
@@ -88,8 +88,8 @@ impl Db {
         &self,
         key: &str,
     ) -> Result<Option<StreamMeta>, Error> {
-        self.expire_if_needed_async(key).await;
-        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
+        self.expire_if_needed_async(key).await?;
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
             return Ok(None);
         };
 
@@ -122,50 +122,52 @@ impl Db {
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(StreamId, Vec<u8>)> {
+    ) -> Result<Vec<(StreamId, Vec<u8>)>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_stream)
                 .map(|(_, entries)| entries)
-                .unwrap_or_default();
+                .unwrap_or_default());
         }
         let prefix = stream_entry_prefix(self.db_index, key, version);
-        self.store
-            .scan_prefix_raw(&prefix)
+        Ok(self
+            .store
+            .scan_prefix_raw(&prefix)?
             .into_iter()
             .filter_map(|(entry_key, value)| {
                 decode_stream_entry_id(&prefix, &entry_key).map(|id| (id, value))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn stream_entries_raw_async(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(StreamId, Vec<u8>)> {
+    ) -> Result<Vec<(StreamId, Vec<u8>)>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_stream)
                 .map(|(_, entries)| entries)
-                .unwrap_or_default();
+                .unwrap_or_default());
         }
         let prefix = stream_entry_prefix(self.db_index, key, version);
-        self.store
+        Ok(self
+            .store
             .scan_prefix_raw_async(&prefix)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(entry_key, value)| {
                 decode_stream_entry_id(&prefix, &entry_key).map(|id| (id, value))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) fn stream_entries_between(
@@ -174,8 +176,9 @@ impl Db {
         version: u64,
         start: StreamId,
         end: StreamId,
-    ) -> Vec<StreamEntry> {
-        self.stream_entries_raw(key, version)
+    ) -> Result<Vec<StreamEntry>, Error> {
+        Ok(self
+            .stream_entries_raw(key, version)?
             .into_iter()
             .filter(|(id, _)| *id >= start && *id <= end)
             .filter_map(|(id, value)| {
@@ -184,7 +187,7 @@ impl Db {
                     fields: decode_stream_entry(&value)?,
                 })
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn stream_entries_between_async(
@@ -193,9 +196,10 @@ impl Db {
         version: u64,
         start: StreamId,
         end: StreamId,
-    ) -> Vec<StreamEntry> {
-        self.stream_entries_raw_async(key, version)
-            .await
+    ) -> Result<Vec<StreamEntry>, Error> {
+        Ok(self
+            .stream_entries_raw_async(key, version)
+            .await?
             .into_iter()
             .filter(|(id, _)| *id >= start && *id <= end)
             .filter_map(|(id, value)| {
@@ -204,7 +208,7 @@ impl Db {
                     fields: decode_stream_entry(&value)?,
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Scan only the requested inclusive stream-ID window and stop after `limit` entries.
@@ -217,17 +221,17 @@ impl Db {
         start: StreamId,
         end: StreamId,
         limit: usize,
-    ) -> Vec<StreamEntry> {
+    ) -> Result<Vec<StreamEntry>, Error> {
         if limit == 0 || start > end {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if version == 0 {
-            return self
+            return Ok(self
                 .stream_entries_between_async(key, version, start, end)
-                .await
+                .await?
                 .into_iter()
                 .take(limit)
-                .collect();
+                .collect());
         }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         let lower = stream_entry_key(self.db_index, key, version, start);
@@ -236,9 +240,10 @@ impl Db {
         } else {
             prefix_exclusive_upper_bound(&stream_entry_key(self.db_index, key, version, end))
         };
-        self.store
+        Ok(self
+            .store
             .scan_range_raw_limited_async(&lower, upper, limit)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(entry_key, value)| {
                 let id = decode_stream_entry_id(&prefix, &entry_key)?;
@@ -247,7 +252,7 @@ impl Db {
                     fields: decode_stream_entry(&value)?,
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Scan an inclusive stream-ID window in descending order and stop at `limit`.
@@ -258,15 +263,15 @@ impl Db {
         start: StreamId,
         end: StreamId,
         limit: usize,
-    ) -> Vec<StreamEntry> {
+    ) -> Result<Vec<StreamEntry>, Error> {
         if limit == 0 || start > end {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if version == 0 {
-            let mut entries = self.stream_entries_between(key, version, start, end);
+            let mut entries = self.stream_entries_between(key, version, start, end)?;
             entries.reverse();
             entries.truncate(limit);
-            return entries;
+            return Ok(entries);
         }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         let lower = stream_entry_key(self.db_index, key, version, start);
@@ -275,8 +280,9 @@ impl Db {
         } else {
             prefix_exclusive_upper_bound(&stream_entry_key(self.db_index, key, version, end))
         };
-        self.store
-            .scan_range_raw_limited_reverse(&lower, upper, limit)
+        Ok(self
+            .store
+            .scan_range_raw_limited_reverse(&lower, upper, limit)?
             .into_iter()
             .filter_map(|(entry_key, value)| {
                 let id = decode_stream_entry_id(&prefix, &entry_key)?;
@@ -285,7 +291,7 @@ impl Db {
                     fields: decode_stream_entry(&value)?,
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Async counterpart of the reverse bounded stream scan.
@@ -296,17 +302,17 @@ impl Db {
         start: StreamId,
         end: StreamId,
         limit: usize,
-    ) -> Vec<StreamEntry> {
+    ) -> Result<Vec<StreamEntry>, Error> {
         if limit == 0 || start > end {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if version == 0 {
             let mut entries = self
                 .stream_entries_between_async(key, version, start, end)
-                .await;
+                .await?;
             entries.reverse();
             entries.truncate(limit);
-            return entries;
+            return Ok(entries);
         }
         let prefix = stream_entry_prefix(self.db_index, key, version);
         let lower = stream_entry_key(self.db_index, key, version, start);
@@ -315,9 +321,10 @@ impl Db {
         } else {
             prefix_exclusive_upper_bound(&stream_entry_key(self.db_index, key, version, end))
         };
-        self.store
+        Ok(self
+            .store
             .scan_range_raw_limited_reverse_async(&lower, upper, limit)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(entry_key, value)| {
                 let id = decode_stream_entry_id(&prefix, &entry_key)?;
@@ -326,7 +333,7 @@ impl Db {
                     fields: decode_stream_entry(&value)?,
                 })
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) fn stream_entry_by_id(
@@ -334,26 +341,34 @@ impl Db {
         key: &str,
         version: u64,
         id: StreamId,
-    ) -> Option<StreamEntry> {
+    ) -> Result<Option<StreamEntry>, Error> {
         if version == 0 {
-            let (_, entries) = self
-                .store
-                .get_raw(&self.mk(key))
-                .as_deref()
-                .and_then(decode_packed_stream)?;
-            let (_, raw) = entries.into_iter().find(|(entry_id, _)| *entry_id == id)?;
-            return Some(StreamEntry {
+            let Some(raw) = self.store.get_raw(&self.mk(key))? else {
+                return Ok(None);
+            };
+            let Some((_, entries)) = decode_packed_stream(&raw) else {
+                return Ok(None);
+            };
+            let Some((_, raw)) = entries.into_iter().find(|(entry_id, _)| *entry_id == id) else {
+                return Ok(None);
+            };
+            return Ok(Some(StreamEntry {
                 id: id.to_redis_id(),
-                fields: decode_stream_entry(&raw)?,
-            });
+                fields: decode_stream_entry(&raw)
+                    .ok_or_else(|| Error::msg("Failed to decode stream entry"))?,
+            }));
         }
-        let raw = self
+        let Some(raw) = self
             .store
-            .get_raw(&stream_entry_key(self.db_index, key, version, id))?;
-        Some(StreamEntry {
+            .get_raw(&stream_entry_key(self.db_index, key, version, id))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(StreamEntry {
             id: id.to_redis_id(),
-            fields: decode_stream_entry(&raw)?,
-        })
+            fields: decode_stream_entry(&raw)
+                .ok_or_else(|| Error::msg("Failed to decode stream entry"))?,
+        }))
     }
 
     pub(in crate::store::db) async fn stream_entry_by_id_async(
@@ -361,28 +376,35 @@ impl Db {
         key: &str,
         version: u64,
         id: StreamId,
-    ) -> Option<StreamEntry> {
+    ) -> Result<Option<StreamEntry>, Error> {
         if version == 0 {
-            let (_, entries) = self
-                .store
-                .get_raw_async(&self.mk(key))
-                .await
-                .as_deref()
-                .and_then(decode_packed_stream)?;
-            let (_, raw) = entries.into_iter().find(|(entry_id, _)| *entry_id == id)?;
-            return Some(StreamEntry {
+            let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
+                return Ok(None);
+            };
+            let Some((_, entries)) = decode_packed_stream(&raw) else {
+                return Ok(None);
+            };
+            let Some((_, raw)) = entries.into_iter().find(|(entry_id, _)| *entry_id == id) else {
+                return Ok(None);
+            };
+            return Ok(Some(StreamEntry {
                 id: id.to_redis_id(),
-                fields: decode_stream_entry(&raw)?,
-            });
+                fields: decode_stream_entry(&raw)
+                    .ok_or_else(|| Error::msg("Failed to decode stream entry"))?,
+            }));
         }
-        let raw = self
+        let Some(raw) = self
             .store
             .get_raw_async(&stream_entry_key(self.db_index, key, version, id))
-            .await?;
-        Some(StreamEntry {
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(StreamEntry {
             id: id.to_redis_id(),
-            fields: decode_stream_entry(&raw)?,
-        })
+            fields: decode_stream_entry(&raw)
+                .ok_or_else(|| Error::msg("Failed to decode stream entry"))?,
+        }))
     }
 
     pub(in crate::store::db) fn stream_group_state(
@@ -395,7 +417,7 @@ impl Db {
         };
         Ok(self
             .store
-            .get_raw(&stream_group_key(self.db_index, key, meta.version, group))
+            .get_raw(&stream_group_key(self.db_index, key, meta.version, group))?
             .and_then(|raw| decode_stream_group_state(&raw)))
     }
 
@@ -410,7 +432,7 @@ impl Db {
         Ok(self
             .store
             .get_raw_async(&stream_group_key(self.db_index, key, meta.version, group))
-            .await
+            .await?
             .and_then(|raw| decode_stream_group_state(&raw)))
     }
 
@@ -419,10 +441,11 @@ impl Db {
         key: &str,
         version: u64,
         group: &str,
-    ) -> Vec<(StreamId, StreamPelState)> {
+    ) -> Result<Vec<(StreamId, StreamPelState)>, Error> {
         let prefix = stream_pel_group_prefix(self.db_index, key, version, group);
-        self.store
-            .scan_prefix_raw(&prefix)
+        Ok(self
+            .store
+            .scan_prefix_raw(&prefix)?
             .into_iter()
             .filter_map(|(pel_key, raw)| {
                 Some((
@@ -430,7 +453,7 @@ impl Db {
                     decode_stream_pel_state(&raw)?,
                 ))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) fn stream_consumers_raw(
@@ -438,10 +461,11 @@ impl Db {
         key: &str,
         version: u64,
         group: &str,
-    ) -> BTreeMap<String, StreamConsumerState> {
+    ) -> Result<BTreeMap<String, StreamConsumerState>, Error> {
         let prefix = stream_consumer_group_prefix(self.db_index, key, version, group);
-        self.store
-            .scan_prefix_raw(&prefix)
+        Ok(self
+            .store
+            .scan_prefix_raw(&prefix)?
             .into_iter()
             .filter_map(|(consumer_key, raw)| {
                 let suffix = consumer_key.strip_prefix(prefix.as_slice())?;
@@ -449,7 +473,7 @@ impl Db {
                 let state = decode_stream_consumer_state(&raw)?;
                 Some((name, state))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn stream_consumers_raw_async(
@@ -457,11 +481,12 @@ impl Db {
         key: &str,
         version: u64,
         group: &str,
-    ) -> BTreeMap<String, StreamConsumerState> {
+    ) -> Result<BTreeMap<String, StreamConsumerState>, Error> {
         let prefix = stream_consumer_group_prefix(self.db_index, key, version, group);
-        self.store
+        Ok(self
+            .store
             .scan_prefix_raw_async(&prefix)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(consumer_key, raw)| {
                 let suffix = consumer_key.strip_prefix(prefix.as_slice())?;
@@ -469,7 +494,7 @@ impl Db {
                 let state = decode_stream_consumer_state(&raw)?;
                 Some((name, state))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn stream_pending_raw_async(
@@ -477,11 +502,12 @@ impl Db {
         key: &str,
         version: u64,
         group: &str,
-    ) -> Vec<(StreamId, StreamPelState)> {
+    ) -> Result<Vec<(StreamId, StreamPelState)>, Error> {
         let prefix = stream_pel_group_prefix(self.db_index, key, version, group);
-        self.store
+        Ok(self
+            .store
             .scan_prefix_raw_async(&prefix)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(pel_key, raw)| {
                 Some((
@@ -489,7 +515,7 @@ impl Db {
                     decode_stream_pel_state(&raw)?,
                 ))
             })
-            .collect()
+            .collect())
     }
 
     /// Read a bounded inclusive PEL ID window without scanning entries before `start`.
@@ -501,9 +527,9 @@ impl Db {
         start: StreamId,
         end: StreamId,
         limit: usize,
-    ) -> Vec<(StreamId, StreamPelState)> {
+    ) -> Result<Vec<(StreamId, StreamPelState)>, Error> {
         if limit == 0 || start > end {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let prefix = stream_pel_group_prefix(self.db_index, key, version, group);
         let lower = stream_pel_key(self.db_index, key, version, group, start);
@@ -512,8 +538,9 @@ impl Db {
         } else {
             prefix_exclusive_upper_bound(&stream_pel_key(self.db_index, key, version, group, end))
         };
-        self.store
-            .scan_range_raw_limited(&lower, upper, limit)
+        Ok(self
+            .store
+            .scan_range_raw_limited(&lower, upper, limit)?
             .into_iter()
             .filter_map(|(pel_key, raw)| {
                 Some((
@@ -521,7 +548,7 @@ impl Db {
                     decode_stream_pel_state(&raw)?,
                 ))
             })
-            .collect()
+            .collect())
     }
 
     /// Async counterpart of the bounded PEL scan.
@@ -533,9 +560,9 @@ impl Db {
         start: StreamId,
         end: StreamId,
         limit: usize,
-    ) -> Vec<(StreamId, StreamPelState)> {
+    ) -> Result<Vec<(StreamId, StreamPelState)>, Error> {
         if limit == 0 || start > end {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let prefix = stream_pel_group_prefix(self.db_index, key, version, group);
         let lower = stream_pel_key(self.db_index, key, version, group, start);
@@ -544,9 +571,10 @@ impl Db {
         } else {
             prefix_exclusive_upper_bound(&stream_pel_key(self.db_index, key, version, group, end))
         };
-        self.store
+        Ok(self
+            .store
             .scan_range_raw_limited_async(&lower, upper, limit)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(pel_key, raw)| {
                 Some((
@@ -554,7 +582,7 @@ impl Db {
                     decode_stream_pel_state(&raw)?,
                 ))
             })
-            .collect()
+            .collect())
     }
 }
 

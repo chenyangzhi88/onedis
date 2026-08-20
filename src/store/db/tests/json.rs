@@ -6,17 +6,19 @@ use crate::store::db::{JsonNodeSnapshot, JsonPathToken};
 fn update_preserves_ttl_for_get() {
     let db = test_db();
 
-    db.insert("ttl-key".to_string(), Structure::String("v1".to_string()));
-    db.expire("ttl-key".to_string(), 20);
-    db.update("ttl-key".to_string(), Structure::String("v2".to_string()));
+    db.insert("ttl-key".to_string(), Structure::String("v1".to_string()))
+        .unwrap();
+    db.expire("ttl-key".to_string(), 20).unwrap();
+    db.update("ttl-key".to_string(), Structure::String("v2".to_string()))
+        .unwrap();
 
     assert!(matches!(
-        db.get("ttl-key"),
+        db.get("ttl-key").unwrap(),
         Some(Structure::String(value)) if value == "v2"
     ));
 
     sleep(Duration::from_millis(30));
-    assert!(db.get("ttl-key").is_none());
+    assert!(db.get("ttl-key").unwrap().is_none());
 }
 
 #[test]
@@ -66,7 +68,8 @@ fn json_set_get_type_and_del_paths() {
 #[tokio::test]
 async fn root_json_set_batch_keeps_last_valid_value_and_per_command_errors() {
     let db = test_db();
-    db.insert_string("wrong-json-type".to_string(), "value".to_string(), None);
+    db.insert_string("wrong-json-type".to_string(), "value".to_string(), None)
+        .unwrap();
 
     let replies = db
         .json_set_root_batch_async(&[
@@ -100,7 +103,7 @@ async fn root_json_set_batch_keeps_last_valid_value_and_per_command_errors() {
 #[tokio::test]
 async fn root_json_set_batch_publishes_each_known_logical_key_once() {
     let db = test_db();
-    let (key_version, db_version) = db.watch_version_snapshot("batch-json-watch");
+    let (key_version, db_version) = db.watch_version_snapshot("batch-json-watch").unwrap();
 
     let replies = db
         .json_set_root_batch_async(&[
@@ -110,7 +113,10 @@ async fn root_json_set_batch_publishes_each_known_logical_key_once() {
         .await;
 
     assert!(replies.iter().all(Result::is_ok));
-    assert!(db.watch_version_changed("batch-json-watch", key_version, db_version));
+    assert!(
+        db.watch_version_changed("batch-json-watch", key_version, db_version)
+            .unwrap()
+    );
     assert_eq!(
         db.mutation_tracker
             .key_version(db.db_index, &db.mk("batch-json-watch")),
@@ -132,7 +138,7 @@ async fn root_json_set_batch_reports_build_failure_for_every_command_on_the_key(
 
     assert_eq!(replies.len(), 2);
     assert!(replies.iter().all(Result::is_err));
-    assert!(db.store.get_raw(&db.mk(&oversized_key)).is_none());
+    assert!(db.store.get_raw(&db.mk(&oversized_key)).unwrap().is_none());
 
     // The main metadata and root node fit, but the long child path does not. A failed per-key
     // builder must not leak the already-built prefix of that document into the global batch.
@@ -144,7 +150,7 @@ async fn root_json_set_batch_reports_build_failure_for_every_command_on_the_key(
         .await;
     assert!(replies.iter().all(Result::is_ok));
     assert!(is_packed_json_raw(
-        &db.store.get_raw(&db.mk(&partial_key)).unwrap()
+        &db.store.get_raw(&db.mk(&partial_key)).unwrap().unwrap()
     ));
 }
 
@@ -172,7 +178,7 @@ fn json_partial_update_uses_indexed_subtree_storage() {
         db.json_set("doc", "$", &document, SetCondition::Always,)
             .unwrap()
     );
-    let raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let raw = db.store.get_raw(&db.mk("doc")).unwrap().unwrap();
     let (_, version, structure) = super::decode_entry(&raw).unwrap();
     assert!(matches!(
         structure,
@@ -195,7 +201,7 @@ fn json_partial_update_uses_indexed_subtree_storage() {
     assert_eq!(root["profile"]["city"], "Paris");
     assert_eq!(root["stats"]["count"], 2);
     assert!(matches!(
-        db.get("doc"),
+        db.get("doc").unwrap(),
         Some(Structure::Json(json)) if serde_json::from_str::<serde_json::Value>(&json).unwrap()["stats"]["count"] == 2
     ));
 }
@@ -211,7 +217,7 @@ fn json_array_delete_keeps_later_element_storage_keys_and_root_delete_cleans_nod
         db.json_set("doc", "$", &document, SetCondition::Always,)
             .unwrap()
     );
-    let raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let raw = db.store.get_raw(&db.mk("doc")).unwrap().unwrap();
     let header = super::decode_meta_header(&raw).unwrap();
     let third_query = super::parse_json_path("$.tags[2]").unwrap();
     let third_storage = db
@@ -231,12 +237,12 @@ fn json_array_delete_keeps_later_element_storage_keys_and_root_delete_cleans_nod
     );
     assert_eq!(db.store.get_raw(&third_key).unwrap(), third_before);
 
-    let raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let raw = db.store.get_raw(&db.mk("doc")).unwrap().unwrap();
     let header = super::decode_meta_header(&raw).unwrap();
     let node_prefix = super::json_node_prefix(db.db_index, "doc", header.version);
-    assert!(!db.store.scan_prefix_raw(&node_prefix).is_empty());
+    assert!(!db.store.scan_prefix_raw(&node_prefix).unwrap().is_empty());
     assert_eq!(db.json_del("doc", "$").unwrap(), 1);
-    assert!(db.store.scan_prefix_raw(&node_prefix).is_empty());
+    assert!(db.store.scan_prefix_raw(&node_prefix).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -246,7 +252,8 @@ async fn json_sync_indexed_and_integer_string_edges_are_covered() {
     db.insert(
         "legacy".to_string(),
         Structure::Json(r#"{"name":"alice","nested":{"x":1},"arr":[1,2]}"#.to_string()),
-    );
+    )
+    .unwrap();
     assert!(db.json_get("legacy", "$").is_err());
     assert!(
         db.json_set("legacy", "$", r#"{"blocked":true}"#, SetCondition::Always)
@@ -316,16 +323,17 @@ async fn json_sync_indexed_and_integer_string_edges_are_covered() {
             .unwrap(),
         6
     );
-    db.insert_string("ttl-counter".to_string(), "10".to_string(), Some(20_000));
+    db.insert_string("ttl-counter".to_string(), "10".to_string(), Some(20_000))
+        .unwrap();
     assert_eq!(
         db.update_integer_string_async("ttl-counter", |value| Some(value + 1))
             .await
             .unwrap(),
         11
     );
-    assert!(db.ttl_millis("ttl-counter") > 0);
+    assert!(db.ttl_millis("ttl-counter").unwrap() > 0);
 
-    db.insert_string_ref("ex", "value");
+    db.insert_string_ref("ex", "value").unwrap();
     assert_eq!(
         db.getex_string_bytes("ex", None).unwrap(),
         Some(b"value".to_vec())
@@ -335,14 +343,14 @@ async fn json_sync_indexed_and_integer_string_edges_are_covered() {
             .unwrap(),
         Some(b"value".to_vec())
     );
-    assert!(db.ttl_millis("ex") > 0);
+    assert!(db.ttl_millis("ex").unwrap() > 0);
     assert_eq!(
         db.getex_string_bytes_async("ex", Some(StringExpireUpdate::Persist))
             .await
             .unwrap(),
         Some(b"value".to_vec())
     );
-    assert_eq!(db.ttl_millis("ex"), -1);
+    assert_eq!(db.ttl_millis("ex").unwrap(), -1);
     assert_eq!(
         db.getex_string_bytes_async(
             "ex",
@@ -354,7 +362,7 @@ async fn json_sync_indexed_and_integer_string_edges_are_covered() {
         .unwrap(),
         Some(b"value".to_vec())
     );
-    assert!(db.ttl_millis("ex") > 0);
+    assert!(db.ttl_millis("ex").unwrap() > 0);
     assert_eq!(
         db.getex_string_bytes("ex", Some(StringExpireUpdate::AbsoluteMs(1)))
             .unwrap(),
@@ -368,9 +376,12 @@ async fn json_sync_indexed_and_integer_string_edges_are_covered() {
     assert!(db.get_string_entry_raw_bytes(b"not-string").is_err());
     assert!(db.get_string_bytes("not-string").is_err());
     assert!(db.get_string_bytes_async("not-string").await.is_err());
-    assert_eq!(db.type_name_readonly("not-string"), "hash");
-    assert_eq!(db.type_name_readonly_async("not-string").await, "hash");
-    assert!(db.exists_readonly_async("not-string").await);
+    assert_eq!(db.type_name_readonly("not-string").unwrap(), "hash");
+    assert_eq!(
+        db.type_name_readonly_async("not-string").await.unwrap(),
+        "hash"
+    );
+    assert!(db.exists_readonly_async("not-string").await.unwrap());
 }
 
 #[test]
@@ -406,7 +417,7 @@ fn json_batch_construction_errors_are_propagated_without_partial_entries() {
 fn json_wrong_type_is_rejected() {
     let db = test_db();
 
-    db.insert_string_ref("doc", "plain");
+    db.insert_string_ref("doc", "plain").unwrap();
 
     assert_eq!(
         db.json_get("doc", "$").unwrap_err().to_string(),
@@ -456,7 +467,7 @@ async fn json_indexed_async_updates_deletes_and_conditions_cover_edges() {
             .await
             .unwrap()
     );
-    let raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let raw = db.store.get_raw(&db.mk("doc")).unwrap().unwrap();
     let (_, _, structure) = super::decode_entry(&raw).unwrap();
     assert!(matches!(
         structure,
@@ -545,7 +556,7 @@ async fn concurrent_json_updates_preserve_independent_paths_and_watch_visibility
     )
     .await
     .unwrap();
-    let snapshot = db.watch_version_snapshot("doc");
+    let snapshot = db.watch_version_snapshot("doc").unwrap();
 
     let left_db = db.clone();
     let left = tokio::spawn(async move {
@@ -580,7 +591,10 @@ async fn concurrent_json_updates_preserve_independent_paths_and_watch_visibility
         db.json_get_async("doc", "$.right.value").await.unwrap(),
         Some("64".into())
     );
-    assert!(db.watch_version_changed("doc", snapshot.0, snapshot.1));
+    assert!(
+        db.watch_version_changed("doc", snapshot.0, snapshot.1)
+            .unwrap()
+    );
     db.release_watch("doc");
 }
 
@@ -630,10 +644,10 @@ async fn concurrent_json_ancestor_replacement_and_descendant_updates_stay_consis
     assert!(document["branch"]["leaf"]["value"].is_number());
     assert!(document["branch"]["other"].is_number());
 
-    let raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let raw = db.store.get_raw(&db.mk("doc")).unwrap().unwrap();
     let version = super::decode_meta_header(&raw).unwrap().version;
     let prefix = super::json_node_prefix(db.db_index, "doc", version);
-    let entries = db.store.scan_prefix_raw(&prefix);
+    let entries = db.store.scan_prefix_raw(&prefix).unwrap();
     let snapshot = JsonNodeSnapshot::from_entries(&prefix, entries).unwrap();
     assert_eq!(
         snapshot.value_at(&mut Vec::new()).unwrap().unwrap(),
@@ -648,17 +662,20 @@ fn json_root_replacement_switches_version_without_eager_old_subtree_delete() {
     let document = format!(r#"{{"wide":{{"a":1,"b":2}},"items":[1,2,3],"padding":"{padding}"}}"#);
     db.json_set("doc", "$", &document, SetCondition::Always)
         .unwrap();
-    let old_raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let old_raw = db.store.get_raw(&db.mk("doc")).unwrap().unwrap();
     let old_version = super::decode_meta_header(&old_raw).unwrap().version;
     let old_prefix = super::json_node_prefix(db.db_index, "doc", old_version);
-    let old_count = db.store.scan_prefix_raw(&old_prefix).len();
+    let old_count = db.store.scan_prefix_raw(&old_prefix).unwrap().len();
 
     db.json_set("doc", "$", r#"{"next":true}"#, SetCondition::Always)
         .unwrap();
-    let new_raw = db.store.get_raw(&db.mk("doc")).unwrap();
+    let new_raw = db.store.get_raw(&db.mk("doc")).unwrap().unwrap();
     let new_version = super::decode_meta_header(&new_raw).unwrap().version;
     assert_ne!(new_version, old_version);
-    assert_eq!(db.store.scan_prefix_raw(&old_prefix).len(), old_count);
+    assert_eq!(
+        db.store.scan_prefix_raw(&old_prefix).unwrap().len(),
+        old_count
+    );
     assert_eq!(db.refresh_retired_versions_once(usize::MAX), 1);
     assert_eq!(
         db.json_get("doc", "$").unwrap(),

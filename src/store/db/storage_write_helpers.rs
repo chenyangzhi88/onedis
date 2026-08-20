@@ -7,7 +7,7 @@ impl Db {
         value: &Structure,
         expire_ms: u64,
         version: u64,
-    ) {
+    ) -> Result<(), Error> {
         let mut batch = WriteBatch::new();
         let version = if version == 0 && !matches!(value, Structure::String(_)) {
             self.next_version()
@@ -15,17 +15,17 @@ impl Db {
             version
         };
         let key_bytes = self.mk(key);
-        if let Some(raw) = self.store.get_raw(&key_bytes)
+        if let Some(raw) = self.store.get_raw(&key_bytes)?
             && let Some(old_header) = decode_meta_header(&raw)
+            && old_header.expire_ms > 0
+            && old_header.expire_ms != expire_ms
         {
-            if old_header.expire_ms > 0 && old_header.expire_ms != expire_ms {
-                self.ttl_manager.remove_known_to_batch(
-                    &mut batch,
-                    old_header.expire_ms,
-                    self.db_index,
-                    key,
-                );
-            }
+            self.ttl_manager.remove_known_to_batch(
+                &mut batch,
+                old_header.expire_ms,
+                self.db_index,
+                key,
+            );
         }
         Self::write_structure_to_batch(&mut batch, self.db_index, key, value, expire_ms, version);
         if expire_ms > 0 {
@@ -35,19 +35,32 @@ impl Db {
             self.ttl_manager
                 .remove_to_batch(&mut batch, self.db_index, key);
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
+        Ok(())
     }
 
-    pub(in crate::store::db) fn write_string(&self, key: &str, value: &[u8], expire_ms: u64) {
+    pub(in crate::store::db) fn write_string(
+        &self,
+        key: &str,
+        value: &[u8],
+        expire_ms: u64,
+    ) -> Result<(), Error> {
         let mut batch = WriteBatch::new();
-        self.write_string_to_batch(&mut batch, key, value, expire_ms);
-        self.write_batch_if_not_empty(&batch);
+        self.write_string_to_batch(&mut batch, key, value, expire_ms)?;
+        self.write_batch_if_not_empty(&batch)?;
+        Ok(())
     }
 
-    pub(in crate::store::db) fn write_plain_string(&self, key: &str, value: &[u8], expire_ms: u64) {
+    pub(in crate::store::db) fn write_plain_string(
+        &self,
+        key: &str,
+        value: &[u8],
+        expire_ms: u64,
+    ) -> Result<(), Error> {
         let mut batch = WriteBatch::new();
-        self.write_string_to_batch_with_old_raw(&mut batch, key, value, expire_ms, None);
-        self.write_plain_string_batch_if_not_empty(&batch);
+        self.write_string_to_batch_with_old_raw(&mut batch, key, value, expire_ms, None)?;
+        self.write_plain_string_batch_if_not_empty(&batch)?;
+        Ok(())
     }
 
     pub(in crate::store::db) fn write_string_to_batch(
@@ -56,8 +69,8 @@ impl Db {
         key: &str,
         value: &[u8],
         expire_ms: u64,
-    ) {
-        self.write_string_to_batch_with_old_raw(batch, key, value, expire_ms, None);
+    ) -> Result<(), Error> {
+        self.write_string_to_batch_with_old_raw(batch, key, value, expire_ms, None)
     }
 
     pub(in crate::store::db) fn write_string_to_batch_with_old_raw(
@@ -67,11 +80,12 @@ impl Db {
         value: &[u8],
         expire_ms: u64,
         old_raw: Option<&[u8]>,
-    ) {
+    ) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         let stored_raw = old_raw
             .is_none()
             .then(|| self.store.get_raw(&key_bytes))
+            .transpose()?
             .flatten();
         if let Some(old_raw) = old_raw {
             self.prepare_string_overwrite_to_batch(batch, key, Some(old_raw));
@@ -80,6 +94,7 @@ impl Db {
         }
         let effective_old_raw = old_raw.or(stored_raw.as_deref());
         self.write_string_value_to_batch(batch, key, value, expire_ms, effective_old_raw);
+        Ok(())
     }
 
     pub(in crate::store::db) fn write_string_to_batch_with_deferred_old_raw(

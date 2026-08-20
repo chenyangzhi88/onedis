@@ -355,7 +355,7 @@ pub(in crate::store::db) async fn observe_and_delete_json_subtree_to_batch_async
     } else {
         start
     };
-    let entries = store.scan_prefix_raw_async(&prefix).await;
+    let entries = store.scan_prefix_raw_async(&prefix).await?;
     if entries.is_empty() {
         return Ok(None);
     }
@@ -363,7 +363,7 @@ pub(in crate::store::db) async fn observe_and_delete_json_subtree_to_batch_async
         .iter()
         .map(|(node_key, _)| node_key.clone())
         .collect::<Vec<_>>();
-    let observed = store.multi_get_raw_observed_async(&keys).await;
+    let observed = store.multi_get_raw_observed_async(&keys).await?;
     let mut conditions = Vec::with_capacity(entries.len());
     for ((node_key, scanned_value), observation) in entries.into_iter().zip(observed) {
         if observation.value().map(|value| value.as_ref()) != Some(scanned_value.as_slice()) {
@@ -477,7 +477,7 @@ pub(in crate::store::db) fn delete_json_subtree_to_batch(
     } else {
         start
     };
-    for (node_key, _) in store.scan_prefix_raw(&prefix) {
+    for (node_key, _) in store.scan_prefix_raw(&prefix)? {
         batch
             .delete(&node_key)
             .map_err(|error| Error::msg(error.to_string()))?;

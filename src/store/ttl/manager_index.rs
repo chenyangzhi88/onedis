@@ -1,13 +1,19 @@
 impl TtlManager {
-    pub fn add(&self, expire_ms: u64, db_index: u16, key: String) {
+    pub fn add(
+        &self,
+        expire_ms: u64,
+        db_index: u16,
+        key: String,
+    ) -> common::types::status::Result<()> {
         if expire_ms == 0 {
-            return;
+            return Ok(());
         }
         let mut batch = WriteBatch::new();
-        self.add_to_batch(&mut batch, expire_ms, db_index, &key);
+        self.try_add_to_batch(&mut batch, expire_ms, db_index, &key)?;
         if batch.count() > 0 {
-            self.store_for_db(db_index).write_batch(&batch);
+            self.store_for_db(db_index).write_batch(&batch)?;
         }
+        Ok(())
     }
 
     pub fn add_to_batch(&self, batch: &mut WriteBatch, expire_ms: u64, db_index: u16, key: &str) {
@@ -29,12 +35,17 @@ impl TtlManager {
         batch.put(&ttl_index_key(expire_ms, db_index, key), TTL_INDEX_VALUE)
     }
 
-    pub fn remove(&self, db_index: u16, key: &str) {
+    pub fn remove(
+        &self,
+        db_index: u16,
+        key: &str,
+    ) -> common::types::status::Result<()> {
         let mut batch = WriteBatch::new();
         self.remove_to_batch(&mut batch, db_index, key);
         if batch.count() > 0 {
-            self.store_for_db(db_index).write_batch(&batch);
+            self.store_for_db(db_index).write_batch(&batch)?;
         }
+        Ok(())
     }
 
     pub fn remove_to_batch(&self, _batch: &mut WriteBatch, db_index: u16, key: &str) {
@@ -54,23 +65,33 @@ impl TtlManager {
         (batch.delete(&ttl_index_key(expire_ms, db_index, key))).expect("write batch append invariant violated");
     }
 
-    pub fn remove_db_to_batch(&self, batch: &mut WriteBatch, db_index: u16) {
+    pub fn remove_db_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        db_index: u16,
+    ) -> common::types::status::Result<()> {
         for (key, _) in self
             .store_for_db(db_index)
-            .scan_prefix_raw(&ttl_db_prefix(db_index))
+            .scan_prefix_raw(&ttl_db_prefix(db_index))?
         {
             (batch.delete(&key)).expect("write batch append invariant violated");
         }
+        Ok(())
     }
 
-    pub async fn remove_db_to_batch_async(&self, batch: &mut WriteBatch, db_index: u16) {
+    pub async fn remove_db_to_batch_async(
+        &self,
+        batch: &mut WriteBatch,
+        db_index: u16,
+    ) -> common::types::status::Result<()> {
         for (key, _) in self
             .store_for_db(db_index)
             .scan_prefix_raw_async(&ttl_db_prefix(db_index))
-            .await
+            .await?
         {
             (batch.delete(&key)).expect("write batch append invariant violated");
         }
+        Ok(())
     }
 
     // ---------------------------------------------------------- rebuild
@@ -78,14 +99,18 @@ impl TtlManager {
     ///
     /// The TTL namespace itself is the sweeper's source of truth, so rebuild no
     /// longer materializes an in-memory expiration tree.
-    pub fn rebuild_from_store(&self, num_dbs: u16, version_counter: &VersionCounter) {
+    pub fn rebuild_from_store(
+        &self,
+        num_dbs: u16,
+        version_counter: &VersionCounter,
+    ) -> common::types::status::Result<()> {
         self.db_count
             .store(num_dbs.max(1) as u32, Ordering::Release);
         let mut with_ttl = 0usize;
         for db_idx in 0..num_dbs {
             for (ttl_key, _) in self
                 .store_for_db(db_idx)
-                .scan_prefix_raw(&ttl_db_prefix(db_idx))
+                .scan_prefix_raw(&ttl_db_prefix(db_idx))?
             {
                 if parse_ttl_index_key(&ttl_key).is_some() {
                     with_ttl += 1;
@@ -95,7 +120,7 @@ impl TtlManager {
 
         for db_idx in 0..num_dbs.max(1) {
             let owner_prefix = crate::store::db::version_owner_prefix(db_idx);
-            for (owner_key, _) in self.store_for_db(db_idx).scan_prefix_raw(&owner_prefix) {
+            for (owner_key, _) in self.store_for_db(db_idx).scan_prefix_raw(&owner_prefix)? {
                 if let Some(suffix) = owner_key.strip_prefix(owner_prefix.as_slice())
                     && suffix.len() == 8
                 {
@@ -112,9 +137,14 @@ impl TtlManager {
             with_ttl,
             version_counter.current()
         );
+        Ok(())
     }
 
-    pub async fn rebuild_from_store_async(&self, num_dbs: u16, version_counter: &VersionCounter) {
+    pub async fn rebuild_from_store_async(
+        &self,
+        num_dbs: u16,
+        version_counter: &VersionCounter,
+    ) -> common::types::status::Result<()> {
         self.db_count
             .store(num_dbs.max(1) as u32, Ordering::Release);
         let mut with_ttl = 0usize;
@@ -122,7 +152,7 @@ impl TtlManager {
             for (ttl_key, _) in self
                 .store_for_db(db_idx)
                 .scan_prefix_raw_async(&ttl_db_prefix(db_idx))
-                .await
+                .await?
             {
                 if parse_ttl_index_key(&ttl_key).is_some() {
                     with_ttl += 1;
@@ -135,7 +165,7 @@ impl TtlManager {
             for (owner_key, _) in self
                 .store_for_db(db_idx)
                 .scan_prefix_raw_async(&owner_prefix)
-                .await
+                .await?
             {
                 if let Some(suffix) = owner_key.strip_prefix(owner_prefix.as_slice())
                     && suffix.len() == 8
@@ -153,5 +183,6 @@ impl TtlManager {
             with_ttl,
             version_counter.current()
         );
+        Ok(())
     }
 }

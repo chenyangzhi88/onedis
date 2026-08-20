@@ -15,12 +15,12 @@ impl Dbsize {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let size = db.len();
+        let size = db.len()?;
         Ok(Frame::Integer(size as i64))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let size = db.len_async().await;
+        let size = db.len_async().await?;
         Ok(Frame::Integer(size as i64))
     }
 }

@@ -24,8 +24,8 @@ fn fulltext_vector_indexes_are_internal_and_not_redis_keys() {
     let meta = db.read_fulltext_meta_direct("idx").unwrap();
     let internal = fulltext_vector_index_name("idx", meta.generation, "vec");
     assert_eq!(db.vector_dim(&internal).unwrap(), Some(3));
-    assert!(!db.keys("*").contains(&internal));
-    assert!(!db.delete_key(&internal));
+    assert!(!db.keys("*").unwrap().contains(&internal));
+    assert!(!db.delete_key(&internal).unwrap());
     assert_eq!(db.vector_dim(&internal).unwrap(), Some(3));
 
     db.hash_set("doc:1", "vec", "[1,0,0]").unwrap();
@@ -43,8 +43,10 @@ fn drop_index_dd_deletes_multiple_source_pages() {
     let ttl_manager =
         crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
     let db = Db::new(0, store, version_counter, ttl_manager);
-    let mut options = FullTextIndexOptions::default();
-    options.skip_initial_scan = true;
+    let options = FullTextIndexOptions {
+        skip_initial_scan: true,
+        ..FullTextIndexOptions::default()
+    };
     db.fulltext_create(
         "idx",
         FullTextCreateOptions {
@@ -156,6 +158,7 @@ fn metadata_cas_rejects_stale_writers_and_sequences_are_strictly_monotonic() {
     let sequences = db
         .store
         .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx-1"))
+        .unwrap()
         .into_iter()
         .filter_map(|(key, _)| fulltext_outbox_seq_from_key(0, "idx-1", &key))
         .collect::<Vec<_>>();
@@ -277,7 +280,7 @@ fn runtime_registry_prunes_dead_per_index_locks() {
 }
 
 #[test]
-fn search_rebuilds_a_persisted_index_with_the_legacy_runtime_schema() {
+fn maintenance_rebuilds_an_incompatible_persisted_runtime_before_search() {
     let store = test_store("legacy-runtime-schema");
     let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
     let ttl_manager =
@@ -299,7 +302,7 @@ fn search_rebuilds_a_persisted_index_with_the_legacy_runtime_schema() {
     let mut cleanup = WriteBatch::new();
     db.delete_fulltext_storage_to_batch(&mut cleanup, &meta.active_storage)
         .unwrap();
-    db.write_batch_if_not_empty(&cleanup);
+    db.write_batch_if_not_empty(&cleanup).unwrap();
 
     let mut legacy_schema = Schema::builder();
     legacy_schema.add_text_field(FULLTEXT_KEY_FIELD, STRING | STORED);
@@ -312,6 +315,8 @@ fn search_rebuilds_a_persisted_index_with_the_legacy_runtime_schema() {
     writer.commit().unwrap();
     drop(writer);
     drop(legacy);
+
+    db.fulltext_maintenance_tick().unwrap();
 
     let hits = db
         .fulltext_collect_live_hits(
@@ -361,16 +366,18 @@ fn recreated_index_ignores_late_outbox_records_from_the_dropped_incarnation() {
     assert_ne!(new_meta.incarnation, old_incarnation);
 
     let sequence = db.next_fulltext_sequence();
-    db.store.put_raw(
-        &fulltext_outbox_key(0, "idx", sequence),
-        &encode_record(&FullTextMutationRecord {
-            incarnation: old_incarnation,
-            kind: FullTextMutationKind::UpsertKey,
-            key: "doc:late".to_string(),
-            projection: None,
-        })
-        .unwrap(),
-    );
+    db.store
+        .put_raw(
+            &fulltext_outbox_key(0, "idx", sequence),
+            &encode_record(&FullTextMutationRecord {
+                incarnation: old_incarnation,
+                kind: FullTextMutationKind::UpsertKey,
+                key: "doc:late".to_string(),
+                projection: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
     db.fulltext_maintenance_tick().unwrap();
 
     let runtime = db.fulltext_runtimes.get(0, "idx").unwrap();
@@ -391,14 +398,16 @@ fn recreated_index_ignores_late_outbox_records_from_the_dropped_incarnation() {
 }
 
 #[test]
-fn search_publishes_hot_generation_and_maintenance_checkpoints_it() {
+fn maintenance_publishes_and_checkpoints_before_search_reads_the_generation() {
     let store = test_store("hot-checkpoint");
     let version_counter = Arc::new(crate::store::ttl::VersionCounter::new());
     let ttl_manager =
         crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
     let db = Db::new(0, store.clone(), version_counter, ttl_manager);
-    let mut index_options = FullTextIndexOptions::default();
-    index_options.skip_initial_scan = true;
+    let index_options = FullTextIndexOptions {
+        skip_initial_scan: true,
+        ..FullTextIndexOptions::default()
+    };
     db.fulltext_create(
         "idx",
         FullTextCreateOptions {
@@ -413,8 +422,19 @@ fn search_publishes_hot_generation_and_maintenance_checkpoints_it() {
     assert!(
         !db.store
             .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
+            .unwrap()
             .is_empty(),
         "the source mutation must be durable before query-side publication"
+    );
+
+    db.fulltext_maintenance_tick().unwrap();
+    let checkpointed = db.read_fulltext_meta_direct("idx").unwrap();
+    assert!(checkpointed.last_indexed_outbox_seq > 0);
+    assert!(
+        db.store
+            .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
+            .unwrap()
+            .is_empty()
     );
 
     let hits = db
@@ -426,25 +446,9 @@ fn search_publishes_hot_generation_and_maintenance_checkpoints_it() {
         )
         .unwrap();
     assert_eq!(hits.total, 1);
-    let before = db.read_fulltext_meta_direct("idx").unwrap();
     let runtime = db.fulltext_runtimes.get(0, "idx").unwrap();
     let published = runtime.read().unwrap().published_outbox_seq();
-    assert!(published > before.last_indexed_outbox_seq);
-    assert!(runtime.read().unwrap().directory.has_hot_changes());
-    assert!(
-        !db.store
-            .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
-            .is_empty()
-    );
-
-    db.fulltext_maintenance_tick().unwrap();
-    let checkpointed = db.read_fulltext_meta_direct("idx").unwrap();
     assert_eq!(checkpointed.last_indexed_outbox_seq, published);
-    assert!(
-        db.store
-            .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
-            .is_empty()
-    );
 
     drop(runtime);
     db.fulltext_runtimes.remove(0, "idx");
@@ -465,8 +469,10 @@ fn search_materializes_only_the_requested_page_and_nocontent_skips_source_fields
     let ttl_manager =
         crate::store::ttl::TtlManager::new(store.clone(), crate::store::ttl::TtlConfig::default());
     let db = Db::new(0, store, version_counter, ttl_manager);
-    let mut index_options = FullTextIndexOptions::default();
-    index_options.skip_initial_scan = true;
+    let index_options = FullTextIndexOptions {
+        skip_initial_scan: true,
+        ..FullTextIndexOptions::default()
+    };
     db.fulltext_create(
         "idx",
         FullTextCreateOptions {
@@ -486,6 +492,7 @@ fn search_materializes_only_the_requested_page_and_nocontent_skips_source_fields
             .unwrap();
         db.hash_set(&key, "price", &ordinal.to_string()).unwrap();
     }
+    db.fulltext_maintenance_tick().unwrap();
 
     let mut options = search_options();
     options.offset = 20;

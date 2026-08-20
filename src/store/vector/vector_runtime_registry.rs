@@ -4,6 +4,7 @@ pub struct VectorRuntimeRegistry {
     write_locks: DashMap<VectorWriteLockKey, Arc<Mutex<()>>>,
     dirty_indexes: DashMap<VectorRuntimeKey, ()>,
     active_runtimes: AtomicUsize,
+    maintenance_cursor: AtomicUsize,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -79,12 +80,28 @@ impl VectorRuntimeRegistry {
             .map(|entry| entry.value().clone())
     }
 
-    fn take_dirty_indexes_for_db(&self, db_index: u16) -> Vec<(String, u64)> {
-        let keys = self
+    fn take_dirty_indexes_for_db(
+        &self,
+        db_index: u16,
+        limit: usize,
+    ) -> Vec<(String, u64)> {
+        let mut keys = self
             .dirty_indexes
             .iter()
             .filter(|entry| entry.key().db_index == db_index)
             .map(|entry| (entry.key().index.clone(), entry.key().version))
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        let count = keys.len().min(limit);
+        if count == 0 {
+            return Vec::new();
+        }
+        let start = self
+            .maintenance_cursor
+            .fetch_add(count, AtomicOrdering::AcqRel)
+            % keys.len();
+        let keys = (0..count)
+            .map(|offset| keys[(start + offset) % keys.len()].clone())
             .collect::<Vec<_>>();
         for (index, version) in &keys {
             self.dirty_indexes

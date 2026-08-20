@@ -1,5 +1,5 @@
 use std::sync::{
-    RwLock,
+    Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -12,20 +12,41 @@ pub struct ServiceState {
     ready: AtomicBool,
     shutting_down: AtomicBool,
     degraded_reason: RwLock<Option<String>>,
+    storage_health: Arc<crate::store::health::StorageHealth>,
+    background_health: Option<Arc<crate::store::db_manager::BackgroundTaskHealth>>,
 }
 
 impl Default for ServiceState {
     fn default() -> Self {
+        Self::new(Arc::new(crate::store::health::StorageHealth::default()))
+    }
+}
+
+impl ServiceState {
+    pub fn new(storage_health: Arc<crate::store::health::StorageHealth>) -> Self {
         Self {
             healthy: AtomicBool::new(true),
             ready: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             degraded_reason: RwLock::new(None),
+            storage_health,
+            background_health: None,
         }
     }
-}
 
-impl ServiceState {
+    pub fn new_with_background(
+        storage_health: Arc<crate::store::health::StorageHealth>,
+        background_health: Arc<crate::store::db_manager::BackgroundTaskHealth>,
+    ) -> Self {
+        Self {
+            background_health: Some(background_health),
+            ..Self::new(storage_health)
+        }
+    }
+
+    pub fn storage_health(&self) -> &crate::store::health::StorageHealth {
+        &self.storage_health
+    }
     pub fn mark_ready(&self) {
         if !self.shutting_down.load(Ordering::Acquire) && self.degraded_reason().is_none() {
             self.ready.store(true, Ordering::Release);
@@ -58,7 +79,11 @@ impl ServiceState {
         self.ready.load(Ordering::Acquire)
             && !self.shutting_down.load(Ordering::Acquire)
             && self.degraded_reason().is_none()
-            && crate::store::health::storage_health().failure_count() == 0
+            && self.storage_health.is_healthy()
+            && self
+                .background_health
+                .as_ref()
+                .is_none_or(|health| health.is_healthy())
     }
 
     pub fn is_shutting_down(&self) -> bool {
@@ -75,11 +100,17 @@ impl ServiceState {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        reason.or_else(|| {
-            crate::store::health::storage_health()
-                .last_error()
-                .map(|error| format!("storage degraded: {error}"))
-        })
+        reason
+            .or_else(|| {
+                self.storage_health
+                    .last_error()
+                    .map(|error| format!("storage degraded: {error}"))
+            })
+            .or_else(|| {
+                self.background_health
+                    .as_ref()
+                    .and_then(|health| health.degraded_reason())
+            })
     }
 
     pub fn health_body(&self) -> String {

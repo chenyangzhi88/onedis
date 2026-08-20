@@ -12,7 +12,7 @@ impl Db {
     pub(in crate::store::db) fn promote_packed_json(&self, key: &str) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -47,7 +47,7 @@ impl Db {
     ) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -108,7 +108,7 @@ impl Db {
     ) -> Result<Option<JsonNode>, Error> {
         let Some(raw) = self
             .store
-            .get_raw(&json_node_key(self.db_index, key, version, tokens))
+            .get_raw(&json_node_key(self.db_index, key, version, tokens))?
         else {
             return Ok(None);
         };
@@ -126,7 +126,7 @@ impl Db {
         let Some(raw) = self
             .store
             .get_raw_async(&json_node_key(self.db_index, key, version, tokens))
-            .await
+            .await?
         else {
             return Ok(None);
         };
@@ -140,9 +140,10 @@ impl Db {
         key: &str,
         version: u64,
         tokens: &[JsonPathToken],
-    ) -> bool {
-        self.store
-            .contains_key(&json_node_key(self.db_index, key, version, tokens))
+    ) -> Result<bool, Error> {
+        Ok(self
+            .store
+            .contains_key(&json_node_key(self.db_index, key, version, tokens))?)
     }
 
     /// Convert user-visible array ranks into stable physical element ids while walking the path.
@@ -213,7 +214,7 @@ impl Db {
         key: &str,
         version: u64,
         query_tokens: &[JsonPathToken],
-    ) -> Result<Option<(Vec<JsonPathToken>, Vec<JsonPathToken>, JsonNode)>, Error> {
+    ) -> Result<Option<JsonStorageTarget>, Error> {
         let Some((last, query_parent)) = query_tokens.split_last() else {
             return Ok(None);
         };
@@ -258,7 +259,7 @@ impl Db {
         let mut conditions = Vec::with_capacity(query_tokens.len() + 1);
         for token in query_parent {
             let node_key = json_node_key(self.db_index, key, version, &parent_tokens);
-            let observed = self.store.get_raw_observed_async(&node_key).await;
+            let observed = self.store.get_raw_observed_async(&node_key).await?;
             let Some(raw) = observed.value() else {
                 return Ok(None);
             };
@@ -282,7 +283,7 @@ impl Db {
         }
 
         let parent_key = json_node_key(self.db_index, key, version, &parent_tokens);
-        let parent_observed = self.store.get_raw_observed_async(&parent_key).await;
+        let parent_observed = self.store.get_raw_observed_async(&parent_key).await?;
         let Some(parent_raw) = parent_observed.value() else {
             return Ok(None);
         };
@@ -306,7 +307,7 @@ impl Db {
             _ => return Ok(None),
         }
         let target_key = json_node_key(self.db_index, key, version, &target_tokens);
-        let target_observed = self.store.get_raw_observed_async(&target_key).await;
+        let target_observed = self.store.get_raw_observed_async(&target_key).await?;
         let target_node = target_observed
             .value()
             .map(|raw| decode_json_node(raw).ok_or_else(|| Error::msg("Type parsing error")))
@@ -331,7 +332,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_json)
                 .and_then(|value| json_value_at_path(&value, tokens).cloned()));
@@ -356,7 +357,7 @@ impl Db {
             JsonNode::Object(_) | JsonNode::Array(_) => {
                 let prefix = json_node_key(self.db_index, key, version, storage_tokens);
                 let snapshot =
-                    JsonNodeSnapshot::from_entries(&prefix, self.store.scan_prefix_raw(&prefix))?;
+                    JsonNodeSnapshot::from_entries(&prefix, self.store.scan_prefix_raw(&prefix)?)?;
                 snapshot.value_at(&mut Vec::new())
             }
         }
@@ -372,7 +373,7 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_json)
                 .and_then(|value| json_value_at_path(&value, tokens).cloned()));
@@ -403,7 +404,7 @@ impl Db {
             JsonNode::Scalar(raw) => json_scalar_to_value(&raw).map(Some),
             JsonNode::Object(_) | JsonNode::Array(_) => {
                 let prefix = json_node_key(self.db_index, key, version, storage_tokens);
-                let entries = self.store.scan_prefix_raw_async(&prefix).await;
+                let entries = self.store.scan_prefix_raw_async(&prefix).await?;
                 let snapshot = JsonNodeSnapshot::from_entries(&prefix, entries)?;
                 snapshot.value_at(&mut Vec::new())
             }
@@ -419,7 +420,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_json)
                 .and_then(|value| json_value_at_path(&value, tokens).map(json_type_name)));
@@ -447,7 +448,7 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_json)
                 .and_then(|value| json_value_at_path(&value, tokens).map(json_type_name)));
@@ -538,7 +539,7 @@ impl Db {
             self.ttl_manager
                 .remove_to_batch(&mut batch, self.db_index, key);
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.fulltext_request_json_refresh(key)?;
         Ok(())
     }

@@ -44,6 +44,7 @@ pub struct KvStore {
     table_name: Arc<str>,
     write_options: WriteOptions,
     version_compaction: Arc<crate::store::db::VersionCompactionTracker>,
+    health: Arc<crate::store::health::StorageHealth>,
     txn: Option<Arc<KvStoreTransactionContext>>,
 }
 
@@ -192,4 +193,6 @@ include!("kv_store_scans.rs");
 include!("kv_store_batch_writes.rs");
 include!("kv_store_merge_operator.rs");
 include!("kv_store_iterator_helpers.rs");
-include!("kv_store_tests.rs");
+#[cfg(test)]
+#[path = "kv_store_tests.rs"]
+mod tests;

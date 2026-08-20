@@ -1,30 +1,57 @@
 use super::*;
 
+pub(in crate::store::db) fn fail_successful_batch_replies<T>(
+    replies: Vec<Result<T, Error>>,
+    error: Error,
+) -> Vec<Result<T, Error>> {
+    let message = error.to_string();
+    replies
+        .into_iter()
+        .map(|reply| match reply {
+            Ok(_) => Err(Error::msg(message.clone())),
+            Err(error) => Err(error),
+        })
+        .collect()
+}
+
+pub(in crate::store::db) fn storage_batch_error<T>(
+    count: usize,
+    error: impl std::fmt::Display,
+) -> Vec<Result<T, Error>> {
+    let message = error.to_string();
+    (0..count)
+        .map(|_| Err(Error::msg(message.clone())))
+        .collect()
+}
+
 impl Db {
-    pub(in crate::store::db) fn write_batch_if_not_empty(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) fn write_batch_if_not_empty(
+        &self,
+        batch: &WriteBatch,
+    ) -> Result<(), Error> {
         if batch.count() == 0 {
-            return;
+            return Ok(());
         }
-        let augmented = match self.batch_with_version_owner_markers(batch) {
-            Ok(augmented) => augmented,
-            Err(err) => {
-                log::error!("failed to augment write batch with version owner: {err}");
-                return;
-            }
-        };
+        let augmented = self.batch_with_version_owner_markers(batch)?;
         let batch = augmented.as_ref().unwrap_or(batch);
+        self.store
+            .write_batch(batch)
+            .map_err(|err| Error::msg(err.to_string()))?;
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
-        self.store.write_batch(batch);
         self.invalidate_zset_length_cache_for_batch(batch);
         self.fulltext_observe_committed_outbox_batch(batch);
         self.record_or_publish_mutations(batch);
+        Ok(())
     }
 
-    pub(in crate::store::db) async fn write_batch_if_not_empty_async(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) async fn write_batch_if_not_empty_async(
+        &self,
+        batch: &WriteBatch,
+    ) -> Result<(), Error> {
         self.write_batch_if_not_empty_async_inner(batch, true, None)
-            .await;
+            .await
     }
 
     /// Commit a batch whose planner already knows and deduplicated every mutated logical key.
@@ -32,9 +59,9 @@ impl Db {
         &self,
         batch: &WriteBatch,
         logical_keys: &[&str],
-    ) {
+    ) -> Result<(), Error> {
         self.write_batch_if_not_empty_async_inner(batch, true, Some(logical_keys))
-            .await;
+            .await
     }
 
     /// Owned equivalent for planners that have already deduplicated their logical keys. Version
@@ -43,21 +70,26 @@ impl Db {
         &self,
         mut batch: WriteBatch,
         logical_keys: &[&str],
-    ) {
+    ) -> Result<(), Error> {
         if batch.count() == 0 {
-            return;
+            return Ok(());
         }
-        if let Err(err) = self.append_version_owner_markers(&mut batch) {
-            log::error!("failed to append version owner to owned write batch: {err}");
-            return;
-        }
-        self.invalidate_counter_cache_for_batch(&batch);
-        self.invalidate_hash_counter_cache_for_batch(&batch);
-        self.invalidate_list_meta_cache_for_batch(&batch);
+        self.append_version_owner_markers(&mut batch)?;
         let committed_outbox = self.fulltext_collect_committed_outbox_batch(&batch);
-        self.store.write_batch_owned_async(batch).await;
+        self.store
+            .write_batch_owned_async(batch)
+            .await
+            .map_err(|err| Error::msg(err.to_string()))?;
+        // The owned batch has moved into kv-engine. The planner supplied the exact logical keys,
+        // so cache invalidation can stay on the durable side of the commit boundary.
+        let committed_keys = logical_keys
+            .iter()
+            .map(|key| (self.db_index, key.as_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        self.invalidate_caches_for_committed_mutations(&committed_keys, &[]);
         self.fulltext_publish_committed_outbox(committed_outbox);
         self.record_or_publish_known_key_mutations(logical_keys);
+        Ok(())
     }
 
     /// Commit a mutation to a structure whose version-owner marker is already durable.
@@ -68,9 +100,9 @@ impl Db {
     pub(in crate::store::db) async fn write_existing_version_batch_if_not_empty_async(
         &self,
         batch: &WriteBatch,
-    ) {
+    ) -> Result<(), Error> {
         self.write_batch_if_not_empty_async_inner(batch, false, None)
-            .await;
+            .await
     }
 
     async fn write_batch_if_not_empty_async_inner(
@@ -78,26 +110,23 @@ impl Db {
         batch: &WriteBatch,
         add_version_owner_markers: bool,
         logical_keys: Option<&[&str]>,
-    ) {
+    ) -> Result<(), Error> {
         if batch.count() == 0 {
-            return;
+            return Ok(());
         }
         let augmented = if add_version_owner_markers {
-            match self.batch_with_version_owner_markers(batch) {
-                Ok(augmented) => augmented,
-                Err(err) => {
-                    log::error!("failed to augment write batch with version owner: {err}");
-                    return;
-                }
-            }
+            self.batch_with_version_owner_markers(batch)?
         } else {
             None
         };
         let batch = augmented.as_ref().unwrap_or(batch);
+        self.store
+            .write_batch_async(batch)
+            .await
+            .map_err(|err| Error::msg(err.to_string()))?;
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
-        self.store.write_batch_async(batch).await;
         self.invalidate_zset_length_cache_for_batch(batch);
         self.fulltext_observe_committed_outbox_batch(batch);
         if let Some(logical_keys) = logical_keys {
@@ -105,43 +134,49 @@ impl Db {
         } else {
             self.record_or_publish_mutations(batch);
         }
+        Ok(())
     }
 
-    pub(in crate::store::db) fn write_plain_string_batch_if_not_empty(&self, batch: &WriteBatch) {
+    pub(in crate::store::db) fn write_plain_string_batch_if_not_empty(
+        &self,
+        batch: &WriteBatch,
+    ) -> Result<(), Error> {
         if batch.count() == 0 {
-            return;
+            return Ok(());
         }
-        self.write_batch_if_not_empty(batch);
+        self.write_batch_if_not_empty(batch)
     }
 
     pub(in crate::store::db) async fn write_plain_string_batch_if_not_empty_async(
         &self,
         batch: &WriteBatch,
-    ) {
+    ) -> Result<(), Error> {
         if batch.count() == 0 {
-            return;
+            return Ok(());
         }
-        self.write_batch_if_not_empty_async(batch).await;
+        self.write_batch_if_not_empty_async(batch).await
     }
 
     pub(in crate::store::db) async fn write_plain_string_batch_owned_if_not_empty_async(
         &self,
         mut batch: WriteBatch,
-    ) {
+    ) -> Result<(), Error> {
         if batch.count() == 0 {
-            return;
+            return Ok(());
         }
-        if let Err(err) = self.append_version_owner_markers(&mut batch) {
-            log::error!("failed to append version owner to owned string batch: {err}");
-            return;
-        }
-        self.invalidate_counter_cache_for_batch(&batch);
-        self.invalidate_hash_counter_cache_for_batch(&batch);
-        self.invalidate_list_meta_cache_for_batch(&batch);
-        self.invalidate_zset_length_cache_for_batch(&batch);
+        self.append_version_owner_markers(&mut batch)?;
         let committed_outbox = self.fulltext_collect_committed_outbox_batch(&batch);
         let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, &batch);
-        self.store.write_batch_owned_async(batch).await;
+        self.store
+            .write_batch_owned_async(batch)
+            .await
+            .map_err(|err| Error::msg(err.to_string()))?;
+        let committed_keys = keys
+            .iter()
+            .cloned()
+            .map(|key| (self.db_index, key))
+            .collect::<Vec<_>>();
+        self.invalidate_caches_for_committed_mutations(&committed_keys, &dbs);
         self.fulltext_publish_committed_outbox(committed_outbox);
         if !self.store.is_transactional() && self.vector_runtimes.has_active_runtimes() {
             if dbs.contains(&self.db_index) {
@@ -158,23 +193,28 @@ impl Db {
             }
         }
         self.record_or_publish_collected_mutations(keys, dbs);
+        Ok(())
     }
 
     pub(in crate::store::db) async fn write_plain_string_batch_if_not_empty_without_watch_publish_async(
         &self,
         batch: &WriteBatch,
-    ) {
+    ) -> Result<(), Error> {
         if batch.count() == 0 {
-            return;
+            return Ok(());
         }
+        self.store
+            .write_batch_async(batch)
+            .await
+            .map_err(|err| Error::msg(err.to_string()))?;
         self.invalidate_counter_cache_for_batch(batch);
         self.invalidate_hash_counter_cache_for_batch(batch);
         self.invalidate_list_meta_cache_for_batch(batch);
-        self.store.write_batch_async(batch).await;
         self.invalidate_zset_length_cache_for_batch(batch);
         if !self.store.is_transactional() && self.vector_runtimes.has_active_runtimes() {
             self.reconcile_vector_runtimes_for_batch(batch);
         }
+        Ok(())
     }
 
     pub(in crate::store::db) async fn compare_and_write_batch_if_not_empty_async(
@@ -208,15 +248,15 @@ impl Db {
         }
         let augmented = self.batch_with_version_owner_markers(batch)?;
         let batch = augmented.as_ref().unwrap_or(batch);
-        self.invalidate_counter_cache_for_batch(batch);
-        self.invalidate_hash_counter_cache_for_batch(batch);
-        self.invalidate_list_meta_cache_for_batch(batch);
         match self
             .store
             .compare_and_write_batch_async(conditions, batch)
             .await
         {
             Ok(()) => {
+                self.invalidate_counter_cache_for_batch(batch);
+                self.invalidate_hash_counter_cache_for_batch(batch);
+                self.invalidate_list_meta_cache_for_batch(batch);
                 self.invalidate_zset_length_cache_for_batch(batch);
                 self.fulltext_observe_committed_outbox_batch(batch);
                 self.record_or_publish_mutations_inner(batch, reconcile_vector_runtimes);
@@ -261,11 +301,11 @@ impl Db {
         }
         let augmented = self.batch_with_version_owner_markers(batch)?;
         let batch = augmented.as_ref().unwrap_or(batch);
-        self.invalidate_counter_cache_for_batch(batch);
-        self.invalidate_hash_counter_cache_for_batch(batch);
-        self.invalidate_list_meta_cache_for_batch(batch);
         match self.store.compare_and_write_batch(conditions, batch) {
             Ok(()) => {
+                self.invalidate_counter_cache_for_batch(batch);
+                self.invalidate_hash_counter_cache_for_batch(batch);
+                self.invalidate_list_meta_cache_for_batch(batch);
                 self.invalidate_zset_length_cache_for_batch(batch);
                 self.fulltext_observe_committed_outbox_batch(batch);
                 self.record_or_publish_mutations_inner(batch, reconcile_vector_runtimes);
@@ -294,7 +334,7 @@ impl Db {
         // This check runs after a non-transactional write. A watch registered
         // before the write is therefore visible here; one registered after
         // this check starts after the mutation and need not observe it.
-        if !self.store.is_transactional() && !self.mutation_tracker.has_watched_keys() {
+        if !self.store.is_transactional() && !self.mutation_tracker.has_observers() {
             return;
         }
         let (keys, dbs) = collect_logical_mutations(self.key_layout, self.db_index, batch);
@@ -302,7 +342,7 @@ impl Db {
     }
 
     fn record_or_publish_collected_mutations(&self, keys: Vec<Vec<u8>>, dbs: Vec<u16>) {
-        if !self.store.is_transactional() && !self.mutation_tracker.has_watched_keys() {
+        if !self.store.is_transactional() && !self.mutation_tracker.has_observers() {
             return;
         }
         if keys.is_empty() && dbs.is_empty() {
@@ -331,7 +371,7 @@ impl Db {
         if !self.store.is_transactional() && self.vector_runtimes.has_active_runtimes() {
             self.reconcile_vector_runtimes_for_known_keys(logical_keys);
         }
-        if !self.store.is_transactional() && !self.mutation_tracker.has_watched_keys() {
+        if !self.store.is_transactional() && !self.mutation_tracker.has_observers() {
             return;
         }
 
@@ -478,7 +518,7 @@ impl Db {
         }
     }
 
-    pub(in crate::store::db) fn invalidate_counter_cache_for_committed_mutations(
+    pub(in crate::store::db) fn invalidate_caches_for_committed_mutations(
         &self,
         keys: &[(u16, Vec<u8>)],
         dbs: &[u16],
@@ -492,6 +532,7 @@ impl Db {
                 .counter_cache
                 .zset_ever_populated
                 .load(Ordering::Acquire)
+            && !self.list_meta_cache_maybe_non_empty.load(Ordering::Acquire)
         {
             return;
         }
@@ -499,9 +540,17 @@ impl Db {
             self.counter_cache.invalidate_key(db_index, key);
             self.counter_cache.invalidate_hash_key(db_index, key);
             self.counter_cache.invalidate_zset_key(db_index, key);
+            if db_index == self.db_index {
+                self.list_meta_cache.remove(key);
+            }
         }
         for &db_index in dbs {
             self.counter_cache.invalidate_db(db_index);
+            if db_index == self.db_index {
+                self.list_meta_cache.clear();
+                self.list_meta_cache_maybe_non_empty
+                    .store(false, Ordering::Release);
+            }
         }
     }
 

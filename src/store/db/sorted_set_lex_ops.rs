@@ -28,7 +28,7 @@ impl Db {
 
         if version == 0 {
             let mut entries = self
-                .zset_members_raw(key, version)
+                .zset_members_raw(key, version)?
                 .into_iter()
                 .filter_map(|(member, score)| {
                     let member = String::from_utf8(member).ok()?;
@@ -55,9 +55,10 @@ impl Db {
         };
         let raw_entries = if reverse {
             self.store
-                .scan_range_raw_limited_reverse(&lower, upper, scan_limit)
+                .scan_range_raw_limited_reverse(&lower, upper, scan_limit)?
         } else {
-            self.store.scan_range_raw_limited(&lower, upper, scan_limit)
+            self.store
+                .scan_range_raw_limited(&lower, upper, scan_limit)?
         };
         Ok(raw_entries
             .into_iter()
@@ -104,7 +105,7 @@ impl Db {
         if version == 0 {
             let mut entries = self
                 .zset_members_raw_async(key, version)
-                .await
+                .await?
                 .into_iter()
                 .filter_map(|(member, score)| {
                     let member = String::from_utf8(member).ok()?;
@@ -132,11 +133,11 @@ impl Db {
         let raw_entries = if reverse {
             self.store
                 .scan_range_raw_limited_reverse_async(&lower, upper, scan_limit)
-                .await
+                .await?
         } else {
             self.store
                 .scan_range_raw_limited_async(&lower, upper, scan_limit)
-                .await
+                .await?
         };
         Ok(raw_entries
             .into_iter()
@@ -166,7 +167,7 @@ impl Db {
         };
         if version == 0 {
             return Ok(self
-                .zset_members_raw(key, version)
+                .zset_members_raw(key, version)?
                 .into_iter()
                 .filter_map(|(member, _)| String::from_utf8(member).ok())
                 .filter(|member| zset_member_in_lex_range(member, min, max))
@@ -176,7 +177,7 @@ impl Db {
         else {
             return Ok(0);
         };
-        Ok(self.store.count_range_raw_keys(&lower, upper))
+        Ok(self.store.count_range_raw_keys(&lower, upper)?)
     }
 
     pub(crate) async fn zset_lex_count_async(
@@ -192,7 +193,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .zset_members_raw_async(key, version)
-                .await
+                .await?
                 .into_iter()
                 .filter_map(|(member, _)| String::from_utf8(member).ok())
                 .filter(|member| zset_member_in_lex_range(member, min, max))
@@ -202,7 +203,7 @@ impl Db {
         else {
             return Ok(0);
         };
-        Ok(self.store.count_range_raw_keys_async(&lower, upper).await)
+        Ok(self.store.count_range_raw_keys_async(&lower, upper).await?)
     }
 
     pub(crate) fn zset_remove_range_by_lex(
@@ -282,7 +283,7 @@ fn zset_lex_scan_bounds(
     version: u64,
     min: &crate::cmds::sorted_set::zrange::LexBound,
     max: &crate::cmds::sorted_set::zrange::LexBound,
-) -> Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+) -> Option<ZsetLexScanBounds> {
     use crate::cmds::sorted_set::zrange::LexBound;
 
     let prefix = zset_member_prefix(db_index, key, version);

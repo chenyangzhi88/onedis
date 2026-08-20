@@ -17,7 +17,7 @@ impl Db {
             value.as_bytes(),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -41,7 +41,7 @@ impl Db {
             value.as_bytes(),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -67,7 +67,7 @@ impl Db {
                 meta.tail,
             );
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             if batch.count() > 0 {
                 self.changes.fetch_add(1, Ordering::Relaxed);
             }
@@ -95,7 +95,7 @@ impl Db {
             &encode_list_meta(meta.expire_ms, meta.version, storage_start, storage_end + 1),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -121,7 +121,7 @@ impl Db {
                 meta.tail,
             );
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             if batch.count() > 0 {
                 self.changes.fetch_add(1, Ordering::Relaxed);
             }
@@ -149,7 +149,7 @@ impl Db {
             &encode_list_meta(meta.expire_ms, meta.version, storage_start, storage_end + 1),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         if batch.count() > 0 {
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -162,13 +162,13 @@ impl Db {
             Some(meta) => meta,
             None => return Ok(0),
         };
-        let items = self.list_range_raw_values(key, meta.version, meta.head, meta.tail - 1);
+        let items = self.list_range_raw_values(key, meta.version, meta.head, meta.tail - 1)?;
         let (removed, batch, updated) =
             self.build_list_remove_batch(key, meta, &items, count, element);
         if removed == 0 {
             return Ok(0);
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if let Some(updated) = updated {
             self.cache_list_meta_if_non_transactional(key, updated);
         } else {
@@ -216,7 +216,7 @@ impl Db {
                     matches.len() != limit
                 },
             )
-            .await;
+            .await?;
             matches.reverse();
         } else {
             self.list_range_raw_values_visit_chunked_async(
@@ -237,7 +237,7 @@ impl Db {
                     matches.len() != limit
                 },
             )
-            .await;
+            .await?;
         }
         let removed = matches.len();
         if removed == 0 {
@@ -256,7 +256,7 @@ impl Db {
             );
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
             self.write_existing_version_batch_if_not_empty_async(&batch)
-                .await;
+                .await?;
             self.remove_list_meta_cache_if_non_transactional(key);
             self.changes.fetch_add(1, Ordering::Relaxed);
             return Ok(removed);
@@ -288,7 +288,7 @@ impl Db {
                 meta.tail - 1,
                 |value| write_list_remove_survivor(&mut rewrite, value),
             )
-            .await;
+            .await?;
             batch = rewrite.batch;
             updated.tail -= removed as i64;
             debug_assert_eq!(rewrite.destination, updated.tail);
@@ -304,7 +304,7 @@ impl Db {
             let source_end = meta.head + last_removed as i64;
             let values = self
                 .list_range_raw_values_async(key, meta.version, meta.head, source_end)
-                .await;
+                .await?;
             let mut destination = source_end + 1;
             let mut removed_cursor = matches.len();
             for position in (0..=last_removed).rev() {
@@ -344,7 +344,7 @@ impl Db {
         ))
         .expect("write batch append invariant violated");
         self.write_existing_version_batch_if_not_empty_async(&batch)
-            .await;
+            .await?;
         self.cache_list_meta_if_non_transactional(key, updated);
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(removed)

@@ -6,20 +6,21 @@ impl Db {
         batch: &mut WriteBatch,
         source_prefix: Vec<u8>,
         target_prefix: Vec<u8>,
-    ) {
-        for (source_key_bytes, value) in store.scan_prefix_raw(&source_prefix) {
+    ) -> Result<(), Error> {
+        for (source_key_bytes, value) in store.scan_prefix_raw(&source_prefix)? {
             if let Some(suffix) = source_key_bytes.strip_prefix(source_prefix.as_slice()) {
                 let mut new_key = target_prefix.clone();
                 new_key.extend_from_slice(suffix);
                 (batch.put(&new_key, &value)).expect("write batch append invariant violated");
             }
         }
+        Ok(())
     }
 
     pub(in crate::store::db) fn copy_structure_between_dbs_to_batch(
         batch: &mut WriteBatch,
         context: StructureCopyContext<'_>,
-    ) {
+    ) -> Result<(), Error> {
         let StructureCopyContext {
             source_store,
             target_store,
@@ -37,20 +38,20 @@ impl Db {
             version_counter,
         } = context;
         let Some(header) = decode_meta_header(raw) else {
-            return;
+            return Ok(());
         };
         let target_version = Self::next_version_for_store(target_store, version_counter);
 
         if is_packed_hash_raw(raw) {
             (batch.put(&main_key(target_db_index, target_key), raw))
                 .expect("write batch append invariant violated");
-            return;
+            return Ok(());
         }
 
         if is_packed_list_raw(raw) {
             (batch.put(&main_key(target_db_index, target_key), raw))
                 .expect("write batch append invariant violated");
-            return;
+            return Ok(());
         }
 
         if let Some(meta) = decode_list_meta(raw) {
@@ -64,14 +65,14 @@ impl Db {
                 batch,
                 list_item_prefix(source_db_index, source_key, meta.version),
                 list_item_prefix(target_db_index, target_key, target_version),
-            );
-            return;
+            )?;
+            return Ok(());
         }
 
         if is_packed_stream_raw(raw) {
             (batch.put(&main_key(target_db_index, target_key), raw))
                 .expect("write batch append invariant violated");
-            return;
+            return Ok(());
         }
 
         if let Some(meta) = decode_stream_meta(raw) {
@@ -106,9 +107,9 @@ impl Db {
                     batch,
                     source_ns,
                     target_ns,
-                );
+                )?;
             }
-            return;
+            return Ok(());
         }
 
         match header.type_tag {
@@ -123,19 +124,19 @@ impl Db {
                     batch,
                     hash_field_prefix(source_db_index, source_key, header.version),
                     hash_field_prefix(target_db_index, target_key, target_version),
-                );
+                )?;
                 Self::copy_prefixed_namespace_to_batch_sync(
                     source_store,
                     batch,
                     hash_field_expire_prefix(source_db_index, source_key, header.version),
                     hash_field_expire_prefix(target_db_index, target_key, target_version),
-                );
+                )?;
             }
             TYPE_SORTED_SET => {
                 if is_packed_zset_raw(raw) {
                     (batch.put(&main_key(target_db_index, target_key), raw))
                         .expect("write batch append invariant violated");
-                    return;
+                    return Ok(());
                 }
                 (batch.put(
                     &main_key(target_db_index, target_key),
@@ -147,22 +148,22 @@ impl Db {
                     batch,
                     zset_member_prefix(source_db_index, source_key, header.version),
                     zset_member_prefix(target_db_index, target_key, target_version),
-                );
+                )?;
                 Self::copy_prefixed_namespace_to_batch_sync(
                     source_store,
                     batch,
                     zset_rank_prefix(source_db_index, source_key, header.version),
                     zset_rank_prefix(target_db_index, target_key, target_version),
-                );
+                )?;
             }
             TYPE_SET => {
                 let Some(meta) = decode_set_meta(raw) else {
-                    return;
+                    return Ok(());
                 };
                 if meta.packed {
                     (batch.put(&main_key(target_db_index, target_key), raw))
                         .expect("write batch append invariant violated");
-                    return;
+                    return Ok(());
                 }
                 (batch.put(
                     &main_key(target_db_index, target_key),
@@ -174,13 +175,13 @@ impl Db {
                     batch,
                     set_member_prefix(source_db_index, source_key, meta.version),
                     set_member_prefix(target_db_index, target_key, target_version),
-                );
+                )?;
             }
             TYPE_JSON => {
                 if is_packed_json_raw(raw) {
                     (batch.put(&main_key(target_db_index, target_key), raw))
                         .expect("write batch append invariant violated");
-                    return;
+                    return Ok(());
                 }
                 (batch.put(
                     &main_key(target_db_index, target_key),
@@ -192,13 +193,13 @@ impl Db {
                     batch,
                     json_node_prefix(source_db_index, source_key, header.version),
                     json_node_prefix(target_db_index, target_key, target_version),
-                );
+                )?;
             }
             TYPE_LIST => {
                 if is_packed_list_raw(raw) {
                     (batch.put(&main_key(target_db_index, target_key), raw))
                         .expect("write batch append invariant violated");
-                    return;
+                    return Ok(());
                 }
                 (batch.put(
                     &main_key(target_db_index, target_key),
@@ -210,7 +211,7 @@ impl Db {
                     batch,
                     list_item_prefix(source_db_index, source_key, header.version),
                     list_item_prefix(target_db_index, target_key, target_version),
-                );
+                )?;
             }
             TYPE_STREAM => {
                 (batch.put(
@@ -241,7 +242,7 @@ impl Db {
                         batch,
                         source_prefix,
                         target_prefix,
-                    );
+                    )?;
                 }
             }
             _ => {
@@ -252,5 +253,6 @@ impl Db {
                 .expect("write batch append invariant violated");
             }
         }
+        Ok(())
     }
 }

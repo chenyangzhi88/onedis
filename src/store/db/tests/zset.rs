@@ -165,7 +165,7 @@ async fn ordered_zset_pop_pipeline_batch_preserves_both_ends_and_empty_replies()
     assert!(matches!(&replies[2], Ok(entries) if entries == &vec![("b".to_string(), 2.0)]));
     assert!(matches!(&replies[3], Ok(entries) if entries.is_empty()));
     assert!(matches!(&replies[4], Ok(entries) if entries.is_empty()));
-    assert!(!db.exists_readonly("batch-pop"));
+    assert!(!db.exists_readonly("batch-pop").unwrap());
 }
 
 #[tokio::test]
@@ -203,9 +203,17 @@ async fn zset_card_cache_invalidates_on_member_mutations_and_score_ranges_are_bo
         vec![("one".to_string(), 1.0), ("two".to_string(), 2.0)]
     );
     assert_eq!(
-        db.zset_range_by_score_window_async("bounded", 0.0, true, 3.0, false, true, Some((1, 2)))
-            .await
-            .unwrap(),
+        db.zset_range_by_score_window_async(ZsetScoreWindow {
+            key: "bounded",
+            min: 0.0,
+            min_inclusive: true,
+            max: 3.0,
+            max_inclusive: false,
+            reverse: true,
+            limit: Some((1, 2)),
+        })
+        .await
+        .unwrap(),
         vec![("one".to_string(), 1.0), ("positive-zero".to_string(), 0.0)]
     );
 
@@ -229,14 +237,14 @@ async fn zset_card_cache_invalidates_on_member_mutations_and_score_ranges_are_bo
             .unwrap(),
         1
     );
-    assert!(db.exists_readonly("remove-last"));
+    assert!(db.exists_readonly("remove-last").unwrap());
     assert_eq!(
         db.zset_remove_async("remove-last", &["b".to_string()])
             .await
             .unwrap(),
         1
     );
-    assert!(!db.exists_readonly("remove-last"));
+    assert!(!db.exists_readonly("remove-last").unwrap());
 }
 
 #[tokio::test]
@@ -595,7 +603,7 @@ async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
         db.zset_store_entries("stored-empty", Vec::new()).unwrap(),
         0
     );
-    assert!(!db.exists("stored-empty"));
+    assert!(!db.exists("stored-empty").unwrap());
     assert_eq!(
         db.zset_store_entries(
             "stored",
@@ -610,7 +618,7 @@ async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
             .unwrap(),
         0
     );
-    assert!(!db.exists("stored"));
+    assert!(!db.exists("stored").unwrap());
     assert_eq!(
         db.zset_store_entries_async(
             "stored",
@@ -634,7 +642,7 @@ async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
             .unwrap(),
         2
     );
-    assert!(!db.exists("leaders"));
+    assert!(!db.exists("leaders").unwrap());
     assert_eq!(
         db.zset_remove_async("leaders", &["missing".to_string()])
             .await
@@ -646,7 +654,7 @@ async fn zset_async_rank_range_store_remove_and_error_paths_cover_edges() {
         Vec::<(String, f64)>::new()
     );
 
-    db.insert_string_ref("plain", "value");
+    db.insert_string_ref("plain", "value").unwrap();
     assert!(
         db.zset_add_async("plain", &[(1.0, "x".to_string())])
             .await
@@ -713,6 +721,7 @@ async fn concurrent_zset_writes_preserve_members_and_increments() {
     assert_eq!(
         db.zset_rank_entries_raw_async("concurrent-score", version)
             .await
+            .unwrap()
             .len(),
         1
     );
@@ -746,12 +755,14 @@ async fn concurrent_same_member_zadd_keeps_exactly_one_rank_entry() {
     assert_eq!(
         db.zset_members_raw_async("same-member", version)
             .await
+            .unwrap()
             .len(),
         1
     );
     assert_eq!(
         db.zset_rank_entries_raw_async("same-member", version)
             .await
+            .unwrap()
             .len(),
         1
     );

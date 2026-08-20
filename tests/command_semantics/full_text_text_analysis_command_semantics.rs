@@ -36,10 +36,14 @@ fn command(args: &[&str]) -> Command {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
 
 fn apply_err(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     match Command::parse_from_frame(Frame::Array(
         args.iter()
             .map(|arg| Frame::bulk_string((*arg).to_string()))

@@ -21,7 +21,7 @@ impl ExpireTime {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let expire_ms = db.expire_time_millis_readonly(&self.key);
+        let expire_ms = db.expire_time_millis_readonly(&self.key)?;
         let value = if expire_ms > 0 {
             expire_ms / 1000
         } else {
@@ -31,7 +31,7 @@ impl ExpireTime {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let expire_ms = db.expire_time_millis_readonly_async(&self.key).await;
+        let expire_ms = db.expire_time_millis_readonly_async(&self.key).await?;
         let value = if expire_ms > 0 {
             expire_ms / 1000
         } else {

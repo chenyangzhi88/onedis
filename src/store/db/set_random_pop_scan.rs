@@ -109,7 +109,7 @@ impl Db {
             &prefix,
             prefix_exclusive_upper_bound(&prefix),
             ordinals,
-        );
+        )?;
         decode_selected_set_members(&prefix, raw_keys, ordinals.len())
     }
 
@@ -127,7 +127,7 @@ impl Db {
                 prefix_exclusive_upper_bound(&prefix),
                 ordinals,
             )
-            .await;
+            .await?;
         decode_selected_set_members(&prefix, raw_keys, ordinals.len())
     }
 
@@ -167,7 +167,7 @@ impl Db {
         }
         let (picks, unique) = random_member_ordinals(meta.len, count);
         if meta.packed {
-            let members = self.set_members_raw(key, meta.version);
+            let members = self.set_members_raw(key, meta.version)?;
             let by_ordinal = unique
                 .into_iter()
                 .filter_map(|ordinal| {
@@ -218,7 +218,7 @@ impl Db {
         }
         let (picks, unique) = random_member_ordinals(meta.len, count);
         if meta.packed {
-            let members = self.set_members_raw_async(key, meta.version).await;
+            let members = self.set_members_raw_async(key, meta.version).await?;
             let by_ordinal = unique
                 .into_iter()
                 .filter_map(|ordinal| {
@@ -274,7 +274,7 @@ impl Db {
 
         if meta.packed {
             for _ in 0..64 {
-                let observed = self.store.get_raw_observed(&self.mk(key));
+                let observed = self.store.get_raw_observed(&self.mk(key))?;
                 let Some(raw) = observed.value() else {
                     return Ok(Vec::new());
                 };
@@ -328,7 +328,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(popped.into_iter().map(|selected| selected.member).collect())
@@ -350,7 +350,7 @@ impl Db {
 
         if meta.packed {
             for _ in 0..64 {
-                let observed = self.store.get_raw_observed_async(&self.mk(key)).await;
+                let observed = self.store.get_raw_observed_async(&self.mk(key)).await?;
                 let Some(raw) = observed.value() else {
                     return Ok(Vec::new());
                 };
@@ -409,7 +409,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(popped.into_iter().map(|selected| selected.member).collect())
@@ -431,7 +431,7 @@ impl Db {
             let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
             let mut state = SetScanState::new(cursor, count);
             for member in self
-                .set_members_raw(key, meta.version)
+                .set_members_raw(key, meta.version)?
                 .into_iter()
                 .skip(offset)
             {
@@ -444,9 +444,9 @@ impl Db {
         let prefix = set_member_prefix(self.db_index, key, meta.version);
         let upper = prefix_exclusive_upper_bound(&prefix);
         let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
-        let Some(lower) = self
-            .store
-            .scan_range_raw_start_at_offset(&prefix, upper.clone(), offset)
+        let Some(lower) =
+            self.store
+                .scan_range_raw_start_at_offset(&prefix, upper.clone(), offset)?
         else {
             return Ok((0, Vec::new()));
         };
@@ -458,7 +458,7 @@ impl Db {
                     return true;
                 };
                 state.visit(member, matcher.as_ref())
-            });
+            })?;
         state.finish()
     }
 
@@ -478,7 +478,7 @@ impl Db {
             let mut state = SetScanState::new(cursor, count);
             for member in self
                 .set_members_raw_async(key, meta.version)
-                .await
+                .await?
                 .into_iter()
                 .skip(offset)
             {
@@ -494,7 +494,7 @@ impl Db {
         let Some(lower) = self
             .store
             .scan_range_raw_start_at_offset_async(&prefix, upper.clone(), offset)
-            .await
+            .await?
         else {
             return Ok((0, Vec::new()));
         };
@@ -507,7 +507,7 @@ impl Db {
                 };
                 state.visit(member, matcher.as_ref())
             })
-            .await;
+            .await?;
         state.finish()
     }
 }

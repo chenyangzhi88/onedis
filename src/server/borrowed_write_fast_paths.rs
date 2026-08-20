@@ -56,11 +56,21 @@ impl Handler {
             .iter()
             .map(|(_, keys)| keys.clone())
             .collect::<Vec<_>>();
-        let replies = self
+        let replies = match self
             .session
             .get_db()
             .delete_key_commands_batch_async(&keys)
-            .await;
+            .await
+        {
+            Ok(replies) => replies,
+            Err(error) => {
+                let mut out = Vec::with_capacity(commands.len() * 32);
+                for _ in commands {
+                    append_error(&mut out, &error.to_string());
+                }
+                return out;
+            }
+        };
         let mut out = Vec::with_capacity(replies.len() * 4);
         for reply in replies {
             append_integer(&mut out, reply as i64);
@@ -297,11 +307,16 @@ impl Handler {
             };
             entries.push((key, args[2]));
         }
-        if !entries.is_empty() {
-            db.insert_string_bytes_refs_async(&entries).await;
-        }
+        let result = if entries.is_empty() {
+            Ok(())
+        } else {
+            db.insert_string_bytes_refs_async(&entries).await
+        };
         for _ in entries {
-            out.extend_from_slice(b"+OK\r\n");
+            match &result {
+                Ok(()) => out.extend_from_slice(b"+OK\r\n"),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
         }
         out
     }
@@ -311,12 +326,17 @@ impl Handler {
         commands: Vec<(&'a [u8], &'a [u8])>,
     ) -> Vec<u8> {
         let db = self.session.get_db().clone();
-        if !commands.is_empty() {
-            db.insert_string_byte_keys_async(&commands).await;
-        }
+        let result = if commands.is_empty() {
+            Ok(())
+        } else {
+            db.insert_string_byte_keys_async(&commands).await
+        };
         let mut out = Vec::with_capacity(commands.len() * 5);
         for _ in commands {
-            out.extend_from_slice(b"+OK\r\n");
+            match &result {
+                Ok(()) => out.extend_from_slice(b"+OK\r\n"),
+                Err(error) => append_error(&mut out, &error.to_string()),
+            }
         }
         out
     }

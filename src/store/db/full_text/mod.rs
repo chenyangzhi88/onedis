@@ -79,6 +79,7 @@ use query_geo_validation::*;
 use query_helpers_validation::*;
 use query_params::*;
 use query_parser_core::*;
+use refresh_apply_pending::*;
 use refresh_backfill_progress::*;
 use runtime_types::*;
 use search_bound_eval::*;

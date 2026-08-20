@@ -39,10 +39,14 @@ fn command(args: &[&str]) -> Command {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
 
 fn apply_owned(db: &Db, args: Vec<String>) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     apply(db, &refs)
 }

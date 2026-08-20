@@ -5,7 +5,7 @@ use crate::{
         stream_pending_entries_frame, stream_pending_summary_frame, text_arg, validate_count,
     },
     frame::Frame,
-    store::db::{Db, StreamId},
+    store::db::{Db, StreamId, StreamPendingRange},
 };
 
 pub enum Xpending {
@@ -94,15 +94,15 @@ impl Xpending {
                 consumer,
                 min_idle_ms,
             } => {
-                match db.stream_pending_range_filtered(
-                    &key,
-                    &group,
+                match db.stream_pending_range_filtered(StreamPendingRange {
+                    key: &key,
+                    group: &group,
                     start,
                     end,
                     count,
-                    consumer.as_deref(),
+                    consumer: consumer.as_deref(),
                     min_idle_ms,
-                ) {
+                }) {
                     Ok(entries) => stream_pending_entries_frame(entries),
                     Err(err) => Ok(Frame::Error(err.to_string())),
                 }
@@ -128,15 +128,15 @@ impl Xpending {
                 min_idle_ms,
             } => {
                 match db
-                    .stream_pending_range_filtered_async(
-                        &key,
-                        &group,
+                    .stream_pending_range_filtered_async(StreamPendingRange {
+                        key: &key,
+                        group: &group,
                         start,
                         end,
                         count,
-                        consumer.as_deref(),
+                        consumer: consumer.as_deref(),
                         min_idle_ms,
-                    )
+                    })
                     .await
                 {
                     Ok(entries) => stream_pending_entries_frame(entries),

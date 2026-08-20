@@ -244,7 +244,7 @@ pub fn handle_command(db: &Db, command: Command) -> Result<Frame, Error> {
             Ok(Frame::Integer(if moved { 1 } else { 0 }))
         }
         Command::Flushall(_) => {
-            db.clear();
+            db.clear()?;
             Ok(Frame::Ok)
         }
         _ => Err(Error::msg("Unknown command")),

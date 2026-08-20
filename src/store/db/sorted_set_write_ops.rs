@@ -39,10 +39,10 @@ impl Db {
     ) -> Result<Option<Vec<Result<usize, Error>>>, Error> {
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
             for key in keys {
-                self.expire_if_needed_async(key).await;
+                self.expire_if_needed_async(key).await?;
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await?;
             let mut states = Vec::with_capacity(keys.len());
             let mut has_split = false;
             for observed in &observations {
@@ -152,10 +152,10 @@ impl Db {
     ) -> Result<Option<Vec<Result<f64, Error>>>, Error> {
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
             for key in keys {
-                self.expire_if_needed_async(key).await;
+                self.expire_if_needed_async(key).await?;
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await?;
             let mut states = Vec::with_capacity(keys.len());
             let mut has_split = false;
             for observed in &observations {
@@ -254,8 +254,8 @@ impl Db {
     ) -> Result<Option<ZsetAddOutcome>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed(key);
-            let observed = self.store.get_raw_observed(&key_bytes);
+            self.expire_if_needed(key)?;
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let (expire_ms, mut entries) = match observed.value() {
                 None => (0, PackedZsetEntries::new()),
                 Some(raw) => {
@@ -340,8 +340,8 @@ impl Db {
     ) -> Result<Option<ZsetAddOutcome>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let (expire_ms, mut entries) = match observed.value() {
                 None => (0, PackedZsetEntries::new()),
                 Some(raw) => {
@@ -428,8 +428,8 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed(key);
-            let observed = self.store.get_raw_observed(&key_bytes);
+            self.expire_if_needed(key)?;
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(0));
             };
@@ -477,8 +477,8 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(0));
             };
@@ -585,7 +585,11 @@ impl Db {
 
         for _ in 0..64 {
             let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let meta_observations = self.store.multi_get_raw_observed_async(&meta_keys).await;
+            let meta_observations = match self.store.multi_get_raw_observed_async(&meta_keys).await
+            {
+                Ok(observations) => observations,
+                Err(error) => return storage_batch_error(commands.len(), error),
+            };
             let now = now_ms();
             let mut states = Vec::with_capacity(keys.len());
             for observed in &meta_observations {
@@ -627,8 +631,10 @@ impl Db {
                     continue;
                 };
                 for (_, member) in members {
-                    if !pair_positions.contains_key(&(key_position, *member)) {
-                        pair_positions.insert((key_position, *member), pairs.len());
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        pair_positions.entry((key_position, *member))
+                    {
+                        entry.insert(pairs.len());
                         pairs.push((
                             key_position,
                             *member,
@@ -641,7 +647,11 @@ impl Db {
                 .iter()
                 .map(|(_, _, key)| key.clone())
                 .collect::<Vec<_>>();
-            let member_observations = self.store.multi_get_raw_observed_async(&member_keys).await;
+            let member_observations =
+                match self.store.multi_get_raw_observed_async(&member_keys).await {
+                    Ok(observations) => observations,
+                    Err(error) => return storage_batch_error(commands.len(), error),
+                };
             let initial_scores = member_observations
                 .iter()
                 .map(|observed| {
@@ -977,7 +987,11 @@ impl Db {
 
         for _ in 0..64 {
             let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let meta_observations = self.store.multi_get_raw_observed_async(&meta_keys).await;
+            let meta_observations = match self.store.multi_get_raw_observed_async(&meta_keys).await
+            {
+                Ok(observations) => observations,
+                Err(error) => return storage_batch_error(commands.len(), error),
+            };
             let now = now_ms();
             let mut states = Vec::with_capacity(keys.len());
             for observed in &meta_observations {
@@ -1018,8 +1032,10 @@ impl Db {
                 let ZsetIncrementBatchKeyState::Valid { version, .. } = states[key_position] else {
                     continue;
                 };
-                if !pair_positions.contains_key(&(key_position, *member)) {
-                    pair_positions.insert((key_position, *member), pairs.len());
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    pair_positions.entry((key_position, *member))
+                {
+                    entry.insert(pairs.len());
                     pairs.push((
                         key_position,
                         *member,
@@ -1031,7 +1047,11 @@ impl Db {
                 .iter()
                 .map(|(_, _, key)| key.clone())
                 .collect::<Vec<_>>();
-            let member_observations = self.store.multi_get_raw_observed_async(&member_keys).await;
+            let member_observations =
+                match self.store.multi_get_raw_observed_async(&member_keys).await {
+                    Ok(observations) => observations,
+                    Err(error) => return storage_batch_error(commands.len(), error),
+                };
             let initial_scores = member_observations
                 .iter()
                 .map(|observed| {
@@ -1182,7 +1202,7 @@ impl Db {
             let member_key = zset_member_key(self.db_index, key, version, member);
             let previous_score = self
                 .store
-                .get_raw(&member_key)
+                .get_raw(&member_key)?
                 .and_then(|value| decode_zset_score(&value));
 
             if previous_score.is_none() {
@@ -1208,7 +1228,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(added)
@@ -1250,7 +1270,7 @@ impl Db {
             let member_key = zset_member_key(self.db_index, key, version, member);
             let previous_score = self
                 .store
-                .get_raw(&member_key)
+                .get_raw(&member_key)?
                 .and_then(|value| decode_zset_score(&value));
             let score = if options.increment {
                 let next = previous_score.unwrap_or(0.0) + input_score;
@@ -1297,7 +1317,7 @@ impl Db {
                 (batch.put(&self.mk(key), &encode_zset_meta(0, version)))
                     .expect("write batch append invariant violated");
             }
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(outcome)
@@ -1347,7 +1367,7 @@ impl Db {
         options: ZsetAddOptions,
     ) -> Result<ZsetAddAttempt, Error> {
         let key_bytes = self.mk(key);
-        let raw_meta = self.store.get_raw_async(&key_bytes).await;
+        let raw_meta = self.store.get_raw_async(&key_bytes).await?;
         let mut expired_at = None;
         let exists = match raw_meta.as_deref() {
             Some(raw) => {
@@ -1370,7 +1390,7 @@ impl Db {
         // still observes the main key: if another shared creator won between the plain read and
         // this observation, retry against its version instead of overwriting it.
         let observed_meta = if exists.is_none() {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             if observed.value().map(Bytes::as_ref) != raw_meta.as_deref() {
                 return Ok(ZsetAddAttempt::Conflict);
             }
@@ -1396,7 +1416,7 @@ impl Db {
         let previous_observed = if exists.is_some() {
             self.store
                 .multi_get_raw_observed_async(&member_keys)
-                .await
+                .await?
                 .into_iter()
                 .map(Some)
                 .collect::<Vec<_>>()
@@ -1522,7 +1542,7 @@ impl Db {
             let previous_score = self
                 .store
                 .get_raw_async(&member_key)
-                .await
+                .await?
                 .and_then(|value| decode_zset_score(&value));
 
             if previous_score.is_none() {
@@ -1548,7 +1568,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(added)
@@ -1574,7 +1594,7 @@ impl Db {
             let member_key = zset_member_key(self.db_index, key, version, member);
             let Some(score) = self
                 .store
-                .get_raw(&member_key)
+                .get_raw(&member_key)?
                 .and_then(|value| decode_zset_score(&value))
             else {
                 continue;
@@ -1594,7 +1614,7 @@ impl Db {
                     &prefix,
                     prefix_exclusive_upper_bound(&prefix),
                     removed.saturating_add(1),
-                )
+                )?
                 .len();
             if existing_count == removed {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, expire_ms);
@@ -1602,7 +1622,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(removed)
@@ -1637,7 +1657,7 @@ impl Db {
             .iter()
             .map(|member| zset_member_key(self.db_index, key, version, member))
             .collect::<Vec<_>>();
-        let old_values = self.store.multi_get_raw_async(&member_keys).await;
+        let old_values = self.store.multi_get_raw_async(&member_keys).await?;
         for ((member, member_key), old_value) in
             unique_members.into_iter().zip(member_keys).zip(old_values)
         {
@@ -1660,7 +1680,7 @@ impl Db {
                     prefix_exclusive_upper_bound(&prefix),
                     removed.saturating_add(1),
                 )
-                .await
+                .await?
                 .len();
             if existing_count == removed {
                 self.delete_main_key_with_ttl_to_batch(&mut batch, key, expire_ms);
@@ -1668,7 +1688,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(removed)

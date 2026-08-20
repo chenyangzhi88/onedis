@@ -8,7 +8,7 @@ impl Db {
         if threshold == 0 {
             return Ok(());
         }
-        if self.fulltext_pending_outbox_count(index) <= threshold as u64 {
+        if self.fulltext_pending_outbox_count(index)? <= threshold as u64 {
             return Ok(());
         }
         let prefix = fulltext_outbox_prefix(self.db_index, index);
@@ -16,7 +16,7 @@ impl Db {
             &prefix,
             prefix_exclusive_upper_bound(&prefix),
             1_024,
-        );
+        )?;
         let mut latest_by_key: HashMap<String, (u64, Vec<u8>)> = HashMap::new();
         let mut stale = Vec::new();
         for (outbox_key, raw) in entries {
@@ -54,7 +54,7 @@ impl Db {
                 .map_err(|error| Error::msg(error.to_string()))?;
         }
         let removed = batch.count() as u64;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.fulltext_runtimes
             .remove_outbox_pending(self.db_index, index, removed);
         Ok(())

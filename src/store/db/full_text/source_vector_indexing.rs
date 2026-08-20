@@ -69,7 +69,8 @@ impl Db {
                 self.fulltext_runtimes
                     .add_outbox_pending(self.db_index, &index, count);
             } else {
-                self.fulltext_pending_outbox_count(&index);
+                self.fulltext_runtimes
+                    .set_outbox_pending(self.db_index, &index, count);
             }
             self.fulltext_runtimes
                 .note_outbox_mutations(self.db_index, &index, count as usize);
@@ -84,7 +85,7 @@ impl Db {
         for (index, _) in self.fulltext_matching_metas_for_source(key, source_type)? {
             let Some(seq) = self
                 .store
-                .get_raw(&fulltext_outbox_latest_key(self.db_index, &index))
+                .get_raw(&fulltext_outbox_latest_key(self.db_index, &index))?
                 .and_then(|raw| raw.try_into().ok())
                 .map(u64::from_be_bytes)
             else {
@@ -106,7 +107,8 @@ impl Db {
                 self.fulltext_runtimes
                     .add_outbox_pending(self.db_index, &index, 1);
             } else {
-                self.fulltext_pending_outbox_count(&index);
+                self.fulltext_runtimes
+                    .set_outbox_pending(self.db_index, &index, 1);
             }
             self.fulltext_runtimes
                 .note_outbox_mutations(self.db_index, &index, 1);
@@ -130,7 +132,7 @@ impl Db {
             .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
         if self
             .store
-            .get_raw(&fulltext_meta_key(self.db_index, alias))
+            .get_raw(&fulltext_meta_key(self.db_index, alias))?
             .is_some()
         {
             return Err(Error::msg("ERR alias conflicts with index name"));
@@ -221,17 +223,18 @@ impl Db {
         Ok(Some(self.fulltext_json_fields_from_root(&root, meta)?))
     }
 
-    pub(super) fn fulltext_source_expire_ms(&self, key: &str) -> u64 {
-        self.store
-            .get_raw(&self.mk(key))
+    pub(super) fn fulltext_source_expire_ms(&self, key: &str) -> Result<u64, Error> {
+        Ok(self
+            .store
+            .get_raw(&self.mk(key))?
             .as_deref()
             .and_then(decode_meta_header)
-            .map_or(0, |header| header.expire_ms)
+            .map_or(0, |header| header.expire_ms))
     }
 
     pub(super) fn fulltext_json_root(&self, key: &str) -> Result<Option<serde_json::Value>, Error> {
-        self.expire_if_needed(key);
-        if self.store.get_raw(&self.mk(key)).is_none() {
+        self.expire_if_needed(key)?;
+        if self.store.get_raw(&self.mk(key))?.is_none() {
             return Ok(None);
         }
         let Some(raw) = self.json_get(key, "$")? else {

@@ -31,6 +31,17 @@ struct HnswSearchQueueItem {
     distance: f32,
 }
 
+struct HnswIndexParts {
+    dim: u32,
+    distance: VectorDistance,
+    m: u32,
+    ef_construction: u32,
+    quantization: VectorQuantization,
+    entry_point: u32,
+    max_layer: u32,
+    nodes: Vec<(String, u64, HnswSnapshotVector, Vec<Vec<u32>>)>,
+}
+
 impl PartialEq for HnswSearchQueueItem {
     fn eq(&self, other: &Self) -> bool {
         self.node == other.node && self.distance.to_bits() == other.distance.to_bits()
@@ -627,16 +638,16 @@ impl HnswGraph {
                     .unwrap_or(0)
             });
         let max_layer = nodes[entry_point as usize].3.len().saturating_sub(1) as u32;
-        Ok(VectorHnswIndexBlob::from_node_parts(
-            self.dim as u32,
-            self.distance,
-            self.m as u32,
-            self.ef_construction as u32,
-            self.quantization,
+        Ok(VectorHnswIndexBlob::from_node_parts(HnswIndexParts {
+            dim: self.dim as u32,
+            distance: self.distance,
+            m: self.m as u32,
+            ef_construction: self.ef_construction as u32,
+            quantization: self.quantization,
             entry_point,
             max_layer,
             nodes,
-        ))
+        }))
     }
 
 }
@@ -708,35 +719,35 @@ impl VectorHnswIndexBlob {
                     .unwrap_or(0)
             }) as u32;
         let max_layer = nodes[entry_point as usize].3.len().saturating_sub(1) as u32;
-        let index = Self::from_node_parts(
-            meta.dim,
-            meta.distance,
-            meta.m,
-            meta.ef_construction,
-            meta.quantization,
+        let index = Self::from_node_parts(HnswIndexParts {
+            dim: meta.dim,
+            distance: meta.distance,
+            m: meta.m,
+            ef_construction: meta.ef_construction,
+            quantization: meta.quantization,
             entry_point,
             max_layer,
             nodes,
-        );
+        });
         index.validate()?;
         Ok(index)
     }
 
     fn from_legacy(legacy: LegacyVectorHnswIndexBlobV1) -> Self {
-        Self::from_node_parts(
-            legacy.dim,
-            legacy.distance,
-            legacy.m,
-            legacy.ef_construction,
-            legacy.quantization,
-            legacy.entry_point,
-            legacy.max_layer,
-            legacy
+        Self::from_node_parts(HnswIndexParts {
+            dim: legacy.dim,
+            distance: legacy.distance,
+            m: legacy.m,
+            ef_construction: legacy.ef_construction,
+            quantization: legacy.quantization,
+            entry_point: legacy.entry_point,
+            max_layer: legacy.max_layer,
+            nodes: legacy
                 .nodes
                 .into_iter()
                 .map(|node| (node.id, node.doc_version, node.vector, node.layers))
                 .collect(),
-        )
+        })
     }
 
     fn from_legacy_v2(legacy: LegacyVectorHnswIndexBlobV2) -> Self {
@@ -766,16 +777,17 @@ impl VectorHnswIndexBlob {
         }
     }
 
-    fn from_node_parts(
-        dim: u32,
-        distance: VectorDistance,
-        m: u32,
-        ef_construction: u32,
-        quantization: VectorQuantization,
-        entry_point: u32,
-        max_layer: u32,
-        nodes: Vec<(String, u64, HnswSnapshotVector, Vec<Vec<u32>>)>,
-    ) -> Self {
+    fn from_node_parts(parts: HnswIndexParts) -> Self {
+        let HnswIndexParts {
+            dim,
+            distance,
+            m,
+            ef_construction,
+            quantization,
+            entry_point,
+            max_layer,
+            nodes,
+        } = parts;
         let mut ids = Vec::with_capacity(nodes.len());
         let mut doc_versions = Vec::with_capacity(nodes.len());
         let mut vectors = Vec::with_capacity(nodes.len());

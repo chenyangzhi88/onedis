@@ -12,8 +12,8 @@ impl Db {
     ) -> Result<Option<Vec<ZsetEntry>>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed(key);
-            let observed = self.store.get_raw_observed(&key_bytes);
+            self.expire_if_needed(key)?;
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(Vec::new()));
             };
@@ -73,8 +73,8 @@ impl Db {
     ) -> Result<Option<Vec<ZsetEntry>>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(Vec::new()));
             };
@@ -172,10 +172,15 @@ impl Db {
 
         for _ in 0..64 {
             for key in &keys {
-                self.expire_if_needed_async(key).await;
+                if let Err(error) = self.expire_if_needed_async(key).await {
+                    return storage_batch_error(commands.len(), error);
+                }
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = match self.store.multi_get_raw_observed_async(&raw_keys).await {
+                Ok(observations) => observations,
+                Err(error) => return storage_batch_error(commands.len(), error),
+            };
             let mut states = observations
                 .iter()
                 .map(|observed| ZsetPopBatchState::from_raw(observed.value().map(AsRef::as_ref)))
@@ -193,20 +198,28 @@ impl Db {
                 let min_limit = requested_min[position].saturating_add(1);
                 let max_limit = requested_max[position].saturating_add(1);
                 if requested_min[position] > 0 {
-                    for (rank_key, _) in self
+                    let rows = match self
                         .store
                         .scan_range_raw_limited_async(&prefix, upper.clone(), min_limit)
                         .await
                     {
+                        Ok(rows) => rows,
+                        Err(error) => return storage_batch_error(commands.len(), error),
+                    };
+                    for (rank_key, _) in rows {
                         state.insert_ranked(self, keys[position], version, rank_key);
                     }
                 }
                 if requested_max[position] > 0 {
-                    for (rank_key, _) in self
+                    let rows = match self
                         .store
                         .scan_range_raw_limited_reverse_async(&prefix, upper, max_limit)
                         .await
                     {
+                        Ok(rows) => rows,
+                        Err(error) => return storage_batch_error(commands.len(), error),
+                    };
+                    for (rank_key, _) in rows {
                         state.insert_ranked(self, keys[position], version, rank_key);
                     }
                 }
@@ -339,16 +352,16 @@ impl Db {
         let raw_entries = if min {
             self.store
                 .scan_range_raw_limited_async(&prefix, upper, scan_limit)
-                .await
+                .await?
         } else {
             self.store
                 .scan_range_raw_limited_reverse_async(&prefix, upper, scan_limit)
-                .await
+                .await?
         };
         let (entries, batch) =
             self.prepare_ranked_zset_removal(key, expire_ms, version, raw_entries, count)?;
         if !entries.is_empty() {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(entries)
@@ -374,15 +387,15 @@ impl Db {
         let scan_limit = count.saturating_add(1);
         let raw_entries = if min {
             self.store
-                .scan_range_raw_limited(&prefix, upper, scan_limit)
+                .scan_range_raw_limited(&prefix, upper, scan_limit)?
         } else {
             self.store
-                .scan_range_raw_limited_reverse(&prefix, upper, scan_limit)
+                .scan_range_raw_limited_reverse(&prefix, upper, scan_limit)?
         };
         let (entries, batch) =
             self.prepare_ranked_zset_removal(key, expire_ms, version, raw_entries, count)?;
         if !entries.is_empty() {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(entries)

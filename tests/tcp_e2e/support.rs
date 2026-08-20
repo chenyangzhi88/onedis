@@ -54,6 +54,7 @@ impl TestServer {
             .arg("20")
             .arg("--loglevel")
             .arg("error")
+            .arg("--disable-observability")
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .spawn()

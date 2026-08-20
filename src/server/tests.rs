@@ -18,17 +18,14 @@ use super::{
     append_null, append_simple_string, append_usize_decimal, borrowed_list_push_supported,
     borrowed_lrange_supported, borrowed_plain_set_supported, borrowed_read_supported, find_crlf,
     format_command_for_monitor, parse_borrowed_bitop_commands, parse_borrowed_key_delete_commands,
-    parse_borrowed_plain_hdel_commands,
-    parse_borrowed_key_expiration_mutations,
-    parse_borrowed_plain_hgetdel_commands,
-    parse_borrowed_plain_hset_commands, parse_borrowed_plain_pfadd_commands,
-    parse_borrowed_plain_list_pop_commands, parse_borrowed_plain_set_commands,
-    parse_borrowed_plain_xadd_commands, parse_borrowed_plain_xdel_commands,
-    parse_borrowed_plain_zset_add_commands,
-    parse_borrowed_plain_zset_pop_commands, parse_borrowed_zset_increment_commands,
-    parse_borrowed_resp_commands, parse_borrowed_root_json_set_commands,
-    parse_borrowed_string_mutations, parse_i64_ascii,
-    parse_borrowed_set_mutations,
+    parse_borrowed_key_expiration_mutations, parse_borrowed_plain_hdel_commands,
+    parse_borrowed_plain_hgetdel_commands, parse_borrowed_plain_hset_commands,
+    parse_borrowed_plain_list_pop_commands, parse_borrowed_plain_pfadd_commands,
+    parse_borrowed_plain_set_commands, parse_borrowed_plain_xadd_commands,
+    parse_borrowed_plain_xdel_commands, parse_borrowed_plain_zset_add_commands,
+    parse_borrowed_plain_zset_pop_commands, parse_borrowed_resp_commands,
+    parse_borrowed_root_json_set_commands, parse_borrowed_set_mutations,
+    parse_borrowed_string_mutations, parse_borrowed_zset_increment_commands, parse_i64_ascii,
     parse_u64_ascii, parse_usize_ascii,
 };
 
@@ -175,7 +172,8 @@ fn transaction_runtime_errors_are_returned_inline_and_other_writes_commit() {
     db.insert(
         "bad-number".to_string(),
         Structure::String("not-a-number".to_string()),
-    );
+    )
+    .unwrap();
     let txn_db = db.transactional_view().unwrap();
 
     let result = Handler::execute_transaction_commands(
@@ -194,11 +192,11 @@ fn transaction_runtime_errors_are_returned_inline_and_other_writes_commit() {
             if values.len() == 2 && matches!(&values[1], Frame::Error(message) if message.contains("integer"))
     ));
     assert!(matches!(
-        db.get("side-effect"),
+        db.get("side-effect").unwrap(),
         Some(Structure::String(value)) if value == "written"
     ));
     assert!(matches!(
-        db.get("bad-number"),
+        db.get("bad-number").unwrap(),
         Some(Structure::String(value)) if value == "not-a-number"
     ));
 }
@@ -236,7 +234,7 @@ fn transaction_success_commits_all_results() {
 
     assert!(matches!(result, Frame::Array(values) if values.len() == 2));
     assert!(matches!(
-        db.get("txn-key"),
+        db.get("txn-key").unwrap(),
         Some(Structure::String(value)) if value == "value"
     ));
 }
@@ -246,7 +244,6 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
     let blpop = command(&["blpop", "list", "0.5"]);
     assert!(Handler::is_blocking_list_command(&blpop));
     assert_eq!(Handler::blocking_list_timeout_secs(&blpop), 0.5);
-    assert!(Handler::is_list_mutating_command(&blpop));
 
     let brpop = command(&["brpop", "list", "1"]);
     assert!(Handler::is_blocking_list_command(&brpop));
@@ -266,7 +263,6 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
 
     let bzpopmin = command(&["bzpopmin", "z", "0.75"]);
     assert!(Handler::is_blocking_zset_command(&bzpopmin));
-    assert!(Handler::is_zset_mutating_command(&bzpopmin));
     assert_eq!(Handler::blocking_zset_timeout_secs(&bzpopmin), 0.75);
 
     let bzpopmax = command(&["bzpopmax", "z", "1.25"]);
@@ -279,9 +275,6 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
 
     let xread = command(&["xread", "block", "5", "streams", "s", "0-0"]);
     assert!(Handler::is_blocking_stream_command(&xread));
-    assert!(Handler::is_stream_mutating_command(&command(&[
-        "xadd", "s", "*", "f", "v"
-    ])));
     assert_eq!(Handler::blocking_stream_timeout_ms(&xread), Some(5));
     assert!(!Handler::is_blocking_stream_command(&command(&[
         "xread", "streams", "s", "0-0"
@@ -337,7 +330,9 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
             args[0]
         );
     }
-    assert!(Handler::can_apply_direct(&command(&["hsetnx", "h", "f", "v"])));
+    assert!(Handler::can_apply_direct(&command(&[
+        "hsetnx", "h", "f", "v"
+    ])));
     assert!(Handler::can_apply_direct(&command(&["hget", "h", "f"])));
     assert!(Handler::can_apply_direct(&command(&[
         "hsetex", "h", "px", "1000", "fields", "1", "f", "v"
@@ -375,7 +370,14 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
         "km",
     ])));
     assert!(!Handler::can_apply_direct(&command(&[
-        "georadius", "g", "13", "38", "1", "km", "store", "dst"
+        "georadius",
+        "g",
+        "13",
+        "38",
+        "1",
+        "km",
+        "store",
+        "dst"
     ])));
     assert!(Handler::can_apply_on_worker(&command(&[
         "zrange", "z", "0", "-1"
@@ -384,17 +386,6 @@ fn server_command_classifiers_cover_blocking_mutating_worker_and_direct_paths() 
     assert!(!Handler::can_apply_on_worker(&command(&["auth", "pw"])));
     assert!(!Handler::can_apply_direct(&command(&["multi"])));
     assert!(!Handler::can_apply_direct(&command(&["unknown-command"])));
-
-    assert!(!Handler::is_list_mutating_command(&command(&["get", "k"])));
-    assert!(Handler::is_list_mutating_command(&command(&[
-        "lpush", "l", "v"
-    ])));
-    assert!(Handler::is_zset_mutating_command(&command(&[
-        "zadd", "z", "1", "m"
-    ])));
-    assert!(!Handler::is_zset_mutating_command(&command(&[
-        "zcard", "z"
-    ])));
 }
 
 #[test]
@@ -438,14 +429,14 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
     let hset = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$1\r\nf\r\n$1\r\nv\r\n";
     assert_eq!(
         parse_borrowed_plain_hset_commands(hset).unwrap(),
-        vec![(
-            b"h".as_slice(),
-            vec![(b"f".as_slice(), b"v".as_slice())]
-        )]
+        vec![(b"h".as_slice(), vec![(b"f".as_slice(), b"v".as_slice())])]
     );
-    let multi_hset = b"*6\r\n$4\r\nHSET\r\n$1\r\nh\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n";
+    let multi_hset =
+        b"*6\r\n$4\r\nHSET\r\n$1\r\nh\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n";
     assert_eq!(
-        parse_borrowed_plain_hset_commands(multi_hset).unwrap()[0].1.len(),
+        parse_borrowed_plain_hset_commands(multi_hset).unwrap()[0]
+            .1
+            .len(),
         2
     );
     assert!(parse_borrowed_plain_hset_commands(set).is_none());
@@ -506,17 +497,22 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
         parse_borrowed_root_json_set_commands(&json_sets),
         Some(vec![("j", "{\"v\":1}")])
     );
-    let pfadds = parse_borrowed_resp_commands(
-        b"*4\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$1\r\na\r\n$2\r\n\0b\r\n",
-    )
-    .unwrap();
+    let pfadds =
+        parse_borrowed_resp_commands(b"*4\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$1\r\na\r\n$2\r\n\0b\r\n")
+            .unwrap();
     let pfadds = parse_borrowed_plain_pfadd_commands(&pfadds).unwrap();
-    assert_eq!(pfadds, vec![("hll", vec![b"a".as_slice(), b"\0b".as_slice()])]);
+    assert_eq!(
+        pfadds,
+        vec![("hll", vec![b"a".as_slice(), b"\0b".as_slice()])]
+    );
     let set_mutations = parse_borrowed_resp_commands(
         b"*4\r\n$4\r\nSADD\r\n$1\r\ns\r\n$1\r\na\r\n$1\r\nb\r\n*3\r\n$4\r\nSREM\r\n$1\r\ns\r\n$1\r\na\r\n",
     )
     .unwrap();
-    assert_eq!(parse_borrowed_set_mutations(&set_mutations).unwrap().len(), 2);
+    assert_eq!(
+        parse_borrowed_set_mutations(&set_mutations).unwrap().len(),
+        2
+    );
     let list_pops = parse_borrowed_resp_commands(
         b"*2\r\n$4\r\nLPOP\r\n$1\r\nl\r\n*2\r\n$4\r\nRPOP\r\n$1\r\nl\r\n",
     )
@@ -541,18 +537,16 @@ fn borrowed_parser_helpers_and_resp_appenders_cover_success_and_error_edges() {
         parse_borrowed_plain_zset_pop_commands(&zset_pops),
         Some(vec![("z", true, 1), ("z", false, 2)])
     );
-    let zset_increments = parse_borrowed_resp_commands(
-        b"*4\r\n$7\r\nZINCRBY\r\n$1\r\nz\r\n$3\r\n1.5\r\n$1\r\nm\r\n",
-    )
-    .unwrap();
+    let zset_increments =
+        parse_borrowed_resp_commands(b"*4\r\n$7\r\nZINCRBY\r\n$1\r\nz\r\n$3\r\n1.5\r\n$1\r\nm\r\n")
+            .unwrap();
     assert_eq!(
         parse_borrowed_zset_increment_commands(&zset_increments),
         Some(vec![("z", 1.5, "m")])
     );
-    let zset_adds = parse_borrowed_resp_commands(
-        b"*4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n",
-    )
-    .unwrap();
+    let zset_adds =
+        parse_borrowed_resp_commands(b"*4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n")
+            .unwrap();
     assert_eq!(
         parse_borrowed_plain_zset_add_commands(&zset_adds),
         Some(vec![("z", vec![(1.0, "m")])])
@@ -989,17 +983,39 @@ fn hello_switches_to_resp3_allows_commands_while_subscribed_and_reset_restores_r
             .expect("RESP3 pipeline response timed out");
 
             assert!(response.starts_with(b"%7\r\n"));
-            assert!(response.windows(b":3\r\n".len()).any(|part| part == b":3\r\n"));
-            assert!(response.windows(b"+PONG\r\n".len()).any(|part| part == b"+PONG\r\n"));
-            assert!(response.windows(b">3\r\n$9\r\nsubscribe\r\n".len()).any(|part| {
-                part == b">3\r\n$9\r\nsubscribe\r\n"
-            }));
-            assert!(response.windows(b">3\r\n$7\r\nmessage\r\n".len()).any(|part| {
-                part == b">3\r\n$7\r\nmessage\r\n"
-            }));
-            assert!(response.windows(b"+RESET\r\n".len()).any(|part| part == b"+RESET\r\n"));
+            assert!(
+                response
+                    .windows(b":3\r\n".len())
+                    .any(|part| part == b":3\r\n")
+            );
+            assert!(
+                response
+                    .windows(b"+PONG\r\n".len())
+                    .any(|part| part == b"+PONG\r\n")
+            );
+            assert!(
+                response
+                    .windows(b">3\r\n$9\r\nsubscribe\r\n".len())
+                    .any(|part| { part == b">3\r\n$9\r\nsubscribe\r\n" })
+            );
+            assert!(
+                response
+                    .windows(b">3\r\n$7\r\nmessage\r\n".len())
+                    .any(|part| { part == b">3\r\n$7\r\nmessage\r\n" })
+            );
+            assert!(
+                response
+                    .windows(b"+RESET\r\n".len())
+                    .any(|part| part == b"+RESET\r\n")
+            );
             assert!(!response.windows(b"-ERR".len()).any(|part| part == b"-ERR"));
-            assert_eq!(response.windows(b"+PONG\r\n".len()).filter(|part| *part == b"+PONG\r\n").count(), 2);
+            assert_eq!(
+                response
+                    .windows(b"+PONG\r\n".len())
+                    .filter(|part| *part == b"+PONG\r\n")
+                    .count(),
+                2
+            );
         };
         let (_, ()) = tokio::join!(handler.handle(), client_io);
     });
@@ -1238,11 +1254,8 @@ fn borrowed_fast_paths_cover_guards_and_error_branches() {
     assert!(response_text.contains("*2\r\n$-1\r\n$-1\r\n"));
 
     let db = handler.get_session().get_db().clone();
-    rt.block_on(db.set_add_async(
-        "members",
-        &["one".to_string(), "two".to_string()],
-    ))
-    .unwrap();
+    rt.block_on(db.set_add_async("members", &["one".to_string(), "two".to_string()]))
+        .unwrap();
     rt.block_on(db.zset_add_async(
         "scores",
         &[(1.5, "one".to_string()), (2.0, "two".to_string())],
@@ -1758,6 +1771,7 @@ fn transaction_async_dirty_watch_and_state_errors_are_reported() {
             .get_session()
             .get_db()
             .exists_readonly("acl-revalidated")
+            .unwrap()
     );
     handler
         .session_manager
@@ -1785,6 +1799,7 @@ fn transaction_async_dirty_watch_and_state_errors_are_reported() {
             .get_session()
             .get_db()
             .exists_readonly("after-watch")
+            .unwrap()
     );
 
     handler.start_transaction().unwrap();
@@ -1831,6 +1846,7 @@ fn command_apply_routes_server_and_db_commands_without_full_tcp_loop() {
             .get_session()
             .get_db()
             .exists_readonly("lua-acl-key")
+            .unwrap()
     );
     handler
         .session_manager

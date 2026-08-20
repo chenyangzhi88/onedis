@@ -21,18 +21,17 @@ impl Exists {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let count = self
-            .keys
-            .into_iter()
-            .filter(|key| db.exists_readonly(key))
-            .count() as i64;
+        let mut count = 0i64;
+        for key in self.keys {
+            count += i64::from(db.exists_readonly(&key)?);
+        }
         Ok(Frame::Integer(count))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let count = db
             .exists_readonly_many_async(&self.keys)
-            .await
+            .await?
             .into_iter()
             .filter(|exists| *exists)
             .count() as i64;
@@ -83,8 +82,10 @@ mod tests {
     #[test]
     fn exists_counts_all_existing_keys() {
         let db = test_db();
-        db.insert("k1".to_string(), Structure::String("v1".to_string()));
-        db.insert("k2".to_string(), Structure::String("v2".to_string()));
+        db.insert("k1".to_string(), Structure::String("v1".to_string()))
+            .unwrap();
+        db.insert("k2".to_string(), Structure::String("v2".to_string()))
+            .unwrap();
 
         let frame = Exists::new(vec![
             "k1".to_string(),

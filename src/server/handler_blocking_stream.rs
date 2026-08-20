@@ -16,7 +16,9 @@ impl Handler {
             metrics: self.metrics.clone(),
         };
         loop {
-            let notified = self.db_manager.stream_notify().notified();
+            let db = self.session.get_db().clone();
+            let waiter = db.wait_for_key_mutations(&Self::blocking_stream_keys(&command));
+            let notified = waiter.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             let frame = self.try_stream_read_once(&command).await?;
@@ -101,8 +103,24 @@ impl Handler {
         }
     }
 
+    fn blocking_stream_keys(command: &Command) -> Vec<&str> {
+        match command {
+            Command::Xread(command) => command
+                .streams
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect(),
+            Command::Xreadgroup(command) => command
+                .streams
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     fn is_blocking_stream_command(command: &Command) -> bool {
-        Self::blocking_stream_timeout_ms(command).is_some()
+        command.spec().blocking_kind == crate::command::BlockingKind::Stream
     }
 }
 

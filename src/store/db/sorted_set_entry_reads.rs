@@ -7,7 +7,7 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(Vec::new());
         };
-        Ok(self.zset_ranked_members(key, version))
+        self.zset_ranked_members(key, version)
     }
 
     pub async fn zset_all_entries_async(&self, key: &str) -> Result<Vec<(String, f64)>, Error> {
@@ -15,7 +15,7 @@ impl Db {
         let Some((_, version)) = meta else {
             return Ok(Vec::new());
         };
-        Ok(self.zset_ranked_members_async(key, version).await)
+        self.zset_ranked_members_async(key, version).await
     }
 
     pub(crate) fn zset_filter_entries_limited<F>(
@@ -50,7 +50,7 @@ impl Db {
         };
 
         if version == 0 {
-            for (member, score) in self.zset_ranked_members(key, version) {
+            for (member, score) in self.zset_ranked_members(key, version)? {
                 if !visit(member, score) {
                     break;
                 }
@@ -69,7 +69,7 @@ impl Db {
                     return true;
                 };
                 visit(member, score)
-            });
+            })?;
         Ok(())
     }
 
@@ -110,7 +110,7 @@ impl Db {
         };
 
         if version == 0 {
-            for (member, score) in self.zset_ranked_members_async(key, version).await {
+            for (member, score) in self.zset_ranked_members_async(key, version).await? {
                 if !visit(member, score) {
                     break;
                 }
@@ -130,7 +130,7 @@ impl Db {
                 };
                 visit(member, score)
             })
-            .await;
+            .await?;
         Ok(())
     }
 
@@ -177,7 +177,7 @@ impl Db {
         unique: &[usize],
     ) -> Result<Vec<(String, f64)>, Error> {
         if version == 0 {
-            let entries = self.zset_ranked_members(key, version);
+            let entries = self.zset_ranked_members(key, version)?;
             let by_ordinal = unique
                 .iter()
                 .filter_map(|ordinal| {
@@ -202,7 +202,7 @@ impl Db {
             &prefix,
             prefix_exclusive_upper_bound(&prefix),
             unique,
-        );
+        )?;
         self.decode_random_zset_selection(key, version, picks, unique, rank_keys)
     }
 
@@ -214,7 +214,7 @@ impl Db {
         unique: &[usize],
     ) -> Result<Vec<(String, f64)>, Error> {
         if version == 0 {
-            let entries = self.zset_ranked_members_async(key, version).await;
+            let entries = self.zset_ranked_members_async(key, version).await?;
             let by_ordinal = unique
                 .iter()
                 .filter_map(|ordinal| {
@@ -242,7 +242,7 @@ impl Db {
                 prefix_exclusive_upper_bound(&prefix),
                 unique,
             )
-            .await;
+            .await?;
         self.decode_random_zset_selection(key, version, picks, unique, rank_keys)
     }
 

@@ -53,50 +53,56 @@ async fn concurrent_rename_and_hash_write_do_not_lose_the_field_update() {
 fn repeated_expire_replaces_the_previous_ttl_index_entry() {
     let db = test_db();
 
-    db.insert("hot-key".to_string(), Structure::String("v".to_string()));
-    assert!(db.expire("hot-key".to_string(), 10_000));
-    assert!(db.expire("hot-key".to_string(), 20_000));
-    assert!(db.expire("hot-key".to_string(), 30_000));
+    db.insert("hot-key".to_string(), Structure::String("v".to_string()))
+        .unwrap();
+    assert!(db.expire("hot-key".to_string(), 10_000).unwrap());
+    assert!(db.expire("hot-key".to_string(), 20_000).unwrap());
+    assert!(db.expire("hot-key".to_string(), 30_000).unwrap());
 
-    assert_eq!(db.ttl_manager.index_size(), 1);
-    assert!(db.ttl_millis("hot-key") > 20_000);
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 1);
+    assert!(db.ttl_millis("hot-key").unwrap() > 20_000);
 }
 
 #[test]
 fn overwriting_a_string_replaces_or_removes_its_ttl_index_entry() {
     let db = test_db();
 
-    db.insert_string("session".to_string(), "v1".to_string(), Some(30_000));
-    assert_eq!(db.ttl_manager.index_size(), 1);
+    db.insert_string("session".to_string(), "v1".to_string(), Some(30_000))
+        .unwrap();
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 1);
 
-    db.insert_string("session".to_string(), "v2".to_string(), Some(60_000));
-    assert_eq!(db.ttl_manager.index_size(), 1);
+    db.insert_string("session".to_string(), "v2".to_string(), Some(60_000))
+        .unwrap();
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 1);
 
-    db.insert_string("session".to_string(), "v3".to_string(), None);
-    assert_eq!(db.ttl_manager.index_size(), 0);
+    db.insert_string("session".to_string(), "v3".to_string(), None)
+        .unwrap();
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 0);
 }
 
 #[test]
 fn persist_removes_ttl_index_entry() {
     let db = test_db();
 
-    db.insert("session".to_string(), Structure::String("v".to_string()));
-    assert!(db.expire("session".to_string(), 10_000));
-    assert_eq!(db.ttl_manager.index_size(), 1);
+    db.insert("session".to_string(), Structure::String("v".to_string()))
+        .unwrap();
+    assert!(db.expire("session".to_string(), 10_000).unwrap());
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 1);
 
-    assert!(db.persist("session"));
-    assert_eq!(db.ttl_manager.index_size(), 0);
-    assert_eq!(db.ttl_millis("session"), -1);
+    assert!(db.persist("session").unwrap());
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 0);
+    assert_eq!(db.ttl_millis("session").unwrap(), -1);
 }
 
 #[test]
 fn sync_persist_does_not_resurrect_an_expired_key() {
     let db = test_db();
-    db.insert_string("expired-persist".to_string(), "value".to_string(), Some(1));
+    db.insert_string("expired-persist".to_string(), "value".to_string(), Some(1))
+        .unwrap();
     sleep(Duration::from_millis(5));
 
-    assert!(!db.persist("expired-persist"));
-    assert!(!db.exists("expired-persist"));
+    assert!(!db.persist("expired-persist").unwrap());
+    assert!(!db.exists("expired-persist").unwrap());
 }
 
 #[tokio::test]
@@ -111,8 +117,8 @@ async fn async_persist_does_not_resurrect_an_expired_key() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    assert!(!db.persist_async("expired-persist-async").await);
-    assert!(!db.exists("expired-persist-async"));
+    assert!(!db.persist_async("expired-persist-async").await.unwrap());
+    assert!(!db.exists("expired-persist-async").unwrap());
 }
 
 #[tokio::test]
@@ -120,48 +126,48 @@ async fn removing_the_last_collection_item_removes_its_ttl_index_entry() {
     let db = test_db();
 
     db.hash_set_async("hash", "field", "value").await.unwrap();
-    assert!(db.expire("hash".to_string(), 60_000));
+    assert!(db.expire("hash".to_string(), 60_000).unwrap());
     assert_eq!(
         db.hash_delete_async("hash", &["field".to_string()])
             .await
             .unwrap(),
         1
     );
-    assert_eq!(db.ttl_manager.index_size(), 0);
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 0);
 
     db.list_push_right_async("list", &["value".to_string()], false)
         .await
         .unwrap();
-    assert!(db.expire("list".to_string(), 60_000));
+    assert!(db.expire("list".to_string(), 60_000).unwrap());
     assert_eq!(
         db.list_pop_left_async("list").await.unwrap(),
         Some("value".to_string())
     );
-    assert_eq!(db.ttl_manager.index_size(), 0);
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 0);
 
     db.set_add_async("set", &["member".to_string()])
         .await
         .unwrap();
-    assert!(db.expire("set".to_string(), 60_000));
+    assert!(db.expire("set".to_string(), 60_000).unwrap());
     assert_eq!(
         db.set_remove_async("set", &["member".to_string()])
             .await
             .unwrap(),
         1
     );
-    assert_eq!(db.ttl_manager.index_size(), 0);
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 0);
 
     db.zset_add_async("zset", &[(1.0, "member".to_string())])
         .await
         .unwrap();
-    assert!(db.expire("zset".to_string(), 60_000));
+    assert!(db.expire("zset".to_string(), 60_000).unwrap());
     assert_eq!(
         db.zset_remove_async("zset", &["member".to_string()])
             .await
             .unwrap(),
         1
     );
-    assert_eq!(db.ttl_manager.index_size(), 0);
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 0);
 }
 
 #[test]
@@ -185,7 +191,7 @@ fn transactional_copy_and_move_commit_cross_db_changes() {
     let db1 =
         Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker.clone());
 
-    db0.insert_string_ref("copy-source", "copy-value");
+    db0.insert_string_ref("copy-source", "copy-value").unwrap();
     let copy_txn = db0.transactional_view().unwrap();
     assert!(
         copy_txn
@@ -198,11 +204,11 @@ fn transactional_copy_and_move_commit_cross_db_changes() {
         Some("copy-value".to_string())
     );
 
-    db0.insert_string_ref("move-source", "move-value");
+    db0.insert_string_ref("move-source", "move-value").unwrap();
     let move_txn = db0.transactional_view().unwrap();
     assert!(move_txn.move_key_to_db(1, "move-source").unwrap());
     move_txn.commit_transaction().unwrap();
-    assert!(!db0.exists("move-source"));
+    assert!(!db0.exists("move-source").unwrap());
     assert_eq!(
         db1.get_string("move-source").unwrap(),
         Some("move-value".to_string())
@@ -229,11 +235,11 @@ fn transactional_move_conflict_does_not_partially_commit_target_db() {
     );
     let db1 = Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker);
 
-    db1.insert_string_ref("source", "old");
+    db1.insert_string_ref("source", "old").unwrap();
     let transaction = db1.transactional_view().unwrap();
     assert!(transaction.move_key_to_db(0, "source").unwrap());
 
-    db1.insert_string_ref("source", "new");
+    db1.insert_string_ref("source", "new").unwrap();
     assert!(transaction.commit_transaction().is_err());
     assert_eq!(db0.get_string("source").unwrap(), None);
     assert_eq!(db1.get_string("source").unwrap(), Some("new".to_string()));
@@ -260,12 +266,18 @@ fn watch_key_versions_are_isolated_by_database() {
     let db1 =
         Db::new_with_mutation_tracker(1, store, version_counter, ttl_manager, tracker.clone());
 
-    let (key_version, db_version) = db0.watch_version_snapshot("same-key");
-    db1.insert_string_ref("same-key", "db-one");
-    assert!(!db0.watch_version_changed("same-key", key_version, db_version));
+    let (key_version, db_version) = db0.watch_version_snapshot("same-key").unwrap();
+    db1.insert_string_ref("same-key", "db-one").unwrap();
+    assert!(
+        !db0.watch_version_changed("same-key", key_version, db_version)
+            .unwrap()
+    );
 
-    db0.insert_string_ref("same-key", "db-zero");
-    assert!(db0.watch_version_changed("same-key", key_version, db_version));
+    db0.insert_string_ref("same-key", "db-zero").unwrap();
+    assert!(
+        db0.watch_version_changed("same-key", key_version, db_version)
+            .unwrap()
+    );
     db0.release_watch("same-key");
     assert_eq!(tracker.tracked_key_count(), 0);
 }
@@ -284,20 +296,28 @@ fn watch_tracker_only_retains_currently_watched_keys() {
     let db = Db::new_with_mutation_tracker(0, store, version_counter, ttl_manager, tracker.clone());
 
     for index in 0..128 {
-        db.insert_string_ref(&format!("before:{index}"), "value");
+        db.insert_string_ref(&format!("before:{index}"), "value")
+            .unwrap();
     }
     assert_eq!(tracker.tracked_key_count(), 0);
 
-    let snapshot = db.watch_version_snapshot("watched");
+    let snapshot = db.watch_version_snapshot("watched").unwrap();
     assert_eq!(tracker.tracked_key_count(), 1);
     for index in 0..128 {
-        db.insert_string_ref(&format!("unrelated:{index}"), "value");
+        db.insert_string_ref(&format!("unrelated:{index}"), "value")
+            .unwrap();
     }
     assert_eq!(tracker.tracked_key_count(), 1);
-    assert!(!db.watch_version_changed("watched", snapshot.0, snapshot.1));
+    assert!(
+        !db.watch_version_changed("watched", snapshot.0, snapshot.1)
+            .unwrap()
+    );
 
-    db.insert_string_ref("watched", "changed");
-    assert!(db.watch_version_changed("watched", snapshot.0, snapshot.1));
+    db.insert_string_ref("watched", "changed").unwrap();
+    assert!(
+        db.watch_version_changed("watched", snapshot.0, snapshot.1)
+            .unwrap()
+    );
     db.release_watch("watched");
     assert_eq!(tracker.tracked_key_count(), 0);
 }
@@ -309,14 +329,15 @@ fn ttl_rebuild_loads_persisted_ttl_namespace() {
     db.insert(
         "persisted-ttl".to_string(),
         Structure::String("v".to_string()),
-    );
-    assert!(db.expire("persisted-ttl".to_string(), 10_000));
+    )
+    .unwrap();
+    assert!(db.expire("persisted-ttl".to_string(), 10_000).unwrap());
 
     let rebuilt = TtlManager::new(db.store.clone(), TtlConfig::default());
     let recovered_counter = VersionCounter::new();
-    rebuilt.rebuild_from_store(1, &recovered_counter);
+    rebuilt.rebuild_from_store(1, &recovered_counter).unwrap();
 
-    assert_eq!(rebuilt.index_size(), 1);
+    assert_eq!(rebuilt.index_size().unwrap(), 1);
     assert!(recovered_counter.current() >= db.version_counter.current());
 }
 
@@ -352,8 +373,8 @@ fn flushdb_does_not_remove_global_version_reservation() {
     db1.promote_packed_hash("db1-hash").unwrap();
     let allocated = version_counter.current();
     assert!(allocated >= 2);
-    db0.flushdb();
-    db0.insert_string_ref("after-flush", "value");
+    db0.flushdb().unwrap();
+    db0.insert_string_ref("after-flush", "value").unwrap();
     let reopened_db0 = Db::new(
         0,
         store.clone(),
@@ -366,7 +387,9 @@ fn flushdb_does_not_remove_global_version_reservation() {
     );
 
     let recovered = VersionCounter::new();
-    TtlManager::new(store, TtlConfig::default()).rebuild_from_store(2, &recovered);
+    TtlManager::new(store, TtlConfig::default())
+        .rebuild_from_store(2, &recovered)
+        .unwrap();
     assert!(recovered.current() >= allocated);
     assert_eq!(
         db1.hash_get("db1-hash", "field").unwrap(),
@@ -379,11 +402,13 @@ fn transaction_ttl_index_is_published_after_commit() {
     let db = test_db();
     let txn_db = db.transactional_view().unwrap();
 
-    txn_db.insert_string("txn-ttl".to_string(), "value".to_string(), Some(10_000));
+    txn_db
+        .insert_string("txn-ttl".to_string(), "value".to_string(), Some(10_000))
+        .unwrap();
 
-    assert_eq!(db.ttl_manager.index_size(), 0);
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 0);
     txn_db.commit_transaction().unwrap();
-    assert_eq!(db.ttl_manager.index_size(), 1);
+    assert_eq!(db.ttl_manager.index_size().unwrap(), 1);
 }
 
 #[test]
@@ -392,26 +417,26 @@ fn set_string_over_hash_hides_old_subkeys_until_compaction() {
 
     db.hash_set("mixed", "field", "value").unwrap();
     db.promote_packed_hash("mixed").unwrap();
-    let raw = db.store.get_raw(&db.mk("mixed")).unwrap();
+    let raw = db.store.get_raw(&db.mk("mixed")).unwrap().unwrap();
     let header = super::decode_meta_header(&raw).unwrap();
     let field_key = hash_field_key(db.db_index, "mixed", header.version, "field");
-    assert!(db.store.contains_key(&field_key));
+    assert!(db.store.contains_key(&field_key).unwrap());
 
-    db.insert_string_ref("mixed", "plain");
+    db.insert_string_ref("mixed", "plain").unwrap();
 
     assert!(matches!(
-        db.get("mixed"),
+        db.get("mixed").unwrap(),
         Some(Structure::String(value)) if value == "plain"
     ));
     assert_eq!(
         db.hash_get("mixed", "field").unwrap_err().to_string(),
         WRONG_TYPE_ERROR
     );
-    assert!(db.store.contains_key(&field_key));
+    assert!(db.store.contains_key(&field_key).unwrap());
     db.store.mark_version_compaction_ready();
     assert_eq!(db.refresh_retired_versions_once(usize::MAX), 1);
     db.store.manual_compaction().unwrap();
-    assert!(!db.store.contains_key(&field_key));
+    assert!(!db.store.contains_key(&field_key).unwrap());
 }
 
 #[test]
@@ -449,9 +474,9 @@ fn move_key_between_dbs_moves_full_structure() {
             .unwrap()
     );
 
-    assert!(db0.get("leaders").is_none());
+    assert!(db0.get("leaders").unwrap().is_none());
     assert!(matches!(
-        db1.get("leaders"),
+        db1.get("leaders").unwrap(),
         Some(Structure::SortedSet(value)) if value.get("alice") == Some(&1.0) && value.get("bob") == Some(&2.0)
     ));
 }
@@ -519,7 +544,7 @@ async fn copy_move_rename_and_remove_cover_complex_structure_namespaces() {
         ]),
     )
     .unwrap();
-    assert!(db0.expire("hash".to_string(), 10_000));
+    assert!(db0.expire("hash".to_string(), 10_000).unwrap());
     db0.list_push_right("list", &["x".to_string(), "y".to_string()], false)
         .unwrap();
     db0.stream_add(
@@ -556,7 +581,7 @@ async fn copy_move_rename_and_remove_cover_complex_structure_namespaces() {
         db1.hash_get("hash-copy", "a").unwrap(),
         Some("1".to_string())
     );
-    assert!(db1.ttl_millis_readonly("hash-copy") > 0);
+    assert!(db1.ttl_millis_readonly("hash-copy").unwrap() > 0);
 
     assert!(
         db0.copy_key_to_db_async(1, "list", "list-copy", false)
@@ -608,7 +633,7 @@ async fn copy_move_rename_and_remove_cover_complex_structure_namespaces() {
         false,
     )
     .unwrap();
-    db0.insert_string_ref("rename-target", "old");
+    db0.insert_string_ref("rename-target", "old").unwrap();
     assert!(
         db0.rename_key_async("rename-list", "rename-target", true)
             .await
@@ -623,8 +648,8 @@ async fn copy_move_rename_and_remove_cover_complex_structure_namespaces() {
             .await
             .unwrap()
     );
-    db0.insert_string_ref("rename-src", "v");
-    db0.insert_string_ref("rename-existing", "e");
+    db0.insert_string_ref("rename-src", "v").unwrap();
+    db0.insert_string_ref("rename-existing", "e").unwrap();
     assert!(
         !db0.rename_key_async("rename-src", "rename-existing", false)
             .await
@@ -653,28 +678,28 @@ async fn copy_move_rename_and_remove_cover_complex_structure_namespaces() {
     )
     .unwrap();
     assert!(matches!(
-        db1.remove("remove-hash"),
+        db1.remove("remove-hash").unwrap(),
         Some(Structure::Hash(values)) if values == HashMap::from([("a".to_string(), "1".to_string())])
     ));
-    assert!(!db1.exists("remove-hash"));
+    assert!(!db1.exists("remove-hash").unwrap());
     assert!(matches!(
-        db1.remove_async("remove-list").await,
+        db1.remove_async("remove-list").await.unwrap(),
         Some(Structure::List(values)) if values == vec!["x".to_string(), "y".to_string()]
     ));
     assert!(matches!(
-        db1.remove("remove-stream"),
+        db1.remove("remove-stream").unwrap(),
         Some(Structure::Stream(entries)) if entries.len() == 1
     ));
     assert!(matches!(
-        db1.remove_async("remove-json").await,
+        db1.remove_async("remove-json").await.unwrap(),
         Some(Structure::Json(_))
     ));
     db1.set_add("remove-set", &["a".to_string(), "b".to_string()])
         .unwrap();
     db1.zset_add("remove-zset", &[(1.0, "a".to_string())])
         .unwrap();
-    assert!(db1.delete_key("remove-set"));
-    assert!(db1.delete_key_async("remove-zset").await);
+    assert!(db1.delete_key("remove-set").unwrap());
+    assert!(db1.delete_key_async("remove-zset").await.unwrap());
 }
 
 #[tokio::test]
@@ -722,7 +747,8 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
                 fields: vec![("f".to_string(), "v".to_string())],
             },
         ]),
-    );
+    )
+    .unwrap();
     assert_eq!(db0.stream_len("legacy-stream").unwrap(), 1);
 
     for key in ["hash", "set", "zset", "list", "stream", "json"] {
@@ -801,7 +827,7 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
         .await
         .unwrap()
     );
-    assert!(!db0.exists("list"));
+    assert!(!db0.exists("list").unwrap());
     assert_eq!(
         db1.list_range("list-moved", 0, -1).unwrap(),
         vec!["a".to_string(), "b".to_string()]
@@ -834,11 +860,11 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
     );
 
     assert!(matches!(
-        db0.remove("legacy-stream"),
+        db0.remove("legacy-stream").unwrap(),
         Some(Structure::Stream(entries)) if entries.len() == 1
     ));
     assert!(matches!(
-        db1.remove_async("stream-copy").await,
+        db1.remove_async("stream-copy").await.unwrap(),
         Some(Structure::Stream(entries)) if entries.len() == 1
     ));
     assert!(db1.set_contains("set-copy", "a").unwrap());
@@ -847,9 +873,9 @@ async fn static_copy_move_and_remove_helpers_cover_native_namespaces() {
         db1.hash_get("hash-copy", "field").unwrap(),
         Some("value".to_string())
     );
-    assert!(db1.delete_key_async("set-copy").await);
-    assert!(db1.delete_key_async("zset-copy").await);
-    assert!(db1.delete_key_async("hash-copy").await);
+    assert!(db1.delete_key_async("set-copy").await.unwrap());
+    assert!(db1.delete_key_async("zset-copy").await.unwrap());
+    assert!(db1.delete_key_async("hash-copy").await.unwrap());
 }
 
 #[tokio::test]
@@ -870,14 +896,14 @@ async fn key_space_readonly_ttl_copy_move_scan_and_clear_cover_edges() {
     );
     let db1 = Db::new(1, store, version_counter, ttl_manager);
 
-    assert_eq!(db0.type_name_readonly("missing"), "none");
-    assert_eq!(db0.ttl_millis_readonly("missing"), -2);
-    assert_eq!(db0.expire_time_millis_readonly("missing"), -2);
-    assert!(db0.random_key().is_none());
-    assert!(db0.random_key_async().await.is_none());
+    assert_eq!(db0.type_name_readonly("missing").unwrap(), "none");
+    assert_eq!(db0.ttl_millis_readonly("missing").unwrap(), -2);
+    assert_eq!(db0.expire_time_millis_readonly("missing").unwrap(), -2);
+    assert!(db0.random_key().unwrap().is_none());
+    assert!(db0.random_key_async().await.unwrap().is_none());
 
-    db0.insert_string_ref("prefix:a", "one");
-    db0.insert_string_ref("prefix:b", "two");
+    db0.insert_string_ref("prefix:a", "one").unwrap();
+    db0.insert_string_ref("prefix:b", "two").unwrap();
     db0.hash_set("hash", "field", "value").unwrap();
     db0.list_push_right("list", &["x".to_string()], false)
         .unwrap();
@@ -892,69 +918,89 @@ async fn key_space_readonly_ttl_copy_move_scan_and_clear_cover_edges() {
     db0.json_set("json", "$", r#"{"a":1}"#, SetCondition::Always)
         .unwrap();
 
-    assert_eq!(db0.type_name_readonly("prefix:a"), "string");
-    assert_eq!(db0.type_name_readonly("hash"), "hash");
-    assert_eq!(db0.type_name_readonly("list"), "list");
-    assert_eq!(db0.type_name_readonly("set"), "set");
-    assert_eq!(db0.type_name_readonly("zset"), "zset");
-    assert_eq!(db0.type_name_readonly("stream"), "stream");
-    assert_eq!(db0.type_name_readonly("json"), "json");
-    assert_eq!(db0.type_name_readonly_async("hash").await, "hash");
-    assert!(db0.exists_readonly("prefix:a"));
-    assert!(db0.exists_readonly_async("prefix:a").await);
-    assert!(db0.len() >= 7);
-    assert!(db0.len_async().await >= 7);
-    assert!(db0.random_key().is_some());
-    assert!(db0.random_key_async().await.is_some());
+    assert_eq!(db0.type_name_readonly("prefix:a").unwrap(), "string");
+    assert_eq!(db0.type_name_readonly("hash").unwrap(), "hash");
+    assert_eq!(db0.type_name_readonly("list").unwrap(), "list");
+    assert_eq!(db0.type_name_readonly("set").unwrap(), "set");
+    assert_eq!(db0.type_name_readonly("zset").unwrap(), "zset");
+    assert_eq!(db0.type_name_readonly("stream").unwrap(), "stream");
+    assert_eq!(db0.type_name_readonly("json").unwrap(), "json");
+    assert_eq!(db0.type_name_readonly_async("hash").await.unwrap(), "hash");
+    assert!(db0.exists_readonly("prefix:a").unwrap());
+    assert!(db0.exists_readonly_async("prefix:a").await.unwrap());
+    assert!(db0.len().unwrap() >= 7);
+    assert!(db0.len_async().await.unwrap() >= 7);
+    assert!(db0.random_key().unwrap().is_some());
+    assert!(db0.random_key_async().await.unwrap().is_some());
 
-    let mut prefix_keys = db0.keys("prefix:*");
+    let mut prefix_keys = db0.keys("prefix:*").unwrap();
     prefix_keys.sort();
     assert_eq!(
         prefix_keys,
         vec!["prefix:a".to_string(), "prefix:b".to_string()]
     );
-    let mut prefix_keys_async = db0.keys_async("prefix:*").await;
+    let mut prefix_keys_async = db0.keys_async("prefix:*").await.unwrap();
     prefix_keys_async.sort();
     assert_eq!(prefix_keys_async, prefix_keys);
-    assert_eq!(db0.scan_string_prefix_async("prefix:", 1).await.len(), 1);
+    assert_eq!(
+        db0.scan_string_prefix_async("prefix:", 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
-    assert!(db0.expire_with_condition("prefix:a".to_string(), 10_000, ExpireCondition::Nx));
-    assert!(!db0.expire_with_condition("prefix:a".to_string(), 10_000, ExpireCondition::Nx));
-    assert!(db0.expire_with_condition("prefix:a".to_string(), 20_000, ExpireCondition::Gt));
-    assert!(!db0.expire_with_condition("prefix:a".to_string(), 10_000, ExpireCondition::Gt));
-    assert!(db0.expire_time_millis_readonly("prefix:a") > now_ms() as i64);
-    assert!(db0.ttl_millis_readonly("prefix:a") > 0);
-    assert!(db0.persist_async("prefix:a").await);
-    assert_eq!(db0.ttl_millis_readonly_async("prefix:a").await, -1);
+    assert!(
+        db0.expire_with_condition("prefix:a".to_string(), 10_000, ExpireCondition::Nx)
+            .unwrap()
+    );
+    assert!(
+        !db0.expire_with_condition("prefix:a".to_string(), 10_000, ExpireCondition::Nx)
+            .unwrap()
+    );
+    assert!(
+        db0.expire_with_condition("prefix:a".to_string(), 20_000, ExpireCondition::Gt)
+            .unwrap()
+    );
+    assert!(
+        !db0.expire_with_condition("prefix:a".to_string(), 10_000, ExpireCondition::Gt)
+            .unwrap()
+    );
+    assert!(db0.expire_time_millis_readonly("prefix:a").unwrap() > now_ms() as i64);
+    assert!(db0.ttl_millis_readonly("prefix:a").unwrap() > 0);
+    assert!(db0.persist_async("prefix:a").await.unwrap());
+    assert_eq!(db0.ttl_millis_readonly_async("prefix:a").await.unwrap(), -1);
     assert!(
         db0.expire_with_condition_async("prefix:a".to_string(), 1, ExpireCondition::Always)
             .await
+            .unwrap()
     );
     sleep(Duration::from_millis(5));
-    assert_eq!(db0.ttl_millis("prefix:a"), -2);
-    assert!(!db0.exists_readonly("prefix:a"));
+    assert_eq!(db0.ttl_millis("prefix:a").unwrap(), -2);
+    assert!(!db0.exists_readonly("prefix:a").unwrap());
 
     assert!(db0.copy_key_to_db(1, "zset", "copied-zset", false).unwrap());
     assert!(!db0.copy_key_to_db(1, "zset", "copied-zset", false).unwrap());
     assert!(db0.copy_key_to_db(1, "zset", "copied-zset", true).unwrap());
     assert_eq!(db1.zset_score("copied-zset", "m").unwrap(), Some(1.0));
     assert!(db0.move_key_to_db_async(1, "set").await.unwrap());
-    assert!(!db0.exists("set"));
+    assert!(!db0.exists("set").unwrap());
     assert!(db1.set_contains("set", "m").unwrap());
     assert!(!db1.move_key_to_db_async(1, "set").await.unwrap());
-    assert!(!db0.delete_key("missing"));
-    assert!(db0.delete_key_async("prefix:b").await);
+    assert!(!db0.delete_key("missing").unwrap());
+    assert!(db0.delete_key_async("prefix:b").await.unwrap());
 
-    db0.clear_async().await;
-    assert_eq!(db0.len_async().await, 0);
-    assert!(db1.exists("set"));
+    db0.clear_async().await.unwrap();
+    assert_eq!(db0.len_async().await.unwrap(), 0);
+    assert!(db1.exists("set").unwrap());
 }
 
 #[tokio::test]
 async fn scan_cursor_resumes_at_the_requested_physical_main_key_offset() {
     let db = test_db();
     for index in 0..20 {
-        db.insert_string(format!("scan:{index:02}"), index.to_string(), None);
+        db.insert_string(format!("scan:{index:02}"), index.to_string(), None)
+            .unwrap();
     }
 
     let (next, keys) = db.scan_keys_page_async(7, "*", 3, None).await.unwrap();
@@ -968,8 +1014,10 @@ async fn scan_cursor_resumes_at_the_requested_physical_main_key_offset() {
 #[tokio::test]
 async fn ordered_delete_pipeline_batch_counts_each_key_once() {
     let db = test_db();
-    db.insert_string("delete:a".to_string(), "a".to_string(), None);
-    db.insert_string("delete:b".to_string(), "b".to_string(), None);
+    db.insert_string("delete:a".to_string(), "a".to_string(), None)
+        .unwrap();
+    db.insert_string("delete:b".to_string(), "b".to_string(), None)
+        .unwrap();
     db.list_push_right_async("delete:list", &["v".to_string()], false)
         .await
         .unwrap();
@@ -980,9 +1028,10 @@ async fn ordered_delete_pipeline_batch_counts_each_key_once() {
             vec!["delete:a", "delete:b"],
             vec!["delete:list"],
         ])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(replies, vec![1, 1, 1]);
-    assert!(!db.exists_readonly("delete:a"));
-    assert!(!db.exists_readonly("delete:b"));
-    assert!(!db.exists_readonly("delete:list"));
+    assert!(!db.exists_readonly("delete:a").unwrap());
+    assert!(!db.exists_readonly("delete:b").unwrap());
+    assert!(!db.exists_readonly("delete:list").unwrap());
 }

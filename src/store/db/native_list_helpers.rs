@@ -4,7 +4,7 @@ impl Db {
     pub(in crate::store::db) fn promote_packed_list(&self, key: &str) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -41,7 +41,7 @@ impl Db {
     ) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -87,7 +87,7 @@ impl Db {
         }
 
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value().map(|value| value.as_ref()) else {
                 return Ok(None);
             };
@@ -160,7 +160,7 @@ impl Db {
         }
 
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value().map(|value| value.as_ref()) else {
                 return Ok(None);
             };
@@ -269,20 +269,20 @@ impl Db {
         version: u64,
         storage_start: i64,
         storage_end: i64,
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>, Error> {
         if version == 0 {
             let items = self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_list)
                 .unwrap_or_default();
             let start = storage_start.max(0) as usize;
             let end = storage_end.max(-1).saturating_add(1) as usize;
-            return items
+            return Ok(items
                 .get(start..end.min(items.len()))
                 .unwrap_or_default()
-                .to_vec();
+                .to_vec());
         }
         let len = (storage_end - storage_start + 1) as usize;
         let mut values = Vec::with_capacity(len);
@@ -295,7 +295,7 @@ impl Db {
                 negative_end,
                 len.saturating_sub(values.len()),
                 &mut values,
-            );
+            )?;
         }
         if storage_end >= 0 {
             let positive_start = storage_start.max(0);
@@ -306,9 +306,9 @@ impl Db {
                 storage_end,
                 len.saturating_sub(values.len()),
                 &mut values,
-            );
+            )?;
         }
-        values
+        Ok(values)
     }
 
     pub(in crate::store::db) async fn list_range_raw_values_async(
@@ -317,21 +317,21 @@ impl Db {
         version: u64,
         storage_start: i64,
         storage_end: i64,
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>, Error> {
         if version == 0 {
             let items = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_list)
                 .unwrap_or_default();
             let start = storage_start.max(0) as usize;
             let end = storage_end.max(-1).saturating_add(1) as usize;
-            return items
+            return Ok(items
                 .get(start..end.min(items.len()))
                 .unwrap_or_default()
-                .to_vec();
+                .to_vec());
         }
         let len = (storage_end - storage_start + 1) as usize;
         let mut values = Vec::with_capacity(len);
@@ -345,7 +345,7 @@ impl Db {
                 len.saturating_sub(values.len()),
                 &mut values,
             )
-            .await;
+            .await?;
         }
         if storage_end >= 0 {
             let positive_start = storage_start.max(0);
@@ -357,9 +357,9 @@ impl Db {
                 len.saturating_sub(values.len()),
                 &mut values,
             )
-            .await;
+            .await?;
         }
-        values
+        Ok(values)
     }
 
     pub(in crate::store::db) async fn list_range_raw_values_visit_async<F>(
@@ -369,7 +369,7 @@ impl Db {
         storage_start: i64,
         storage_end: i64,
         visitor: F,
-    ) -> usize
+    ) -> Result<usize, Error>
     where
         F: FnMut(&[u8]) -> bool + Send,
     {
@@ -392,14 +392,14 @@ impl Db {
         storage_end: i64,
         batch_size: usize,
         visitor: F,
-    ) -> usize
+    ) -> Result<usize, Error>
     where
         F: FnMut(&[u8]) -> bool + Send,
     {
         if version == 0 {
             let values = self
                 .list_range_raw_values_async(key, version, storage_start, storage_end)
-                .await;
+                .await?;
             let mut visitor = visitor;
             let mut seen = 0usize;
             for value in values {
@@ -408,7 +408,7 @@ impl Db {
                     break;
                 }
             }
-            return seen;
+            return Ok(seen);
         }
         let len = (storage_end - storage_start + 1) as usize;
         let mut seen = 0usize;
@@ -434,7 +434,7 @@ impl Db {
                         keep_scanning
                     },
                 )
-                .await;
+                .await?;
         }
         if keep_scanning && storage_end >= 0 && seen < len {
             let positive_start = storage_start.max(0);
@@ -453,9 +453,9 @@ impl Db {
                     batch_size,
                     |_, value| visitor(value),
                 )
-                .await;
+                .await?;
         }
-        seen
+        Ok(seen)
     }
 
     pub(in crate::store::db) async fn list_range_raw_values_visit_reverse_async<F>(
@@ -465,7 +465,7 @@ impl Db {
         storage_start: i64,
         storage_end: i64,
         visitor: F,
-    ) -> usize
+    ) -> Result<usize, Error>
     where
         F: FnMut(&[u8]) -> bool + Send,
     {
@@ -492,7 +492,7 @@ impl Db {
                         keep_scanning
                     },
                 )
-                .await;
+                .await?;
         }
         if keep_scanning && storage_start < 0 && seen < len {
             let negative_end = storage_end.min(-1);
@@ -510,9 +510,9 @@ impl Db {
                     len.saturating_sub(seen),
                     |_, value| visitor(value),
                 )
-                .await;
+                .await?;
         }
-        seen
+        Ok(seen)
     }
 
     pub(in crate::store::db) fn append_list_range_raw_values(
@@ -523,9 +523,9 @@ impl Db {
         storage_end: i64,
         limit: usize,
         values: &mut Vec<Vec<u8>>,
-    ) {
+    ) -> Result<(), Error> {
         if storage_start > storage_end || limit == 0 {
-            return;
+            return Ok(());
         }
 
         let lower_bound = list_item_key(self.db_index, key, version, storage_start);
@@ -534,17 +534,18 @@ impl Db {
         } else if storage_end < 0 {
             prefix_exclusive_upper_bound(&list_item_prefix(self.db_index, key, version))
         } else if storage_end == i64::MAX {
-            return;
+            return Ok(());
         } else {
             Some(list_item_key(self.db_index, key, version, storage_end + 1))
         };
 
         values.extend(
             self.store
-                .scan_range_raw_limited(&lower_bound, upper_bound, limit)
+                .scan_range_raw_limited(&lower_bound, upper_bound, limit)?
                 .into_iter()
                 .map(|(_, value)| value),
         );
+        Ok(())
     }
 
     pub(in crate::store::db) async fn append_list_range_raw_values_async(
@@ -555,9 +556,9 @@ impl Db {
         storage_end: i64,
         limit: usize,
         values: &mut Vec<Vec<u8>>,
-    ) {
+    ) -> Result<(), Error> {
         if storage_start > storage_end || limit == 0 {
-            return;
+            return Ok(());
         }
 
         let lower_bound = list_item_key(self.db_index, key, version, storage_start);
@@ -566,7 +567,7 @@ impl Db {
         } else if storage_end < 0 {
             prefix_exclusive_upper_bound(&list_item_prefix(self.db_index, key, version))
         } else if storage_end == i64::MAX {
-            return;
+            return Ok(());
         } else {
             Some(list_item_key(self.db_index, key, version, storage_end + 1))
         };
@@ -574,9 +575,10 @@ impl Db {
         values.extend(
             self.store
                 .scan_range_raw_limited_async(&lower_bound, upper_bound, limit)
-                .await
+                .await?
                 .into_iter()
                 .map(|(_, value)| value),
         );
+        Ok(())
     }
 }

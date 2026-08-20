@@ -43,7 +43,7 @@ impl Handler {
             {
                 continue;
             }
-            let (key_version, db_version) = db.watch_version_snapshot(&key);
+            let (key_version, db_version) = db.watch_version_snapshot(&key)?;
             self.session.watch_key(WatchedKey {
                 db_index,
                 key,
@@ -67,8 +67,11 @@ impl Handler {
         self.clear_watches();
     }
 
-    fn watched_keys_modified(&self) -> bool {
-        self.session.watched_keys().iter().any(|watched| {
+    fn watched_keys_modified(&self) -> Result<bool, Error> {
+        self.session.watched_keys().iter().try_fold(false, |changed, watched| {
+            if changed {
+                return Ok(true);
+            }
             let db = self.db_manager.get_db(watched.db_index);
             db.watch_version_changed(&watched.key, watched.key_version, watched.db_version)
         })

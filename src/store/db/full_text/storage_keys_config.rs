@@ -347,7 +347,7 @@ pub(super) fn delete_prefix_to_batch(
             .delete_range(prefix, &end)
             .map_err(|error| Error::msg(error.to_string()))?;
     } else {
-        for (key, _) in store.scan_prefix_raw(prefix) {
+        for (key, _) in store.scan_prefix_raw(prefix)? {
             batch
                 .delete(&key)
                 .map_err(|error| Error::msg(error.to_string()))?;

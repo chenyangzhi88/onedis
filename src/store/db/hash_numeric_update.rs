@@ -78,7 +78,7 @@ impl Db {
             None => self.next_version(),
         };
         let current_value = match meta {
-            Some(_) => self.hash_live_field_value(key, version, field),
+            Some(_) => self.hash_live_field_value(key, version, field)?,
             None => None,
         };
         let current = match current_value.as_deref() {
@@ -112,7 +112,7 @@ impl Db {
                 .expect("write batch append invariant violated");
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         self.fulltext_request_refresh(key)?;
         Ok(next)
@@ -127,13 +127,11 @@ impl Db {
         if !self.store.is_transactional()
             && matches!(increment, -1 | 1)
             && !self.fulltext_hash_source_is_indexed(key)?
-        {
-            if let Some(result) = self
+            && let Some(result) = self
                 .hash_increment_by_cached_async(key, field, increment)
                 .await?
-            {
-                return Ok(result);
-            }
+        {
+            return Ok(result);
         }
         let _structural_guard = self.set_write_lock(key).read().await;
         let _field_guard = self.hash_field_write_lock(key, field).lock().await;
@@ -310,12 +308,12 @@ impl Db {
             let _guards = guards;
             match db
                 .store
-                .try_merge_raw_async(&raw_key, &increment.to_be_bytes())
+                .merge_raw_async(&raw_key, &increment.to_be_bytes())
                 .await
             {
                 Ok(()) => {
                     db.changes.fetch_add(1, Ordering::Relaxed);
-                    if db.mutation_tracker.has_watched_keys() {
+                    if db.mutation_tracker.has_observers() {
                         db.record_external_key_mutation(db.db_index, logical_key);
                     }
                     commit_state.complete(sequence);
@@ -341,7 +339,7 @@ impl Db {
             None => self.next_version(),
         };
         let current_value = match meta {
-            Some(_) => self.hash_live_field_value(key, version, field),
+            Some(_) => self.hash_live_field_value(key, version, field)?,
             None => None,
         };
         let current = match current_value.as_deref() {
@@ -381,7 +379,7 @@ impl Db {
                 .expect("write batch append invariant violated");
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         self.fulltext_request_refresh(key)?;
         Ok(formatted)
@@ -412,7 +410,7 @@ impl Db {
         field: &str,
     ) -> Result<HashFieldCasState, Error> {
         let key_bytes = self.mk(key);
-        let raw_meta = self.store.get_raw_async(&key_bytes).await;
+        let raw_meta = self.store.get_raw_async(&key_bytes).await?;
         let mut expired_at = None;
         let mut key_expire_ms = 0;
         let mut packed_fields = None;
@@ -451,7 +449,7 @@ impl Db {
             } else {
                 vec![field_key.clone()]
             };
-            let mut values = self.store.multi_get_raw_async(&keys).await.into_iter();
+            let mut values = self.store.multi_get_raw_async(&keys).await?.into_iter();
             let field_raw = values.next().flatten();
             let expire_raw = values.next().flatten();
             (field_raw, expire_raw)

@@ -25,13 +25,13 @@ impl Type {
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         Ok(Frame::SimpleString(
-            db.type_name_readonly(&self.key).to_string(),
+            db.type_name_readonly(&self.key)?.to_string(),
         ))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         Ok(Frame::SimpleString(
-            db.type_name_readonly_async(&self.key).await.to_string(),
+            db.type_name_readonly_async(&self.key).await?.to_string(),
         ))
     }
 }

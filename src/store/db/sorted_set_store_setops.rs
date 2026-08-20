@@ -8,11 +8,11 @@ impl Db {
     ) -> Result<usize, Error> {
         let len = entries.len();
         if len == 0 {
-            self.delete_key(destination);
+            self.delete_key(destination)?;
             return Ok(0);
         }
         let set = entries.into_iter().collect::<BTreeMap<_, _>>();
-        self.insert(destination.to_string(), Structure::SortedSet(set));
+        self.insert(destination.to_string(), Structure::SortedSet(set))?;
         Ok(len)
     }
 
@@ -24,10 +24,10 @@ impl Db {
         let _write_guard = self.set_write_lock(destination).lock().await;
         let len = entries.len();
         if len == 0 {
-            self.delete_key_internal_async(destination, true).await;
+            self.delete_key_internal_async(destination, true).await?;
             return Ok(0);
         }
-        self.delete_key_internal_async(destination, true).await;
+        self.delete_key_internal_async(destination, true).await?;
         let members = entries
             .into_iter()
             .map(|(member, score)| (score, member))

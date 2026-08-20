@@ -11,7 +11,7 @@ impl Db {
     ) -> Result<Option<StreamId>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let (mut meta, mut entries) = match observed.value() {
                 None => (
                     StreamMeta {
@@ -69,7 +69,7 @@ impl Db {
     ) -> Result<Option<StreamId>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let (mut meta, mut entries) = match observed.value() {
                 None => (
                     StreamMeta {
@@ -127,11 +127,15 @@ impl Db {
         additions: &[StreamAddBatchCommand<'a>],
         keys: &[&'a str],
         key_positions: &HashMap<&'a str, usize>,
-    ) -> Option<Vec<Result<StreamId, Error>>> {
+    ) -> Result<Option<Vec<Result<StreamId, Error>>>, Error> {
         let mut states = Vec::with_capacity(keys.len());
         for key in keys {
-            self.expire_if_needed_async(key).await;
-            let raw = self.store.get_raw_async(&self.mk(key)).await;
+            self.expire_if_needed_async(key).await?;
+            let raw = self
+                .store
+                .get_raw_async(&self.mk(key))
+                .await
+                .map_err(|error| Error::msg(error.to_string()))?;
             let state = match raw.as_deref() {
                 None => Some((
                     StreamMeta {
@@ -151,13 +155,14 @@ impl Db {
                         .store
                         .get_raw_async(&self.mk(packed_key))
                         .await
+                        .map_err(|error| Error::msg(error.to_string()))?
                         .as_deref()
                         .is_some_and(is_packed_stream_raw)
                     {
-                        self.promote_packed_stream_async(packed_key).await.ok()?;
+                        self.promote_packed_stream_async(packed_key).await?;
                     }
                 }
-                return None;
+                return Ok(None);
             }
             states.push(state.expect("packed stream state was checked"));
         }
@@ -190,13 +195,14 @@ impl Db {
                         .store
                         .get_raw_async(&self.mk(packed_key))
                         .await
+                        .map_err(|error| Error::msg(error.to_string()))?
                         .as_deref()
                         .is_some_and(is_packed_stream_raw)
                     {
-                        self.promote_packed_stream_async(packed_key).await.ok()?;
+                        self.promote_packed_stream_async(packed_key).await?;
                     }
                 }
-                return None;
+                return Ok(None);
             }
             replies.push(result);
         }
@@ -211,14 +217,16 @@ impl Db {
                         &encode_packed_stream(*meta, entries)
                             .expect("validated packed stream must encode"),
                     )
-                    .ok()?;
+                    .map_err(|error| Error::msg(error.to_string()))?;
             }
         }
         if changed > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            if let Err(error) = self.write_batch_if_not_empty_async(&batch).await {
+                return Ok(Some(fail_successful_batch_replies(replies, error)));
+            }
             self.changes.fetch_add(changed, Ordering::Relaxed);
         }
-        Some(replies)
+        Ok(Some(replies))
     }
 
     /// Apply a pipelined set of XADD commands with one metadata read and one storage batch per
@@ -243,10 +251,14 @@ impl Db {
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
         let _write_guards = self.lock_write_shards(&shards).await;
 
-        if let Some(replies) = self
+        let packed = self
             .try_stream_add_batch_packed_async(additions, &keys, &key_positions)
-            .await
-        {
+            .await;
+        let packed = match packed {
+            Ok(packed) => packed,
+            Err(error) => return storage_batch_error(additions.len(), error),
+        };
+        if let Some(replies) = packed {
             return replies;
         }
 
@@ -326,10 +338,16 @@ impl Db {
                 .enumerate()
                 .any(|(position, dirty)| *dirty && !initially_exists[position]);
             if has_new_version {
-                self.write_batch_if_not_empty_async(&batch).await;
+                if let Err(error) = self.write_batch_if_not_empty_async(&batch).await {
+                    return fail_successful_batch_replies(replies, error);
+                }
             } else {
-                self.write_existing_version_batch_if_not_empty_async(&batch)
-                    .await;
+                if let Err(error) = self
+                    .write_existing_version_batch_if_not_empty_async(&batch)
+                    .await
+                {
+                    return fail_successful_batch_replies(replies, error);
+                }
             }
             self.changes.fetch_add(changed, Ordering::Relaxed);
         }
@@ -348,7 +366,7 @@ impl Db {
             ));
         }
 
-        self.expire_if_needed(key);
+        self.expire_if_needed(key)?;
         if let Some(id) = self.try_stream_add_packed(key, requested_id, fields)? {
             return Ok(id);
         }
@@ -393,7 +411,7 @@ impl Db {
         .expect("write batch append invariant violated");
         (batch.put(&self.mk(key), &encode_stream_meta(meta)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(id)
     }
@@ -418,7 +436,7 @@ impl Db {
         }
 
         let _stream_write_guard = self.set_write_lock(key).lock().await;
-        self.expire_if_needed_async(key).await;
+        self.expire_if_needed_async(key).await?;
         if let Some(id) = self
             .try_stream_add_packed_async(key, requested_id, fields)
             .await?
@@ -465,7 +483,7 @@ impl Db {
         .expect("write batch append invariant violated");
         (batch.put(&self.mk(key), &encode_stream_meta(meta)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(id)
     }

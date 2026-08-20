@@ -6,14 +6,14 @@ impl Db {
         for term in terms {
             let normalized = term.to_lowercase();
             let key = fulltext_dict_term_key(self.db_index, dict, &normalized);
-            if self.store.get_raw(&key).is_none() {
+            if self.store.get_raw(&key)?.is_none() {
                 inserted += 1;
             }
             batch
                 .put(&key, normalized.as_bytes())
                 .map_err(|error| Error::msg(error.to_string()))?;
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         Ok(Frame::Integer(inserted))
     }
 
@@ -32,14 +32,14 @@ impl Db {
         let mut batch = WriteBatch::new();
         for term in terms {
             let key = fulltext_dict_term_key(self.db_index, dict, &term.to_lowercase());
-            if self.store.get_raw(&key).is_some() {
+            if self.store.get_raw(&key)?.is_some() {
                 deleted += 1;
                 batch
                     .delete(&key)
                     .map_err(|error| Error::msg(error.to_string()))?;
             }
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         Ok(Frame::Integer(deleted))
     }
 
@@ -172,7 +172,7 @@ impl Db {
             return Err(Error::msg("ERR invalid suggestion score"));
         }
         let storage_key = fulltext_suggest_key(self.db_index, key, string);
-        let existed = self.store.get_raw(&storage_key);
+        let existed = self.store.get_raw(&storage_key)?;
         let old = existed
             .as_ref()
             .map(|raw| decode_record::<FullTextSuggestRecord>(raw))
@@ -193,7 +193,7 @@ impl Db {
         batch
             .put(&storage_key, &encode_record(&record)?)
             .map_err(|error| Error::msg(error.to_string()))?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         Ok(Frame::Integer(if existed.is_some() { 0 } else { 1 }))
     }
 
@@ -226,7 +226,7 @@ impl Db {
         let mut entries = Vec::new();
         for (raw_key, raw) in self
             .store
-            .scan_prefix_raw(&fulltext_suggest_prefix(self.db_index, key))
+            .scan_prefix_raw(&fulltext_suggest_prefix(self.db_index, key))?
         {
             let Some(string) = fulltext_suggest_string_from_key(self.db_index, key, &raw_key)
             else {
@@ -282,13 +282,13 @@ impl Db {
 
     pub fn fulltext_sugdel(&self, key: &str, string: &str) -> Result<Frame, Error> {
         let storage_key = fulltext_suggest_key(self.db_index, key, string);
-        let existed = self.store.get_raw(&storage_key).is_some();
+        let existed = self.store.get_raw(&storage_key)?.is_some();
         if existed {
             let mut batch = WriteBatch::new();
             batch
                 .delete(&storage_key)
                 .map_err(|error| Error::msg(error.to_string()))?;
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
         }
         Ok(Frame::Integer(i64::from(existed)))
     }
@@ -303,7 +303,7 @@ impl Db {
     pub fn fulltext_suglen(&self, key: &str) -> Result<Frame, Error> {
         Ok(Frame::Integer(
             self.store
-                .scan_prefix_raw(&fulltext_suggest_prefix(self.db_index, key))
+                .scan_prefix_raw(&fulltext_suggest_prefix(self.db_index, key))?
                 .len() as i64,
         ))
     }
@@ -339,7 +339,7 @@ impl Db {
                 &encode_record(&record)?,
             )
             .map_err(|error| Error::msg(error.to_string()))?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if skip_initial_scan {
             if let Some(runtime) = self.fulltext_runtimes.get(self.db_index, &index) {
                 runtime
@@ -374,7 +374,7 @@ impl Db {
         let mut groups = Vec::new();
         for (raw_key, raw) in self
             .store
-            .scan_prefix_raw(&fulltext_syn_prefix(self.db_index, &index))
+            .scan_prefix_raw(&fulltext_syn_prefix(self.db_index, &index))?
         {
             let Some(group) = fulltext_syn_group_from_key(self.db_index, &index, &raw_key) else {
                 continue;

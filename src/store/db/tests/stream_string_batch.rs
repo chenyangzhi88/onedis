@@ -10,31 +10,49 @@ async fn async_batch_string_overwrite_defers_old_subkeys_to_compaction() {
     db.promote_packed_hash_async("batch-overwrite")
         .await
         .unwrap();
-    let raw = db.store.get_raw(&db.mk("batch-overwrite")).unwrap();
+    let raw = db
+        .store
+        .get_raw(&db.mk("batch-overwrite"))
+        .unwrap()
+        .unwrap();
     let version = decode_meta_header(&raw).unwrap().version;
     let prefix = hash_field_prefix(db.db_index, "batch-overwrite", version);
-    assert_eq!(db.store.scan_prefix_raw_async(&prefix).await.len(), 1);
+    assert_eq!(
+        db.store.scan_prefix_raw_async(&prefix).await.unwrap().len(),
+        1
+    );
 
     db.insert_string_bytes_many_async(vec![("batch-overwrite".to_string(), b"plain".to_vec())])
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(
         db.get_string_bytes_async("batch-overwrite").await.unwrap(),
         Some(b"plain".to_vec())
     );
-    assert_eq!(db.store.scan_prefix_raw_async(&prefix).await.len(), 1);
+    assert_eq!(
+        db.store.scan_prefix_raw_async(&prefix).await.unwrap().len(),
+        1
+    );
 
     db.store.mark_version_compaction_ready();
     assert_eq!(db.refresh_retired_versions_once(usize::MAX), 1);
     db.store.manual_compaction().unwrap();
-    assert!(db.store.scan_prefix_raw_async(&prefix).await.is_empty());
+    assert!(
+        db.store
+            .scan_prefix_raw_async(&prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn conditional_string_batch_is_atomic_and_preserves_requested_ttl() {
     let db = test_db();
-    db.insert_string_bytes("existing".to_string(), b"old".to_vec(), Some(60_000));
-    let old_ttl = db.ttl_millis("existing");
+    db.insert_string_bytes("existing".to_string(), b"old".to_vec(), Some(60_000))
+        .unwrap();
+    let old_ttl = db.ttl_millis("existing").unwrap();
 
     assert!(
         !db.set_string_bytes_many_async(
@@ -64,8 +82,8 @@ async fn conditional_string_batch_is_atomic_and_preserves_requested_ttl() {
         db.get_string("existing").unwrap().as_deref(),
         Some("changed")
     );
-    assert!(db.ttl_millis("existing") > 0);
-    assert!(db.ttl_millis("existing") <= old_ttl);
+    assert!(db.ttl_millis("existing").unwrap() > 0);
+    assert!(db.ttl_millis("existing").unwrap() <= old_ttl);
 }
 
 #[test]
@@ -92,7 +110,7 @@ fn stream_add_len_and_range_use_ordered_ids() {
     assert_eq!(first.to_redis_id(), "1-0");
     assert_eq!(second.to_redis_id(), "2-0");
     assert_eq!(db.stream_len("events").unwrap(), 2);
-    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap()).is_some());
+    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap().unwrap()).is_some());
 
     let entries = db
         .stream_range(
@@ -129,7 +147,7 @@ fn stream_promotes_at_the_inline_limit_and_never_demotes() {
         )
         .unwrap();
     }
-    let raw = db.store.get_raw(&db.mk("events")).unwrap();
+    let raw = db.store.get_raw(&db.mk("events")).unwrap().unwrap();
     let meta = decode_stream_meta(&raw).unwrap();
     assert_ne!(meta.version, 0);
     assert!(decode_packed_stream(&raw).is_none());
@@ -141,7 +159,7 @@ fn stream_promotes_at_the_inline_limit_and_never_demotes() {
         })
         .collect::<Vec<_>>();
     db.stream_delete("events", &ids).unwrap();
-    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap()).is_none());
+    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap().unwrap()).is_none());
 }
 
 #[test]
@@ -153,11 +171,11 @@ fn creating_a_consumer_group_promotes_a_packed_stream() {
         &[("field".to_string(), "value".to_string())],
     )
     .unwrap();
-    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap()).is_some());
+    assert!(decode_packed_stream(&db.store.get_raw(&db.mk("events")).unwrap().unwrap()).is_some());
 
     db.stream_group_create("events", "workers", StreamId { ms: 0, seq: 0 }, false)
         .unwrap();
-    let raw = db.store.get_raw(&db.mk("events")).unwrap();
+    let raw = db.store.get_raw(&db.mk("events")).unwrap().unwrap();
     assert!(decode_packed_stream(&raw).is_none());
     assert_ne!(decode_stream_meta(&raw).unwrap().version, 0);
 }
@@ -387,7 +405,8 @@ fn stream_reverse_range_and_xread_semantics() {
 #[test]
 fn stream_rejects_wrong_type_and_duplicate_ids() {
     let db = test_db();
-    db.insert("plain".to_string(), Structure::String("value".to_string()));
+    db.insert("plain".to_string(), Structure::String("value".to_string()))
+        .unwrap();
     assert!(db.stream_len("plain").is_err());
     assert!(
         db.stream_add(
@@ -423,9 +442,12 @@ fn stream_delete_removes_entry_namespace() {
         &[("f".to_string(), "v".to_string())],
     )
     .unwrap();
-    assert!(matches!(db.get("events"), Some(Structure::Stream(_))));
+    assert!(matches!(
+        db.get("events").unwrap(),
+        Some(Structure::Stream(_))
+    ));
 
-    db.remove("events");
+    db.remove("events").unwrap();
     assert_eq!(db.stream_len("events").unwrap(), 0);
     assert!(
         db.stream_range("events", None, None, None, false)
@@ -449,62 +471,76 @@ fn stream_delete_counts_duplicate_ids_once() {
 async fn string_batch_async_helpers_cover_empty_versioned_and_byte_key_paths() {
     let db = test_db();
 
-    db.insert_string_bytes_refs_async(&[]).await;
+    db.insert_string_bytes_refs_async(&[]).await.unwrap();
     db.insert_string_bytes_refs_without_watch_publish_async(&[])
-        .await;
-    db.insert_string_byte_keys_async(&[]).await;
+        .await
+        .unwrap();
+    db.insert_string_byte_keys_async(&[]).await.unwrap();
     db.insert_string_byte_keys_without_watch_publish_async(&[])
-        .await;
+        .await
+        .unwrap();
 
     db.insert_string_bytes_refs_async(&[("a", b"1"), ("b", b"2")])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(db.get_string("a").unwrap(), Some("1".to_string()));
     assert_eq!(db.get_string("b").unwrap(), Some("2".to_string()));
 
     db.insert_string_bytes_refs_without_watch_publish_async(&[("a", b"updated")])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(db.get_string("a").unwrap(), Some("updated".to_string()));
 
     db.insert_string_byte_keys_async(&[(b"raw:a".as_slice(), b"ra".as_slice())])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(db.get_string("raw:a").unwrap(), Some("ra".to_string()));
 
     db.insert_string_byte_keys_without_watch_publish_async(&[(
         b"raw:a".as_slice(),
         b"rb".as_slice(),
     )])
-    .await;
+    .await
+    .unwrap();
     assert_eq!(db.get_string("raw:a").unwrap(), Some("rb".to_string()));
 
     let _ = db.next_version();
     db.insert_string_bytes_refs_async(&[("a", b"v1"), ("c", b"3")])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(db.get_string("a").unwrap(), Some("v1".to_string()));
     assert_eq!(db.get_string("c").unwrap(), Some("3".to_string()));
 
     db.insert_string_bytes_refs_without_watch_publish_async(&[("c", b"4")])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(db.get_string("c").unwrap(), Some("4".to_string()));
 
     db.insert_string_byte_keys_async(&[(b"raw:b".as_slice(), b"1".as_slice())])
-        .await;
+        .await
+        .unwrap();
     db.insert_string_byte_keys_without_watch_publish_async(&[(
         b"raw:b".as_slice(),
         b"2".as_slice(),
     )])
-    .await;
+    .await
+    .unwrap();
     assert_eq!(db.get_string("raw:b").unwrap(), Some("2".to_string()));
 }
 
 #[tokio::test]
 async fn borrowed_string_batch_publishes_watch_mutations() {
     let db = test_db();
-    let (key_version, db_version) = db.watch_version_snapshot("watched-fast-set");
+    let (key_version, db_version) = db.watch_version_snapshot("watched-fast-set").unwrap();
 
     db.insert_string_bytes_refs_async(&[("watched-fast-set", b"value")])
-        .await;
+        .await
+        .unwrap();
 
-    assert!(db.watch_version_changed("watched-fast-set", key_version, db_version));
+    assert!(
+        db.watch_version_changed("watched-fast-set", key_version, db_version)
+            .unwrap()
+    );
 }
 
 #[tokio::test]

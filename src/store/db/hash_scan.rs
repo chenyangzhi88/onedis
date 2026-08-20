@@ -95,14 +95,14 @@ impl Db {
         let Some(lower) = self
             .store
             .scan_range_raw_start_at_offset_async(&prefix, upper.clone(), start_index)
-            .await
+            .await?
         else {
             return Ok((0, Vec::new()));
         };
         let raw_entries = self
             .store
             .scan_range_raw_limited_async(&lower, upper, count.saturating_add(1))
-            .await;
+            .await?;
         let has_more = raw_entries.len() > count;
         let items = raw_entries
             .into_iter()
@@ -130,7 +130,7 @@ impl Db {
         pattern_str: &str,
         count: usize,
     ) -> Result<(u64, HashScanEntriesBytes), Error> {
-        let mut entries = self.hash_live_entries_for_meta_async(key, meta).await;
+        let mut entries = self.hash_live_entries_for_meta_async(key, meta).await?;
         if pattern_str != "*" {
             let matcher = pattern::Matcher::new(pattern_str);
             entries.retain(|(field, _)| {

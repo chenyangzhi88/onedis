@@ -2,11 +2,9 @@ use super::*;
 impl Db {
     pub fn fulltext_observability_snapshot(
         &self,
-    ) -> crate::store::db::FullTextObservabilitySnapshot {
+    ) -> Result<crate::store::db::FullTextObservabilitySnapshot, Error> {
         let mut snapshot = crate::store::db::FullTextObservabilitySnapshot::default();
-        let Ok(metas) = self.read_all_fulltext_metas() else {
-            return snapshot;
-        };
+        let metas = self.read_all_fulltext_metas()?;
         for (index, meta) in metas {
             match meta.state {
                 FullTextIndexState::Creating => snapshot.creating += 1,
@@ -34,10 +32,10 @@ impl Db {
                         .map(|runtime| runtime.published_outbox_seq())
                 })
                 .unwrap_or(meta.last_indexed_outbox_seq);
-            snapshot.outbox_pending +=
-                self.fulltext_unpublished_outbox_count(&index, published) as u64;
+            let pending = self.fulltext_unpublished_outbox_count(&index, published)?;
+            snapshot.outbox_pending += pending as u64;
         }
-        snapshot
+        Ok(snapshot)
     }
 
     pub fn fulltext_info(&self, index: &str) -> Result<Frame, Error> {
@@ -68,9 +66,9 @@ impl Db {
                 meta.indexed_docs as usize,
             ));
         let outbox_seq = self
-            .fulltext_latest_outbox_seq(&index)
+            .fulltext_latest_outbox_seq(&index)?
             .unwrap_or(durable_seq);
-        let pending = self.fulltext_unpublished_outbox_count(&index, published_seq);
+        let pending = self.fulltext_unpublished_outbox_count(&index, published_seq)?;
         let source_key_count = published_docs;
         let indexed_field_count = meta
             .schema
@@ -89,7 +87,7 @@ impl Db {
             .count();
         let runtime_loaded = self.fulltext_runtimes.get(self.db_index, &index).is_some();
         let storage_name = self.fulltext_active_storage_name(&index, &meta);
-        let file_bytes = self.fulltext_file_bytes(&storage_name);
+        let file_bytes = self.fulltext_file_bytes(&storage_name)?;
         let effective_policy = self.fulltext_effective_refresh_policy(&meta)?;
         let cluster_enabled = self.fulltext_cluster_enabled()?;
         let cluster_shards = self.fulltext_cluster_shards()?;

@@ -39,7 +39,7 @@ impl Psetex {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        db.insert_string_bytes(self.key, self.value, Some(self.milliseconds));
+        db.insert_string_bytes(self.key, self.value, Some(self.milliseconds))?;
         Ok(Frame::Ok)
     }
 

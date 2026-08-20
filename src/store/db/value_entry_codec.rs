@@ -135,5 +135,7 @@ pub(in crate::store::db) fn decode_expire_ms(raw: &[u8]) -> u64 {
     if raw.len() < 8 {
         return 0;
     }
-    u64::from_be_bytes(raw[0..8].try_into().unwrap())
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&raw[..8]);
+    u64::from_be_bytes(bytes)
 }

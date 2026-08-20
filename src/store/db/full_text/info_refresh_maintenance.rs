@@ -14,12 +14,37 @@ impl Db {
         self.fulltext_maintenance_tick_mode(true)
     }
 
+    /// Advances all full-text publishers once for embedded users that construct a
+    /// [`Db`] without a [`DatabaseManager`](crate::store::db_manager::DatabaseManager).
+    /// Server deployments use the supervised background publisher instead.
+    pub fn maintain_fulltext_indexes(&self) -> Result<(), Error> {
+        self.fulltext_maintenance_tick()
+    }
+
     pub(super) fn fulltext_maintenance_tick_mode(&self, force_refresh: bool) -> Result<(), Error> {
         let snapshots = self.read_all_fulltext_metas()?;
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        const BACKGROUND_INDEX_BUDGET: usize = 4;
+        let count = if force_refresh {
+            snapshots.len()
+        } else {
+            snapshots.len().min(BACKGROUND_INDEX_BUDGET)
+        };
+        let start = if force_refresh {
+            0
+        } else {
+            self.fulltext_runtimes
+                .maintenance_cursor
+                .fetch_add(count, AtomicOrdering::AcqRel)
+                % snapshots.len()
+        };
         let mut first_error = None;
-        for (index, snapshot) in snapshots {
+        for offset in 0..count {
+            let (index, snapshot) = &snapshots[(start + offset) % snapshots.len()];
             if let Err(error) =
-                self.fulltext_maintain_index_snapshot_mode(&index, &snapshot, force_refresh)
+                self.fulltext_maintain_index_snapshot_mode(index, snapshot, force_refresh)
                 && first_error.is_none()
             {
                 first_error = Some(Error::msg(format!("index {index}: {error}")));
@@ -43,7 +68,7 @@ impl Db {
         snapshot: &FullTextIndexMeta,
         force_refresh: bool,
     ) -> Result<(), Error> {
-        if self.fulltext_index_expired(index, snapshot)
+        if self.fulltext_index_expired(index, snapshot)?
             || matches!(
                 snapshot.state,
                 FullTextIndexState::Creating
@@ -62,7 +87,7 @@ impl Db {
             return Ok(());
         };
         if meta.incarnation != snapshot.incarnation
-            || self.fulltext_index_expired(index, &meta)
+            || self.fulltext_index_expired(index, &meta)?
             || !matches!(
                 meta.state,
                 FullTextIndexState::Backfilling
@@ -101,7 +126,7 @@ impl Db {
         if meta.incarnation != expected_incarnation {
             return Ok(());
         }
-        if self.fulltext_index_expired(index, &meta)
+        if self.fulltext_index_expired(index, &meta)?
             || matches!(meta.state, FullTextIndexState::Dropping)
         {
             return self.fulltext_purge_index_inner(index, &meta, &expected_raw);
@@ -183,7 +208,7 @@ impl Db {
             let mut batch = WriteBatch::new();
             match self
                 .store
-                .get_raw(&self.mk(&key))
+                .get_raw(&self.mk(&key))?
                 .and_then(|raw| decode_meta_header(&raw))
                 .map(|header| header.type_tag)
             {
@@ -201,7 +226,9 @@ impl Db {
                 }
             }
             if batch.count() > 0 {
-                self.store.write_batch_direct(&batch);
+                self.store
+                    .write_batch_direct(&batch)
+                    .map_err(|error| Error::msg(error.to_string()))?;
                 self.fulltext_observe_committed_outbox_batch(&batch);
                 if refresh_immediately {
                     self.fulltext_request_refresh(&key)?;

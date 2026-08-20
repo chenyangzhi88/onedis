@@ -36,7 +36,7 @@ impl Sunionstore {
         let mut result_set = HashSet::new();
 
         for key in keys {
-            if let Some(structure) = db.get(&key) {
+            if let Some(structure) = db.get(&key)? {
                 match structure {
                     Structure::Set(set) => {
                         for member in set.iter() {
@@ -52,9 +52,9 @@ impl Sunionstore {
         }
         let len = result_set.len();
         if result_set.is_empty() {
-            db.delete_key(&destination);
+            db.delete_key(&destination)?;
         } else {
-            db.insert(destination, Structure::Set(result_set));
+            db.insert(destination, Structure::Set(result_set))?;
         }
         Ok(Frame::Integer(len as i64))
     }

@@ -1,24 +1,31 @@
-fn put_vector_marker_to_batch(
-    batch: &mut WriteBatch,
+struct VectorMarker<'a> {
     layout: KeyEncodingLayout,
     db_index: u16,
-    index: &str,
+    index: &'a str,
     expire_ms: u64,
     version: u64,
     dim: u32,
     internal: bool,
+}
+
+fn put_vector_marker_to_batch(
+    batch: &mut WriteBatch,
+    marker: VectorMarker<'_>,
 ) -> Result<(), Error> {
-    let marker = Structure::VectorCollection(Vector {
-        dimension: dim as usize,
+    let value = Structure::VectorCollection(Vector {
+        dimension: marker.dim as usize,
         vectors: Default::default(),
         norms: Default::default(),
     });
-    let marker_key = if internal {
-        vector_internal_marker_key(layout, db_index, index)
+    let marker_key = if marker.internal {
+        vector_internal_marker_key(marker.layout, marker.db_index, marker.index)
     } else {
-        layout.main_key(db_index, index)
+        marker.layout.main_key(marker.db_index, marker.index)
     };
-    batch.put(&marker_key, &encode_entry(&marker, expire_ms, version))?;
+    batch.put(
+        &marker_key,
+        &encode_entry(&value, marker.expire_ms, marker.version),
+    )?;
     Ok(())
 }
 

@@ -145,7 +145,7 @@ fn bitmap_parsers_reject_binary_text_arguments_and_oversized_offsets() {
 }
 
 #[test]
-fn command_name_and_aof_flags_cover_late_dispatch_variants() {
+fn command_name_and_access_flags_cover_late_dispatch_variants() {
     let cases: &[(&[&str], &str, bool)] = &[
         (&["CLIENT", "HELP"], "CLIENT", false),
         (&["CONFIG", "HELP"], "CONFIG", false),
@@ -396,11 +396,11 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
         (&["WASM.LIST"], "WASM.LIST", false),
     ];
 
-    for (args, expected_name, expected_aof) in cases {
+    for (args, expected_name, expected_mutating) in cases {
         let command = Command::parse_from_frame(frame_args(args))
             .unwrap_or_else(|err| panic!("{args:?} failed to parse: {err}"));
         assert_eq!(command.name(), *expected_name, "{args:?}");
-        assert_eq!(command.propagate_aof_if_needed(), *expected_aof, "{args:?}");
+        assert_eq!(command.is_mutating(), *expected_mutating, "{args:?}");
     }
 
     let unsupported = Command::FtUnsupported(
@@ -408,11 +408,11 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
     );
     assert_eq!(unsupported.name(), "FT.UNSUPPORTED");
     assert_eq!(unsupported.effective_name(), "FT.DEBUG");
-    assert!(!unsupported.propagate_aof_if_needed());
+    assert!(!unsupported.is_mutating());
 
     let unknown = Command::parse_from_frame(frame_args(&["NOTACOMMAND"])).unwrap();
     assert_eq!(unknown.name(), "UNKNOWN");
-    assert!(!unknown.propagate_aof_if_needed());
+    assert!(!unknown.is_mutating());
 
     for args in [
         &["FUNCTION", "LIST"][..],
@@ -421,7 +421,7 @@ fn command_name_and_aof_flags_cover_late_dispatch_variants() {
     ] {
         let unsupported = Command::parse_from_frame(frame_args(args)).unwrap();
         assert_eq!(unsupported.name(), "UNKNOWN", "{args:?}");
-        assert!(!unsupported.propagate_aof_if_needed(), "{args:?}");
+        assert!(!unsupported.is_mutating(), "{args:?}");
     }
 }
 
@@ -470,7 +470,7 @@ fn geo_read_only_aliases_and_geosearch_reject_store_options() {
     ]))
     .unwrap();
     assert_eq!(command.name(), "GEOSEARCHSTORE");
-    assert!(command.propagate_aof_if_needed());
+    assert!(command.is_mutating());
 }
 
 #[test]

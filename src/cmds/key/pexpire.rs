@@ -42,14 +42,14 @@ impl Pexpire {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let changed = db.expire_with_condition(self.key, self.ttl, self.condition);
+        let changed = db.expire_with_condition(self.key, self.ttl, self.condition)?;
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let changed = db
             .expire_with_condition_async(self.key, self.ttl, self.condition)
-            .await;
+            .await?;
         Ok(Frame::Integer(if changed { 1 } else { 0 }))
     }
 }

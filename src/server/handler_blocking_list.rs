@@ -15,13 +15,12 @@ impl Handler {
         };
 
         loop {
-            let notified = self.db_manager.list_notify().notified();
+            let db = self.session.get_db().clone();
+            let waiter = db.wait_for_key_mutations(&Self::blocking_list_keys(&command));
+            let notified = waiter.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(frame) = self.try_blocking_list_command_once(&command).await? {
-                if !matches!(frame, Frame::Null | Frame::Error(_)) {
-                    self.db_manager.notify_list_waiters();
-                }
                 return Ok(self.encode_frame(&frame));
             }
             blocked.get_or_insert_with(|| self.client_control.begin_blocking());
@@ -125,14 +124,22 @@ impl Handler {
         }
     }
 
+    fn blocking_list_keys(command: &Command) -> Vec<&str> {
+        match command {
+            Command::Blpop(command) => command.keys.iter().map(String::as_str).collect(),
+            Command::Brpop(command) => command.inner.keys.iter().map(String::as_str).collect(),
+            Command::Brpoplpush(command) => {
+                vec![command.source.as_str(), command.destination.as_str()]
+            }
+            Command::Blmove(command) => {
+                vec![command.source.as_str(), command.destination.as_str()]
+            }
+            Command::Blmpop(command) => command.keys.iter().map(String::as_str).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     fn is_blocking_list_command(command: &Command) -> bool {
-        matches!(
-            command,
-            Command::Blpop(_)
-                | Command::Brpop(_)
-                | Command::Brpoplpush(_)
-                | Command::Blmove(_)
-                | Command::Blmpop(_)
-        )
+        command.spec().blocking_kind == crate::command::BlockingKind::List
     }
 }

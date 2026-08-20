@@ -32,10 +32,13 @@ fn command(args: &[&str]) -> Result<Command, anyhow::Error> {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     try_apply(db, args).expect("command failed")
 }
 
 fn try_apply(db: &Db, args: &[&str]) -> Result<Frame, anyhow::Error> {
+    db.maintain_fulltext_indexes()?;
     onedis_server::command_dispatch::handle_command(
         db,
         command(args).expect("failed to parse command"),

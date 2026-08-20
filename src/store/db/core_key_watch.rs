@@ -10,20 +10,20 @@ impl Db {
     /// The command watches logical keys, so a changed structure header, TTL, or
     /// type version must invalidate the transaction even if nested data lives in
     /// secondary namespaces.
-    pub fn raw_main_value_for_watch(&self, key: &str) -> Option<Vec<u8>> {
-        self.expire_if_needed(key);
-        self.store.get_raw(&self.mk(key))
+    pub fn raw_main_value_for_watch(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        self.expire_if_needed(key)?;
+        Ok(self.store.get_raw(&self.mk(key))?)
     }
 
-    pub fn watch_version_snapshot(&self, key: &str) -> (u64, u64) {
+    pub fn watch_version_snapshot(&self, key: &str) -> Result<(u64, u64), Error> {
         self.mutation_tracker
             .register_key(self.db_index, self.mk(key));
-        self.expire_if_needed(key);
+        self.expire_if_needed(key)?;
         let key_version = self
             .mutation_tracker
             .key_version(self.db_index, &self.mk(key));
         let db_version = self.mutation_tracker.db_version(self.db_index);
-        (key_version, db_version)
+        Ok((key_version, db_version))
     }
 
     pub fn release_watch(&self, key: &str) {
@@ -31,11 +31,25 @@ impl Db {
             .unregister_key(self.db_index, &self.mk(key));
     }
 
-    pub fn watch_version_changed(&self, key: &str, key_version: u64, db_version: u64) -> bool {
-        self.expire_if_needed(key);
-        self.mutation_tracker
+    pub(crate) fn wait_for_key_mutations(&self, keys: &[&str]) -> KeyMutationWaiter {
+        self.mutation_tracker.register_waiter(
+            keys.iter()
+                .map(|key| (self.db_index, self.mk(key)))
+                .collect(),
+        )
+    }
+
+    pub fn watch_version_changed(
+        &self,
+        key: &str,
+        key_version: u64,
+        db_version: u64,
+    ) -> Result<bool, Error> {
+        self.expire_if_needed(key)?;
+        Ok(self
+            .mutation_tracker
             .key_version(self.db_index, &self.mk(key))
             != key_version
-            || self.mutation_tracker.db_version(self.db_index) != db_version
+            || self.mutation_tracker.db_version(self.db_index) != db_version)
     }
 }

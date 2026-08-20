@@ -4,7 +4,7 @@ impl Db {
     pub(in crate::store::db) fn promote_packed_set(&self, key: &str) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -41,7 +41,7 @@ impl Db {
     ) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -76,9 +76,9 @@ impl Db {
     }
 
     pub(in crate::store::db) fn set_meta(&self, key: &str) -> Result<Option<SetMeta>, Error> {
-        self.expire_if_needed(key);
+        self.expire_if_needed(key)?;
 
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
             return Ok(None);
         };
 
@@ -99,9 +99,9 @@ impl Db {
         &self,
         key: &str,
     ) -> Result<Option<SetMeta>, Error> {
-        self.expire_if_needed_async(key).await;
+        self.expire_if_needed_async(key).await?;
 
-        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
             return Ok(None);
         };
 

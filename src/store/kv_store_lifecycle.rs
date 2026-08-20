@@ -12,6 +12,7 @@ impl KvStore {
             WriteOptions::buffered()
         };
         let version_compaction = Arc::new(crate::store::db::VersionCompactionTracker::default());
+        let health = Arc::new(crate::store::health::StorageHealth::default());
         let compaction_filter = Arc::new(crate::store::db::OnedisVersionCompactionFilter::new(
             version_compaction.clone(),
         ));
@@ -28,6 +29,7 @@ impl KvStore {
             table_name: Arc::from(Self::ROOT_TABLE),
             write_options,
             version_compaction,
+            health,
             txn: None,
         })
     }
@@ -64,6 +66,7 @@ impl KvStore {
             table_name: Arc::from(table_name),
             write_options: self.write_options.clone(),
             version_compaction: self.version_compaction.clone(),
+            health: self.health.clone(),
             txn: self.txn.clone(),
         })
     }
@@ -124,6 +127,7 @@ impl KvStore {
             table_name: self.table_name.clone(),
             write_options: self.write_options.clone(),
             version_compaction: self.version_compaction.clone(),
+            health: self.health.clone(),
             txn: Some(Arc::new(KvStoreTransactionContext {
                 txns: Mutex::new(Some(txns)),
             })),
@@ -137,7 +141,38 @@ impl KvStore {
             table_name: self.table_name.clone(),
             write_options: self.write_options.clone(),
             version_compaction: self.version_compaction.clone(),
+            health: self.health.clone(),
             txn: None,
+        }
+    }
+
+    pub fn storage_health(&self) -> Arc<crate::store::health::StorageHealth> {
+        self.health.clone()
+    }
+
+    pub async fn probe_health_async(&self) -> KvResult<()> {
+        if !self.health.begin_probe() {
+            return if self.health.is_healthy() {
+                Ok(())
+            } else {
+                Err(Status::InvalidArgument(
+                    "storage health probe already in progress".to_string(),
+                ))
+            };
+        }
+        match self
+            .table
+            .get_async(b"\0onedis-health-probe", &ReadOptions::default())
+            .await
+        {
+            Ok(_) => {
+                self.health.record_probe_success();
+                Ok(())
+            }
+            Err(error) => {
+                self.health.record_failure("storage health probe", &error);
+                Err(error)
+            }
         }
     }
 
@@ -209,7 +244,7 @@ impl KvStore {
         match access {
             Ok(value) => value,
             Err(error) => {
-                crate::store::health::storage_health().record_failure(operation, error);
+                self.health.record_failure(operation, &error);
                 Some(fallback())
             }
         }

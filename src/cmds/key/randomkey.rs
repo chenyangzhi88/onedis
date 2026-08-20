@@ -15,7 +15,7 @@ impl RandomKey {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        if let Some(key) = db.random_key() {
+        if let Some(key) = db.random_key()? {
             Ok(Frame::bulk_string(key))
         } else {
             Ok(Frame::Null)
@@ -23,7 +23,7 @@ impl RandomKey {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        if let Some(key) = db.random_key_async().await {
+        if let Some(key) = db.random_key_async().await? {
             Ok(Frame::bulk_string(key))
         } else {
             Ok(Frame::Null)

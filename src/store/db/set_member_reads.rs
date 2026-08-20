@@ -11,7 +11,7 @@ impl Db {
         if meta.packed {
             return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_set)
                 .is_some_and(|members| members.contains(member)));
@@ -19,7 +19,7 @@ impl Db {
 
         Ok(self
             .store
-            .contains_key(&set_member_key(self.db_index, key, meta.version, member)))
+            .contains_key(&set_member_key(self.db_index, key, meta.version, member))?)
     }
 
     pub async fn set_contains_async(&self, key: &str, member: &str) -> Result<bool, Error> {
@@ -32,7 +32,7 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_set)
                 .is_some_and(|members| members.contains(member)));
@@ -41,7 +41,7 @@ impl Db {
         Ok(self
             .store
             .contains_key_async(&set_member_key(self.db_index, key, meta.version, member))
-            .await)
+            .await?)
     }
 
     /// Check several members with one metadata lookup and one storage multi-get.
@@ -57,7 +57,7 @@ impl Db {
             let packed = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_set)
                 .ok_or_else(|| Error::msg("Failed to decode packed set"))?;
@@ -73,7 +73,7 @@ impl Db {
         Ok(self
             .store
             .multi_get_raw_async(&member_keys)
-            .await
+            .await?
             .into_iter()
             .map(|value| value.is_some())
             .collect())
@@ -89,7 +89,10 @@ impl Db {
             .iter()
             .map(|(key, _)| self.mk(key))
             .collect::<Vec<_>>();
-        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let metas = match self.store.multi_get_raw_async(&meta_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         let now = now_ms();
         let mut member_keys = Vec::new();
         let mut plans = Vec::with_capacity(commands.len());
@@ -144,7 +147,10 @@ impl Db {
                 count: members.len(),
             });
         }
-        let values = self.store.multi_get_raw_async(&member_keys).await;
+        let values = match self.store.multi_get_raw_async(&member_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         plans
             .into_iter()
             .map(|plan| match plan {
@@ -177,7 +183,7 @@ impl Db {
         };
 
         Ok(self
-            .set_members_raw(key, meta.version)
+            .set_members_raw(key, meta.version)?
             .into_iter()
             .filter_map(|member| String::from_utf8(member).ok())
             .collect())
@@ -201,7 +207,7 @@ impl Db {
 
         if meta.packed {
             let members = self
-                .set_members_raw(key, meta.version)
+                .set_members_raw(key, meta.version)?
                 .into_iter()
                 .map(|member| {
                     String::from_utf8(member)
@@ -245,7 +251,7 @@ impl Db {
                 members.push(member);
                 true
             },
-        );
+        )?;
 
         if exceeded {
             Err(Error::msg("ERR response exceeds configured limit"))
@@ -262,7 +268,7 @@ impl Db {
 
         Ok(self
             .set_members_raw_async(key, meta.version)
-            .await
+            .await?
             .into_iter()
             .filter_map(|member| String::from_utf8(member).ok())
             .collect())
@@ -288,7 +294,7 @@ impl Db {
         match self.set_meta_async(key).await? {
             Some(meta) => Ok(Some(
                 self.set_members_raw_async(key, meta.version)
-                    .await
+                    .await?
                     .into_iter()
                     .filter_map(|member| String::from_utf8(member).ok())
                     .collect(),

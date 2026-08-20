@@ -16,9 +16,9 @@ fn list_native_queue_ops_use_head_tail_metadata() {
         4
     );
     assert_eq!(db.list_len("queue").unwrap(), 4);
-    assert!(decode_packed_list(&db.store.get_raw(&db.mk("queue")).unwrap()).is_some());
+    assert!(decode_packed_list(&db.store.get_raw(&db.mk("queue")).unwrap().unwrap()).is_some());
     assert!(matches!(
-        db.get("queue"),
+        db.get("queue").unwrap(),
         Some(Structure::List(items))
             if items == vec![
                 "y".to_string(),
@@ -36,13 +36,13 @@ fn list_promotes_once_at_the_inline_item_limit() {
         .map(|index| format!("item-{index}"))
         .collect::<Vec<_>>();
     db.list_push_right("queue", &values, false).unwrap();
-    let raw = db.store.get_raw(&db.mk("queue")).unwrap();
+    let raw = db.store.get_raw(&db.mk("queue")).unwrap().unwrap();
     let meta = decode_list_meta(&raw).unwrap();
     assert_ne!(meta.version, 0);
     assert!(decode_packed_list(&raw).is_none());
 
     db.list_pop_right("queue").unwrap();
-    assert!(decode_packed_list(&db.store.get_raw(&db.mk("queue")).unwrap()).is_none());
+    assert!(decode_packed_list(&db.store.get_raw(&db.mk("queue")).unwrap().unwrap()).is_none());
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn list_native_pop_updates_meta_and_removes_empty_key() {
     assert_eq!(db.list_pop_right("queue").unwrap(), Some("b".to_string()));
     assert_eq!(db.list_pop_left("queue").unwrap(), None);
     assert_eq!(db.list_len("queue").unwrap(), 0);
-    assert!(!db.exists("queue"));
+    assert!(!db.exists("queue").unwrap());
 }
 
 #[tokio::test]
@@ -115,7 +115,7 @@ async fn concurrent_count_pops_return_every_item_once_and_remove_idle_queue() {
     }
     popped.sort();
     assert_eq!(popped, values);
-    assert!(!db.exists_readonly("concurrent-pop"));
+    assert!(!db.exists_readonly("concurrent-pop").unwrap());
     for _ in 0..8 {
         if db.counter_cache.list_pop_queues.is_empty() {
             break;
@@ -346,13 +346,14 @@ async fn stale_expired_list_cache_cannot_delete_recreated_list() {
         db.list_index_async("queue", 0).await.unwrap(),
         Some("new".to_string())
     );
-    assert!(db.exists("queue"));
+    assert!(db.exists("queue").unwrap());
 }
 
 #[test]
 fn list_native_ops_reject_wrong_type() {
     let db = test_db();
-    db.insert("plain".to_string(), Structure::String("value".to_string()));
+    db.insert("plain".to_string(), Structure::String("value".to_string()))
+        .unwrap();
 
     assert!(
         db.list_push_left("plain", &["x".to_string()], false)
@@ -395,7 +396,7 @@ fn list_native_pushx_only_updates_existing_list() {
         3
     );
     assert!(matches!(
-        db.get("queue"),
+        db.get("queue").unwrap(),
         Some(Structure::List(items))
             if items == vec!["b".to_string(), "a".to_string(), "c".to_string()]
     ));
@@ -508,7 +509,7 @@ fn list_move_supports_lmove_and_rpoplpush_shapes() {
     );
     assert_eq!(db.list_move("missing", "dest", false, true).unwrap(), None);
 
-    db.insert_string_ref("plain-destination", "value");
+    db.insert_string_ref("plain-destination", "value").unwrap();
     assert!(
         db.list_move("source", "plain-destination", false, true)
             .is_err()
@@ -780,7 +781,7 @@ async fn list_async_bytes_positions_move_trim_remove_and_errors_cover_edges() {
     assert_eq!(visited, 1);
     assert!(db.list_range_async("raw", 0, -1).await.is_err());
 
-    db.insert_string_ref("plain", "value");
+    db.insert_string_ref("plain", "value").unwrap();
     assert!(
         db.list_push_left_async("plain", &["x".to_string()], false)
             .await
@@ -833,5 +834,5 @@ fn list_native_set_and_trim_update_storage_in_place() {
 
     db.list_trim("queue", 10, 20).unwrap();
     assert_eq!(db.list_len("queue").unwrap(), 0);
-    assert!(!db.exists("queue"));
+    assert!(!db.exists("queue").unwrap());
 }

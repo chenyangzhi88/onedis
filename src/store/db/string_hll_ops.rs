@@ -31,10 +31,11 @@ impl Db {
         }
         let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
         let now = now_ms();
-        let decoded = self
-            .store
-            .multi_get_raw_async(&raw_keys)
-            .await
+        let raw_values = match self.store.multi_get_raw_async(&raw_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
+        let decoded = raw_values
             .into_iter()
             .map(|raw| {
                 let Some(raw) = raw else {
@@ -106,10 +107,15 @@ impl Db {
 
         for _ in 0..64 {
             for key in &keys {
-                self.expire_if_needed_async(key).await;
+                if let Err(error) = self.expire_if_needed_async(key).await {
+                    return storage_batch_error(commands.len(), error);
+                }
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = match self.store.multi_get_raw_observed_async(&raw_keys).await {
+                Ok(observations) => observations,
+                Err(error) => return storage_batch_error(commands.len(), error),
+            };
             let mut states = observations
                 .iter()
                 .map(|observed| HllBatchState::from_raw(observed.value().map(AsRef::as_ref)))
@@ -248,7 +254,7 @@ impl Db {
         for raw in self
             .store
             .multi_get_raw_async(&raw_keys)
-            .await
+            .await?
             .into_iter()
             .flatten()
         {
@@ -301,7 +307,7 @@ impl Db {
         for raw in self
             .store
             .multi_get_raw_async(&source_keys)
-            .await
+            .await?
             .into_iter()
             .flatten()
         {

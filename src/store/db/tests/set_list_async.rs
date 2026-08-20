@@ -27,7 +27,8 @@ async fn ordered_set_pipeline_batch_preserves_replies_and_final_members() {
     assert!(db.set_contains_async("batch-set", "b").await.unwrap());
     assert!(db.set_contains_async("batch-set", "c").await.unwrap());
 
-    db.insert_string("wrong-set".to_string(), "value".to_string(), None);
+    db.insert_string("wrong-set".to_string(), "value".to_string(), None)
+        .unwrap();
     let replies = db
         .apply_set_batch_mutations_async(&[SetBatchMutation::Add {
             key: "wrong-set",
@@ -50,7 +51,7 @@ async fn ordered_set_pipeline_batch_preserves_replies_and_final_members() {
         .await;
     assert!(matches!(replies[0], Ok(1)));
     assert!(matches!(replies[1], Ok(1)));
-    assert!(!db.exists_readonly("transient-set"));
+    assert!(!db.exists_readonly("transient-set").unwrap());
 }
 
 #[tokio::test]
@@ -114,9 +115,10 @@ async fn ordered_list_pop_pipeline_batch_preserves_both_ends_and_empty_replies()
     assert!(matches!(&replies[2], Ok(values) if values.as_slice() == [b"b".to_vec()]));
     assert!(matches!(&replies[3], Ok(values) if values.is_empty()));
     assert!(matches!(&replies[4], Ok(values) if values.is_empty()));
-    assert!(!db.exists_readonly("batch-list"));
+    assert!(!db.exists_readonly("batch-list").unwrap());
 
-    db.insert_string("wrong-list".to_string(), "value".to_string(), None);
+    db.insert_string("wrong-list".to_string(), "value".to_string(), None)
+        .unwrap();
     let replies = db
         .list_pop_many_batch_async(&[("wrong-list", true, 1)])
         .await;
@@ -148,7 +150,7 @@ async fn ordered_list_pop_pipeline_batch_preserves_both_ends_and_empty_replies()
     assert_eq!(replies[1].as_ref().unwrap(), &[b"d".to_vec()]);
     assert!(replies[2].as_ref().unwrap().is_empty());
     assert_eq!(replies[3].as_ref().unwrap(), &[b"c".to_vec()]);
-    assert!(!db.exists_readonly("counted-list"));
+    assert!(!db.exists_readonly("counted-list").unwrap());
 }
 
 #[tokio::test]
@@ -199,7 +201,8 @@ async fn set_async_store_random_move_and_error_paths_cover_edges() {
     assert!(db.set_move_async("left", "right", "a").await.unwrap());
     assert!(!db.set_move_async("left", "right", "missing").await.unwrap());
     assert!(db.set_contains("right", "a").unwrap());
-    db.insert_string("wrong-destination".to_string(), "value".to_string(), None);
+    db.insert_string("wrong-destination".to_string(), "value".to_string(), None)
+        .unwrap();
     assert!(
         db.set_move_async("left", "wrong-destination", "b")
             .await
@@ -283,7 +286,7 @@ async fn set_async_store_random_move_and_error_paths_cover_edges() {
         0
     );
 
-    db.insert_string_ref("not-set", "value");
+    db.insert_string_ref("not-set", "value").unwrap();
     assert_eq!(
         db.set_diff(&["not-set".to_string()])
             .unwrap_err()
@@ -307,8 +310,8 @@ async fn set_pop_async_uses_only_member_entries_for_set_data() {
     let meta = db.set_meta("repair").unwrap().unwrap();
     let member_prefix = set_member_prefix(db.db_index, "repair", meta.version);
     let owner_prefix = version_owner_prefix(db.db_index);
-    assert_eq!(db.store.scan_prefix_raw(&member_prefix).len(), 2);
-    assert_eq!(db.store.scan_prefix_raw(&owner_prefix).len(), 1);
+    assert_eq!(db.store.scan_prefix_raw(&member_prefix).unwrap().len(), 2);
+    assert_eq!(db.store.scan_prefix_raw(&owner_prefix).unwrap().len(), 1);
 
     let popped = db.set_pop_async("repair", 1).await.unwrap();
     assert_eq!(popped.len(), 1);
@@ -316,7 +319,7 @@ async fn set_pop_async_uses_only_member_entries_for_set_data() {
 
     let remaining = db.set_members("repair").unwrap();
     assert_eq!(remaining.len(), 1);
-    assert_eq!(db.store.scan_prefix_raw(&member_prefix).len(), 1);
+    assert_eq!(db.store.scan_prefix_raw(&member_prefix).unwrap().len(), 1);
     assert_eq!(
         db.set_pop_async("missing", 1).await.unwrap(),
         Vec::<String>::new()
@@ -334,15 +337,17 @@ async fn set_pop_async_does_not_mutate_an_inconsistent_set() {
     db.promote_packed_set("inconsistent-pop").unwrap();
 
     let meta = db.set_meta("inconsistent-pop").unwrap().unwrap();
-    db.store.put_raw(
-        &db.mk("inconsistent-pop"),
-        &encode_set_meta(meta.expire_ms, meta.version, 3),
-    );
+    db.store
+        .put_raw(
+            &db.mk("inconsistent-pop"),
+            &encode_set_meta(meta.expire_ms, meta.version, 3),
+        )
+        .unwrap();
 
     let error = db.set_pop_async("inconsistent-pop", 3).await.unwrap_err();
     assert!(error.to_string().contains("metadata length"));
     let member_prefix = set_member_prefix(db.db_index, "inconsistent-pop", meta.version);
-    assert_eq!(db.store.scan_prefix_raw(&member_prefix).len(), 2);
+    assert_eq!(db.store.scan_prefix_raw(&member_prefix).unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -420,7 +425,7 @@ async fn set_and_list_async_mutations_cover_rebuild_delete_and_concurrency_paths
         0
     );
 
-    db.insert_string_ref("plain-set", "value");
+    db.insert_string_ref("plain-set", "value").unwrap();
     assert!(
         db.set_add_async("plain-set", &["x".to_string()])
             .await
@@ -565,8 +570,13 @@ async fn concurrent_set_pop_returns_each_member_once_and_preserves_len() {
 #[tokio::test]
 async fn set_add_async_replaces_expired_structure_in_one_write_path() {
     let db = test_db();
-    db.insert_string_ref("expired-then-set", "old-value");
-    assert!(db.expire_async("expired-then-set".to_string(), 1).await);
+    db.insert_string_ref("expired-then-set", "old-value")
+        .unwrap();
+    assert!(
+        db.expire_async("expired-then-set".to_string(), 1)
+            .await
+            .unwrap()
+    );
     tokio::time::sleep(Duration::from_millis(5)).await;
 
     assert_eq!(
@@ -581,5 +591,5 @@ async fn set_add_async_replaces_expired_structure_in_one_write_path() {
     assert_eq!(db.set_len("expired-then-set").unwrap(), 2);
     assert!(db.set_contains("expired-then-set", "a").unwrap());
     assert!(db.set_contains("expired-then-set", "b").unwrap());
-    assert_eq!(db.ttl_millis("expired-then-set"), -1);
+    assert_eq!(db.ttl_millis("expired-then-set").unwrap(), -1);
 }

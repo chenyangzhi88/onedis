@@ -89,13 +89,11 @@ impl Db {
             };
             self.fulltext_vector_exact_results(
                 &vector_index,
-                vector_field,
                 &query_vector,
                 allow.as_deref(),
                 limit,
                 max_score,
-                limits.timeout.at,
-                limits.timeout.fail_on_timeout,
+                limits.timeout,
             )?
         } else {
             let vector_limit = match plan.kind {
@@ -147,7 +145,7 @@ impl Db {
                             .iter()
                             .map(|result| self.mk(&result.id))
                             .collect::<Vec<_>>(),
-                    )
+                    )?
                     .into_iter()
                     .filter(|raw| {
                         raw.as_deref()
@@ -192,7 +190,7 @@ impl Db {
                 .iter()
                 .map(|result| self.mk(&result.id))
                 .collect::<Vec<_>>(),
-        );
+        )?;
         let now = current_fulltext_millis();
         let source_free = options.no_content
             && options.sort_by.is_none()
@@ -268,25 +266,29 @@ impl Db {
     pub(super) fn fulltext_vector_exact_results(
         &self,
         vector_index: &str,
-        vector_field: &FullTextFieldSchema,
         query: &[f32],
         allow_doc_ids: Option<&HashSet<String>>,
         limit: Option<usize>,
         max_score: Option<f32>,
-        deadline: Instant,
-        fail_on_timeout: bool,
+        timeout: FullTextSearchDeadline,
     ) -> Result<Vec<VectorSearchResult>, Error> {
-        let _ = vector_field;
         let vector_budget =
             self.fulltext_config_usize("MEMORY_BUDGET_VECTOR_HEAP_BYTES", 16_777_216)?;
         self.vector_exact_distance_results(
-            vector_index,
-            query,
-            allow_doc_ids,
-            limit,
-            max_score,
-            vector_budget,
-            || Ok(!fulltext_search_timeout_reached(deadline, fail_on_timeout)?),
+            VectorExactDistanceRequest {
+                index: vector_index,
+                query,
+                allow_doc_ids,
+                limit,
+                max_score,
+                memory_budget: vector_budget,
+            },
+            || {
+                Ok(!fulltext_search_timeout_reached(
+                    timeout.at,
+                    timeout.fail_on_timeout,
+                )?)
+            },
         )
         .map_err(|error| {
             if error.to_string() == "ERR vector search memory budget exceeded" {

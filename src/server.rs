@@ -48,11 +48,14 @@ pub struct Server {
 impl Server {
     pub async fn new(args: Arc<ResolvedArgs>) -> Result<Self, Error> {
         crate::resource_limits::validate_resource_limit_environment()?;
-        let service_state = Arc::new(ServiceState::default());
         let session_manager = Arc::new(SessionManager::with_default_password(
             args.requirepass.as_deref(),
         ));
         let db_manager = Arc::new(DatabaseManager::try_new_async(args.clone()).await?);
+        let service_state = Arc::new(ServiceState::new_with_background(
+            db_manager.store().storage_health(),
+            Arc::clone(db_manager.background_health()),
+        ));
         let command_executor = Arc::new(CommandExecutor::from_env()?);
         let wasm_registry = Arc::new(WasmRegistry::new());
         let hard_maxclients = std::env::var("ONEDIS_HARD_MAX_CLIENTS")
@@ -347,6 +350,5 @@ include!("server/borrowed_fast_paths.rs");
 include!("server/resp_helpers.rs");
 
 #[cfg(test)]
-mod tests {
-    include!("server/tests.rs");
-}
+#[path = "server/tests.rs"]
+mod tests;

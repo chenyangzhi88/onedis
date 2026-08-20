@@ -153,7 +153,10 @@ async fn host_redis_del(
         return host_error(&mut caller, WASM_ERR_MEMORY);
     };
     let db = caller.data().db.clone();
-    i32::from(db.delete_key_async(&key).await)
+    match db.delete_key_async(&key).await {
+        Ok(deleted) => i32::from(deleted),
+        Err(_) => host_error(&mut caller, WASM_ERR_DB),
+    }
 }
 
 async fn host_redis_hget(
@@ -268,7 +271,10 @@ async fn host_redis_call(
                 return host_error(&mut caller, WASM_ERR_ARGUMENT);
             };
             let db = caller.data().db.clone();
-            i32::from(db.delete_key_async(key).await)
+            match db.delete_key_async(key).await {
+                Ok(deleted) => i32::from(deleted),
+                Err(_) => host_error(&mut caller, WASM_ERR_DB),
+            }
         }
         "HGET" if args.len() == 2 => {
             let (Ok(key), Ok(field)) =

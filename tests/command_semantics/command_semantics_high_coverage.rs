@@ -53,10 +53,14 @@ fn parse(args: &[&str]) -> Command {
 
 #[track_caller]
 fn apply(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     onedis_server::command_dispatch::handle_command(db, parse(args)).unwrap()
 }
 
 async fn apply_async(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     onedis_server::command_dispatch::handle_command_async(db, parse(args))
         .await
         .unwrap()

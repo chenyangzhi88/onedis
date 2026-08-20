@@ -324,7 +324,7 @@ pub(super) fn load_fulltext_synonyms_from_store(
     index: &str,
 ) -> Result<HashMap<String, HashSet<String>>, Error> {
     let mut synonyms: HashMap<String, HashSet<String>> = HashMap::new();
-    for (_, raw) in store.scan_prefix_raw(&fulltext_syn_prefix(db_index, index)) {
+    for (_, raw) in store.scan_prefix_raw(&fulltext_syn_prefix(db_index, index))? {
         let group = decode_record::<FullTextSynonymGroup>(&raw)?;
         for term in &group.terms {
             for synonym in &group.terms {

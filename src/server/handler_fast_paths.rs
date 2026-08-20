@@ -39,6 +39,15 @@ impl Handler {
         }
 
         let commands = parse_borrowed_resp_commands(bytes)?;
+        let contains_write = commands.iter().any(|args| {
+            args.first()
+                .and_then(|name| std::str::from_utf8(name).ok())
+                .and_then(crate::command::command_capability)
+                .is_some_and(|capability| capability.access == "write")
+        });
+        if contains_write && !self.service_state.accepts_writes() {
+            return None;
+        }
         if commands
             .iter()
             .all(|args| args.len() == 1 && args[0].eq_ignore_ascii_case(b"PING"))
@@ -134,7 +143,6 @@ impl Handler {
         if let Some(commands) = parse_borrowed_plain_xadd_commands(&commands) {
             let count = commands.len();
             let response = self.handle_borrowed_xadd_commands(&commands).await;
-            self.db_manager.notify_stream_waiters();
             self.record_fast_command_batch("XADD", count, started, &response);
             self.observe_fast_command_batch("XADD", count);
             return Some(response);
@@ -192,7 +200,6 @@ impl Handler {
         if let Some(commands) = parse_borrowed_plain_zset_add_commands(&commands) {
             let count = commands.len();
             let response = self.handle_borrowed_zset_add_commands(&commands).await;
-            self.db_manager.notify_zset_waiters();
             self.record_fast_command_batch("ZADD", count, started, &response);
             self.observe_fast_command_batch("ZADD", count);
             return Some(response);
@@ -225,7 +232,14 @@ impl Handler {
         }
         if commands.iter().all(|args| borrowed_read_supported(args)) {
             let names = borrowed_fast_names(&commands);
-            let response = self.handle_borrowed_read_commands(commands).await;
+            let response = tokio::time::timeout(
+                std::time::Duration::from_millis(
+                    crate::resource_limits::active_resource_limits().readonly_timeout_ms,
+                ),
+                self.handle_borrowed_read_commands(commands),
+            )
+            .await
+            .unwrap_or_else(|_| b"-ERR read-only command timed out\r\n".to_vec());
             self.record_fast_command_names(&names, started, &response);
             self.observe_fast_command_names(&names);
             return Some(response);
@@ -246,14 +260,20 @@ impl Handler {
         {
             let names = borrowed_fast_names(&commands);
             let response = self.handle_borrowed_list_push_commands(commands).await;
-            self.db_manager.notify_list_waiters();
             self.record_fast_command_names(&names, started, &response);
             self.observe_fast_command_names(&names);
             return Some(response);
         }
         if commands.iter().all(|args| borrowed_lrange_supported(args)) {
             let count = commands.len();
-            let response = self.handle_borrowed_lrange_commands(commands).await;
+            let response = tokio::time::timeout(
+                std::time::Duration::from_millis(
+                    crate::resource_limits::active_resource_limits().readonly_timeout_ms,
+                ),
+                self.handle_borrowed_lrange_commands(commands),
+            )
+            .await
+            .unwrap_or_else(|_| b"-ERR read-only command timed out\r\n".to_vec());
             self.record_fast_command_batch("LRANGE", count, started, &response);
             self.observe_fast_command_batch("LRANGE", count);
             return Some(response);
@@ -263,9 +283,14 @@ impl Handler {
             .all(|args| borrowed_collection_read_supported(args))
         {
             let names = borrowed_fast_names(&commands);
-            let response = self
-                .handle_borrowed_collection_read_commands(commands)
-                .await;
+            let response = tokio::time::timeout(
+                std::time::Duration::from_millis(
+                    crate::resource_limits::active_resource_limits().readonly_timeout_ms,
+                ),
+                self.handle_borrowed_collection_read_commands(commands),
+            )
+            .await
+            .unwrap_or_else(|_| b"-ERR read-only command timed out\r\n".to_vec());
             self.record_fast_command_names(&names, started, &response);
             self.observe_fast_command_names(&names);
             return Some(response);

@@ -5,8 +5,8 @@ pub(super) use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::Bound,
     sync::{
-        Arc, Mutex, OnceLock, RwLock, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+        Arc, Condvar, Mutex, OnceLock, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -43,8 +43,8 @@ pub(super) use unicode_segmentation::UnicodeSegmentation;
 pub(super) use super::super::full_text_directory::KvTantivyDirectory;
 pub(super) use super::super::{
     Db, FULLTEXT_FILE_NAMESPACE, FULLTEXT_META_NAMESPACE, FULLTEXT_OUTBOX_NAMESPACE,
-    PackedHashFields, VectorCreateOptions, VectorSearchOptions, VectorSearchResult,
-    hash_uses_packed_layout, internal_prefix, logical_main_key_from_raw_key,
+    PackedHashFields, VectorCreateOptions, VectorExactDistanceRequest, VectorSearchOptions,
+    VectorSearchResult, hash_uses_packed_layout, internal_prefix, logical_main_key_from_raw_key,
     prefix_exclusive_upper_bound,
 };
 pub(super) use crate::frame::Frame;

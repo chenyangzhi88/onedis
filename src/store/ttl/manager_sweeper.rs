@@ -22,21 +22,21 @@ impl TtlManager {
                 return;
             }
 
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(self.config.sweep_interval_ms)) => {}
-                _ = self.notify.notified() => {}
-            }
-            if self.shutdown.load(Ordering::Acquire) {
-                info!("TTL sweeper shutting down");
-                return;
-            }
-
+            // Drain already-expired entries before the first interval tick as well as
+            // after every wake-up.  Startup commonly finds a persisted expiration
+            // backlog, and making it wait for a whole interval both delays reclamation
+            // and gives readiness an unnecessarily stale view of the keyspace.
             while self.sweep_once_async().await {
                 if self.shutdown.load(Ordering::Acquire) {
                     info!("TTL sweeper shutting down");
                     return;
                 }
                 tokio::task::yield_now().await;
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(self.config.sweep_interval_ms)) => {}
+                _ = self.notify.notified() => {}
             }
         }
     }
@@ -52,7 +52,13 @@ impl TtlManager {
         let _write_guard = self.key_write_locks[shard].lock().await;
         let store = self.store_for_db(entry.db_index);
         let meta_key = entry.key_encoding.main_key(entry.db_index, &entry.key);
-        let observed = store.get_raw_observed_async(&meta_key).await;
+        let observed = match store.get_raw_observed_async(&meta_key).await {
+            Ok(observed) => observed,
+            Err(error) => {
+                debug!("TTL sweep read failed and will be retried: {error}");
+                return ExpireResult::Stale;
+            }
+        };
         let mut batch = WriteBatch::new();
         let mut expired_header = None;
 
@@ -141,9 +147,16 @@ impl TtlManager {
     async fn sweep_once_async(&self) -> bool {
         let started = Instant::now();
         let now = now_ms();
-        let expired = self
+        let expired = match self
             .scan_expired_batch_async(now, self.config.batch_size)
-            .await;
+            .await
+        {
+            Ok(expired) => expired,
+            Err(error) => {
+                debug!("TTL sweep scan failed: {error}");
+                return false;
+            }
+        };
 
         if expired.is_empty() {
             return false;
@@ -175,7 +188,11 @@ impl TtlManager {
         expired.len() == self.config.batch_size
     }
 
-    async fn scan_expired_batch_async(&self, now: u64, batch_size: usize) -> Vec<TtlEntry> {
+    async fn scan_expired_batch_async(
+        &self,
+        now: u64,
+        batch_size: usize,
+    ) -> common::types::status::Result<Vec<TtlEntry>> {
         let mut expired = Vec::with_capacity(batch_size);
         let db_count = self.db_count.load(Ordering::Acquire).max(1);
         let start_db = self.next_db.load(Ordering::Acquire) % db_count;
@@ -189,14 +206,14 @@ impl TtlManager {
             last_db = db_u32;
             let remaining = batch_size - expired.len();
             let store = self.store_for_db(db_idx);
-            let key_encoding = ttl_key_encoding_for_store(&store);
+            let key_encoding = ttl_key_encoding_for_store(&store)?;
             for (ttl_key, _) in store
                 .scan_range_raw_limited_async(
                     &ttl_db_prefix(db_idx),
                     Some(ttl_db_expire_upper_bound(db_idx, now)),
                     remaining,
                 )
-                .await
+                .await?
             {
                 if let Some((expire_ms, parsed_db, key)) = parse_ttl_index_key(&ttl_key) {
                     debug_assert_eq!(parsed_db, db_idx);
@@ -214,7 +231,7 @@ impl TtlManager {
         }
         self.next_db
             .store((last_db + 1) % db_count, Ordering::Release);
-        expired
+        Ok(expired)
     }
 
 }

@@ -7,7 +7,10 @@ impl Handler {
         stream: TcpStream,
         args: Arc<ResolvedArgs>,
     ) -> Self {
-        let service_state = Arc::new(ServiceState::default());
+        let service_state = Arc::new(ServiceState::new_with_background(
+            db_manager.store().storage_health(),
+            Arc::clone(db_manager.background_health()),
+        ));
         service_state.mark_ready();
         Self::new_with_state(
             db_manager,
@@ -121,6 +124,18 @@ impl Handler {
             if self.session.resp_version() == RespVersion::Resp2
                 && let Some(response_bytes) = self.try_handle_ping_fast_batch(bytes.as_slice())
             {
+                if response_bytes.len()
+                    > crate::resource_limits::active_resource_limits().response_bytes
+                {
+                    let response = self.encode_frame(&Frame::Error(
+                        "ERR response exceeds configured limit".to_string(),
+                    ));
+                    self.metrics.add_output_bytes(response.len());
+                    if !self.connection.write_bytes(response).await {
+                        return;
+                    }
+                    continue;
+                }
                 self.metrics.add_output_bytes(response_bytes.len());
                 if !self.connection.write_bytes(response_bytes).await {
                     return;
@@ -131,6 +146,18 @@ impl Handler {
                 && let Some(response_bytes) =
                     self.try_handle_borrowed_fast_batch(bytes.as_slice()).await
             {
+                if response_bytes.len()
+                    > crate::resource_limits::active_resource_limits().response_bytes
+                {
+                    let response = self.encode_frame(&Frame::Error(
+                        "ERR response exceeds configured limit".to_string(),
+                    ));
+                    self.metrics.add_output_bytes(response.len());
+                    if !self.connection.write_bytes(response).await {
+                        return;
+                    }
+                    continue;
+                }
                 self.metrics.add_output_bytes(response_bytes.len());
                 if !self.connection.write_bytes(response_bytes).await {
                     return;
@@ -199,7 +226,7 @@ impl Handler {
                     .set_last_cmd(effective_command_name.to_ascii_lowercase());
                 self.session_manager.update_session(&self.session);
 
-                if command.propagate_aof_if_needed() && !self.service_state.accepts_writes() {
+                if command.is_mutating() && !self.service_state.accepts_writes() {
                     self.metrics.record_rejection("not_ready");
                     self.metrics.record_command(
                         command_name,
@@ -302,10 +329,12 @@ impl Handler {
                         )
                 });
                 let started = std::time::Instant::now();
-                let storage_failures_before =
-                    crate::store::health::storage_health().failure_count();
-                let is_mutating = command.propagate_aof_if_needed();
-                let mut command_result = if is_mutating {
+                let storage_health = self.db_manager.store().storage_health();
+                if !storage_health.is_healthy() {
+                    let _ = self.db_manager.store().probe_health_async().await;
+                }
+                let is_mutating = command.is_mutating();
+                let command_result = if is_mutating {
                     self.apply_command_response_bytes(command).await
                 } else {
                     match tokio::time::timeout(
@@ -320,17 +349,6 @@ impl Handler {
                         Err(_) => Err(Error::msg("ERR read-only command timed out")),
                     }
                 };
-                let storage_health = crate::store::health::storage_health();
-                if storage_health.failure_count() != storage_failures_before {
-                    let reason = storage_health
-                        .last_error()
-                        .unwrap_or_else(|| "unknown kv-engine failure".to_string());
-                    self.service_state
-                        .mark_degraded(format!("storage degraded: {reason}"));
-                    command_result = Err(Error::msg(format!(
-                        "ERR storage operation failed: {reason}"
-                    )));
-                }
                 match command_result {
                     Ok(bytes) => {
                         self.metrics.record_command(

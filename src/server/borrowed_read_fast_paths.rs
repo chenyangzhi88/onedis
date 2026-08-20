@@ -5,25 +5,23 @@ impl Handler {
         let mut raw_keys = Vec::new();
         for args in &commands {
             let command = args.first().copied().unwrap_or_default();
-            let keys = if (command.eq_ignore_ascii_case(b"GET")
+            let single_key_command = command.eq_ignore_ascii_case(b"GET")
                 || command.eq_ignore_ascii_case(b"TTL")
                 || command.eq_ignore_ascii_case(b"PTTL")
                 || command.eq_ignore_ascii_case(b"STRLEN")
                 || command.eq_ignore_ascii_case(b"TYPE")
                 || command.eq_ignore_ascii_case(b"SCARD")
                 || command.eq_ignore_ascii_case(b"LLEN")
-                || command.eq_ignore_ascii_case(b"XLEN"))
-                && args.len() == 2
-            {
-                &args[1..2]
-            } else if ((command.eq_ignore_ascii_case(b"GETRANGE")
+                || command.eq_ignore_ascii_case(b"XLEN");
+            let ranged_single_key_command = ((command.eq_ignore_ascii_case(b"GETRANGE")
                 || command.eq_ignore_ascii_case(b"SUBSTR"))
                 && args.len() == 4)
                 || (command.eq_ignore_ascii_case(b"GETBIT") && args.len() == 3)
                 || (command.eq_ignore_ascii_case(b"BITCOUNT")
                     && (args.len() == 2 || args.len() == 4 || args.len() == 5))
                 || (command.eq_ignore_ascii_case(b"BITPOS")
-                    && (3..=6).contains(&args.len()))
+                    && (3..=6).contains(&args.len()));
+            let keys = if (single_key_command && args.len() == 2) || ranged_single_key_command
             {
                 &args[1..2]
             } else if (command.eq_ignore_ascii_case(b"MGET")
@@ -39,7 +37,16 @@ impl Handler {
             raw_keys.extend(keys.iter().copied());
             key_ranges.push(start..raw_keys.len());
         }
-        let raw_values = db.read_live_raw_byte_keys_many_async(&raw_keys).await;
+        let raw_values = match db.read_live_raw_byte_keys_many_async(&raw_keys).await {
+            Ok(values) => values,
+            Err(error) => {
+                let mut out = Vec::with_capacity(commands.len() * 32);
+                for _ in &commands {
+                    append_error(&mut out, &error.to_string());
+                }
+                return out;
+            }
+        };
         let mut set_batch_commands = Vec::new();
         let mut set_batch_positions = Vec::new();
         let mut zset_batch_commands = Vec::new();

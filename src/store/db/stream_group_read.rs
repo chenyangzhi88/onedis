@@ -34,7 +34,7 @@ impl Db {
                                 ms: u64::MAX,
                                 seq: u64::MAX,
                             },
-                        )
+                        )?
                         .into_iter()
                         .filter(|entry| parse_stream_id(&entry.id).is_some_and(|id| id > lower))
                         .collect::<Vec<_>>();
@@ -42,13 +42,14 @@ impl Db {
                     entries
                 }
                 StreamReadGroupStart::Id(id) => {
-                    let pending = self.stream_pending_raw(key, meta.version, group);
+                    let pending = self.stream_pending_raw(key, meta.version, group)?;
                     let mut entries = Vec::new();
                     for (pending_id, pel) in pending {
                         if pending_id <= *id || pel.consumer != consumer {
                             continue;
                         }
-                        if let Some(entry) = self.stream_entry_by_id(key, meta.version, pending_id)
+                        if let Some(entry) =
+                            self.stream_entry_by_id(key, meta.version, pending_id)?
                         {
                             entries.push(entry);
                             if entries.len() >= limit {
@@ -95,7 +96,7 @@ impl Db {
                     }
                 }
             }
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             if batch.count() > 0 {
                 self.changes.fetch_add(1, Ordering::Relaxed);
             }
@@ -150,7 +151,7 @@ impl Db {
                                 },
                                 limit,
                             )
-                            .await
+                            .await?
                         }
                         None => Vec::new(),
                     }
@@ -158,7 +159,7 @@ impl Db {
                 StreamReadGroupStart::Id(id) => {
                     let pending = self
                         .stream_pending_raw_async(key, meta.version, group)
-                        .await;
+                        .await?;
                     let mut entries = Vec::new();
                     for (pending_id, pel) in pending {
                         if pending_id <= *id || pel.consumer != consumer {
@@ -166,7 +167,7 @@ impl Db {
                         }
                         if let Some(entry) = self
                             .stream_entry_by_id_async(key, meta.version, pending_id)
-                            .await
+                            .await?
                         {
                             entries.push(entry);
                             if entries.len() >= limit {
@@ -213,7 +214,7 @@ impl Db {
                     }
                 }
             }
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             if batch.count() > 0 {
                 self.changes.fetch_add(1, Ordering::Relaxed);
             }

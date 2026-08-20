@@ -10,18 +10,12 @@ impl Db {
         let resolve_started = Instant::now();
         let index = self.resolve_fulltext_index(index)?;
         let lifecycle_lock = self.fulltext_runtimes.lifecycle_lock(self.db_index, &index);
-        let schema_upgrade = {
+        {
             let _lifecycle_guard = lifecycle_lock
                 .read()
                 .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-            self.fulltext_runtime_schema_needs_rebuild(&index)?
-        };
-        if schema_upgrade {
-            let _lifecycle_guard = lifecycle_lock
-                .write()
-                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-            if self.fulltext_runtime_schema_needs_rebuild(&index)? {
-                self.fulltext_rebuild_index(&index)?;
+            if self.fulltext_runtimes.get(self.db_index, &index).is_none() {
+                return Err(Error::msg("INDEX_NOT_READY fulltext runtime is loading"));
             }
         }
         let result_cap = match mode {
@@ -54,15 +48,11 @@ impl Db {
         );
         let refresh_started = Instant::now();
         let caught_up = if consistent {
-            let _lifecycle_guard = lifecycle_lock
-                .read()
-                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
             self.fulltext_refresh_index_until_caught_up(&index, refresh_deadline)?
         } else {
-            let _lifecycle_guard = lifecycle_lock
-                .read()
-                .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
-            self.ensure_fulltext_runtime(&index)?;
+            if self.fulltext_runtimes.get(self.db_index, &index).is_none() {
+                return Err(Error::msg("INDEX_NOT_READY fulltext runtime is loading"));
+            }
             true
         };
         if !caught_up && fail_on_timeout {
@@ -120,18 +110,40 @@ impl Db {
             .checked_add(Duration::from_millis(query_timeout_ms))
             .unwrap_or_else(|| query_started + Duration::from_secs(100 * 365 * 24 * 60 * 60));
         let plan_started = Instant::now();
-        let ast_query = if fulltext_query_has_vector_syntax(query) {
-            query.to_string()
-        } else {
-            substitute_fulltext_params(query, &options.params)?
-        };
-        let ast = self.fulltext_runtimes.query_ast(
+        let initial_ast = match self.fulltext_runtimes.query_ast(
             self.db_index,
             &index,
             meta.incarnation,
             options.dialect,
-            &ast_query,
-        )?;
+            query,
+        ) {
+            Ok(ast) => ast,
+            Err(error) if !options.params.is_empty() => {
+                let substituted = substitute_fulltext_params(query, &options.params)?;
+                self.fulltext_runtimes
+                    .query_ast(
+                        self.db_index,
+                        &index,
+                        meta.incarnation,
+                        options.dialect,
+                        &substituted,
+                    )
+                    .map_err(|_| error)?
+            }
+            Err(error) => return Err(error),
+        };
+        let ast = if contains_fulltext_vector_query(&initial_ast) {
+            initial_ast
+        } else {
+            let substituted = substitute_fulltext_params(query, &options.params)?;
+            self.fulltext_runtimes.query_ast(
+                self.db_index,
+                &index,
+                meta.incarnation,
+                options.dialect,
+                &substituted,
+            )?
+        };
         global_metrics()
             .record_fulltext_search_stage(FullTextSearchStage::ParsePlan, elapsed_us(plan_started));
         if contains_fulltext_vector_query(&ast) {

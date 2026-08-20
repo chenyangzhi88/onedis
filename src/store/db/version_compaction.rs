@@ -261,14 +261,14 @@ impl Db {
         Ok(augmented)
     }
 
-    pub(crate) fn refresh_retired_versions_for_compaction(&self) -> usize {
+    pub(crate) fn refresh_retired_versions_for_compaction(&self) -> Result<usize, Error> {
         let prefix = version_owner_prefix(self.db_index);
         let start = self.store.version_owner_scan_start(self.db_index, &prefix);
         let owners = self.store.scan_range_raw_limited(
             &start,
             prefix_exclusive_upper_bound(&prefix),
             VERSION_REFRESH_BATCH_LIMIT,
-        );
+        )?;
         let exhausted = owners.len() < VERSION_REFRESH_BATCH_LIMIT;
         let last_version = owners
             .last()
@@ -278,7 +278,7 @@ impl Db {
         let retired = self.refresh_retired_versions(&prefix, owners);
         self.store
             .finish_version_owner_scan(self.db_index, last_version, exhausted);
-        retired
+        Ok(retired)
     }
 
     #[cfg(test)]
@@ -287,11 +287,10 @@ impl Db {
             return 0;
         }
         let prefix = version_owner_prefix(self.db_index);
-        let owners = self.store.scan_range_raw_limited(
-            &prefix,
-            prefix_exclusive_upper_bound(&prefix),
-            limit,
-        );
+        let owners = self
+            .store
+            .scan_range_raw_limited(&prefix, prefix_exclusive_upper_bound(&prefix), limit)
+            .expect("test version owner scan");
         self.refresh_retired_versions(&prefix, owners)
     }
 
@@ -320,7 +319,7 @@ impl Db {
         } else {
             main_key_bytes(self.db_index, &owner.key)
         };
-        let Some(raw) = self.store.get_raw(&marker_key) else {
+        let Ok(Some(raw)) = self.store.get_raw(&marker_key) else {
             return false;
         };
         let Some(header) = decode_meta_header(&raw) else {

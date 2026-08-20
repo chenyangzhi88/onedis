@@ -30,7 +30,7 @@ impl Msetnx {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        if db.insert_string_bytes_many_nx(self.key_vals) {
+        if db.insert_string_bytes_many_nx(self.key_vals)? {
             Ok(Frame::Integer(1))
         } else {
             Ok(Frame::Integer(0))
@@ -38,7 +38,7 @@ impl Msetnx {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        if db.insert_string_bytes_many_nx_async(self.key_vals).await {
+        if db.insert_string_bytes_many_nx_async(self.key_vals).await? {
             Ok(Frame::Integer(1))
         } else {
             Ok(Frame::Integer(0))

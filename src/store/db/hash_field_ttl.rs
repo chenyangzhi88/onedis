@@ -19,7 +19,7 @@ impl Db {
         let now = now_ms();
         let delete_immediately = expire_ms <= now;
         let live_field_count = if delete_immediately {
-            self.hash_live_entries_raw(key, version).len()
+            self.hash_live_entries_raw(key, version)?.len()
         } else {
             0
         };
@@ -32,10 +32,10 @@ impl Db {
             let (exists, current) = if let Some(state) = staged.get(field) {
                 *state
             } else {
-                let exists = self.hash_live_field_value(key, version, field).is_some();
+                let exists = self.hash_live_field_value(key, version, field)?.is_some();
                 let current = if exists {
                     self.store
-                        .get_raw(&hash_field_expire_key(self.db_index, key, version, field))
+                        .get_raw(&hash_field_expire_key(self.db_index, key, version, field))?
                         .and_then(|raw| decode_u64_be(&raw))
                         .unwrap_or(0)
                 } else {
@@ -97,7 +97,7 @@ impl Db {
             } else {
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -143,7 +143,7 @@ impl Db {
         let now = now_ms();
         let delete_immediately = expire_ms <= now;
         let live_field_count = if delete_immediately {
-            self.hash_live_entries_raw_async(key, version).await.len()
+            self.hash_live_entries_raw_async(key, version).await?.len()
         } else {
             0
         };
@@ -163,8 +163,8 @@ impl Db {
             .iter()
             .map(|field| hash_field_expire_key(self.db_index, key, version, field))
             .collect::<Vec<_>>();
-        let values = self.store.multi_get_raw_async(&field_keys).await;
-        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        let values = self.store.multi_get_raw_async(&field_keys).await?;
+        let expires = self.store.multi_get_raw_async(&expire_keys).await?;
         let mut staged = HashMap::<String, (bool, u64)>::with_capacity(unique_fields.len());
         for ((field, value), expire) in unique_fields.into_iter().zip(values).zip(expires) {
             let current = expire.as_deref().and_then(decode_u64_be).unwrap_or(0);
@@ -229,7 +229,7 @@ impl Db {
             } else {
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -248,14 +248,14 @@ impl Db {
             let (exists, has_ttl) = if let Some(state) = staged.get(field) {
                 *state
             } else {
-                let exists = self.hash_live_field_value(key, version, field).is_some();
+                let exists = self.hash_live_field_value(key, version, field)?.is_some();
                 let has_ttl = exists
                     && self.store.contains_key(&hash_field_expire_key(
                         self.db_index,
                         key,
                         version,
                         field,
-                    ));
+                    ))?;
                 staged.insert(field.clone(), (exists, has_ttl));
                 (exists, has_ttl)
             };
@@ -274,7 +274,7 @@ impl Db {
         }
         if batch.count() > 0 {
             self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -292,7 +292,7 @@ impl Db {
             let packed = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .and_then(|raw| decode_packed_hash(&raw))
                 .unwrap_or_default();
             return Ok(fields
@@ -335,8 +335,8 @@ impl Db {
             .iter()
             .map(|field| hash_field_expire_key(self.db_index, key, version, field))
             .collect::<Vec<_>>();
-        let values = self.store.multi_get_raw_async(&field_keys).await;
-        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        let values = self.store.multi_get_raw_async(&field_keys).await?;
+        let expires = self.store.multi_get_raw_async(&expire_keys).await?;
         let mut staged = HashMap::<String, (bool, bool)>::with_capacity(unique_fields.len());
         for ((field, value), expire) in unique_fields.into_iter().zip(values).zip(expires) {
             let expire_ms = expire.as_deref().and_then(decode_u64_be).unwrap_or(0);
@@ -362,7 +362,7 @@ impl Db {
         }
         if batch.count() > 0 {
             self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -381,21 +381,21 @@ impl Db {
             return Ok(vec![-2; fields.len()]);
         };
         let now = now_ms();
-        Ok(fields
+        fields
             .iter()
             .map(|field| {
-                if self.hash_live_field_value(key, version, field).is_none() {
-                    return -2;
+                if self.hash_live_field_value(key, version, field)?.is_none() {
+                    return Ok(-2);
                 }
                 let expire_key = hash_field_expire_key(self.db_index, key, version, field);
                 let Some(expire_ms) = self
                     .store
-                    .get_raw(&expire_key)
+                    .get_raw(&expire_key)?
                     .and_then(|raw| decode_u64_be(&raw))
                 else {
-                    return -1;
+                    return Ok(-1);
                 };
-                if absolute {
+                Ok(if absolute {
                     if millis {
                         expire_ms as i64
                     } else {
@@ -410,9 +410,9 @@ impl Db {
                     } else {
                         ttl_ms.div_ceil(1000) as i64
                     }
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     pub async fn hash_field_ttls_async(
@@ -430,7 +430,7 @@ impl Db {
             let packed = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .and_then(|raw| decode_packed_hash(&raw))
                 .unwrap_or_default();
             return Ok(fields
@@ -448,8 +448,8 @@ impl Db {
             .iter()
             .map(|field| hash_field_expire_key(self.db_index, key, version, field))
             .collect::<Vec<_>>();
-        let values = self.store.multi_get_raw_async(&field_keys).await;
-        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        let values = self.store.multi_get_raw_async(&field_keys).await?;
+        let expires = self.store.multi_get_raw_async(&expire_keys).await?;
         Ok(values
             .into_iter()
             .zip(expires)

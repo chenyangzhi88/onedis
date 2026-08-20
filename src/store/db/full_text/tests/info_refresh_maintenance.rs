@@ -11,8 +11,10 @@ fn lifecycle_test_db(label: &str) -> Db {
 }
 
 fn lifecycle_test_options() -> FullTextCreateOptions {
-    let mut index_options = FullTextIndexOptions::default();
-    index_options.skip_initial_scan = true;
+    let index_options = FullTextIndexOptions {
+        skip_initial_scan: true,
+        ..FullTextIndexOptions::default()
+    };
     FullTextCreateOptions {
         source_type: FullTextSourceType::Hash,
         prefixes: vec!["doc:".to_string()],
@@ -92,7 +94,7 @@ async fn packed_hset_outbox_is_one_record_and_publishes_the_whole_batch() {
     let replies = db.apply_hash_set_batch_mutations_async(&mutations).await;
     assert!(replies.iter().all(|reply| matches!(reply, Ok(1))));
     let prefix = fulltext_outbox_prefix(0, "idx");
-    let outbox = db.store.scan_prefix_raw(&prefix);
+    let outbox = db.store.scan_prefix_raw(&prefix).unwrap();
     assert_eq!(outbox.len(), 1);
     let packed = decode_fulltext_mutation_records(&outbox[0].1).unwrap();
     assert_eq!(packed.len(), 200);
@@ -127,7 +129,10 @@ async fn separated_hash_outbox_carries_only_the_indexed_projection() {
 
     let replies = db.apply_hash_set_batch_mutations_async(&mutation).await;
     assert!(matches!(replies.as_slice(), [Ok(2)]));
-    let outbox = db.store.scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"));
+    let outbox = db
+        .store
+        .scan_prefix_raw(&fulltext_outbox_prefix(0, "idx"))
+        .unwrap();
     assert_eq!(outbox.len(), 1);
     let projected = decode_fulltext_mutation_records(&outbox[0].1).unwrap();
     assert_eq!(projected.len(), 1);

@@ -22,7 +22,7 @@ impl Db {
             index,
             version,
             id,
-        )) else {
+        ))? else {
             return Ok(None);
         };
         let doc = decode_record::<VectorDocRecord>(&raw)?;
@@ -65,7 +65,7 @@ impl Db {
                 version,
                 id,
             ))
-            .await
+            .await?
         else {
             return Ok(None);
         };
@@ -98,7 +98,7 @@ impl Db {
             .collect::<Vec<_>>();
         self.store
             .multi_get_raw_async(&keys)
-            .await
+            .await?
             .into_iter()
             .map(|raw| {
                 let Some(raw) = raw else {
@@ -134,7 +134,7 @@ impl Db {
         };
         self.ensure_vector_runtime_unlocked(index, version, &meta)?;
         let key = vector_doc_key(self.key_layout, self.db_index, index, version, id);
-        let Some(raw) = self.store.get_raw(&key) else {
+        let Some(raw) = self.store.get_raw(&key)? else {
             return Ok(false);
         };
         let mut doc = decode_record::<VectorDocRecord>(&raw)?;
@@ -202,7 +202,7 @@ impl Db {
             };
         self.ensure_vector_runtime_unlocked(index, version, &meta)?;
         let key = vector_doc_key(self.key_layout, self.db_index, index, version, id);
-        let Some(raw) = self.store.get_raw_async(&key).await else {
+        let Some(raw) = self.store.get_raw_async(&key).await? else {
             return Ok(false);
         };
         let mut doc = decode_record::<VectorDocRecord>(&raw)?;

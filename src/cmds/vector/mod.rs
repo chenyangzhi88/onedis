@@ -2,7 +2,9 @@ use anyhow::Error;
 
 use crate::{
     frame::{Frame, MAX_ARRAY_ELEMENTS, MAX_FRAME_BYTES},
-    store::db::{Db, VectorQuantization, VectorSearchOptions, VectorSearchResult},
+    store::db::{
+        Db, VectorAutocreateOptions, VectorQuantization, VectorSearchOptions, VectorSearchResult,
+    },
 };
 
 const MAX_VECTOR_DIMENSIONS: usize = 65_536;

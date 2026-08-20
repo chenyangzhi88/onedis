@@ -1,16 +1,16 @@
 use std::{
+    collections::BTreeMap,
     fmt::Write as _,
+    future::Future,
     sync::{
-        Arc, Weak,
+        Arc, RwLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::observability::metrics::global_metrics;
 use anyhow::{Context, Error};
-
-use tokio::sync::Notify;
 
 use crate::{
     args::ResolvedArgs,
@@ -64,6 +64,153 @@ const STORAGE_ENGINE_PROPERTIES: &[&str] = &[
     "db.memtable-immutable-storage-stats",
 ];
 
+#[derive(Clone, Debug, Default)]
+pub struct BackgroundTaskSnapshot {
+    pub running: bool,
+    pub failures: u64,
+    pub last_success_ms: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Default)]
+pub struct BackgroundTaskHealth {
+    tasks: RwLock<BTreeMap<&'static str, BackgroundTaskSnapshot>>,
+    fatal_reason: RwLock<Option<String>>,
+}
+
+impl BackgroundTaskHealth {
+    fn register(&self, name: &'static str) {
+        self.tasks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                name,
+                BackgroundTaskSnapshot {
+                    running: true,
+                    ..BackgroundTaskSnapshot::default()
+                },
+            );
+    }
+
+    fn record_success(&self, name: &'static str) {
+        if let Some(task) = self
+            .tasks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(name)
+        {
+            task.last_success_ms = unix_time_ms();
+        }
+    }
+
+    fn record_error(&self, name: &'static str, error: impl Into<String>) {
+        if let Some(task) = self
+            .tasks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(name)
+        {
+            task.failures = task.failures.saturating_add(1);
+            task.last_error = Some(error.into());
+        }
+    }
+
+    fn record_stopped(&self, name: &'static str, expected: bool) {
+        if let Some(task) = self
+            .tasks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(name)
+        {
+            task.running = false;
+            if !expected {
+                task.failures = task.failures.saturating_add(1);
+                task.last_error = Some("task exited unexpectedly".to_string());
+            }
+        }
+        if !expected {
+            let mut reason = self
+                .fatal_reason
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if reason.is_none() {
+                *reason = Some(format!("background task {name} exited unexpectedly"));
+            }
+        }
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.fatal_reason
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    }
+
+    pub fn degraded_reason(&self) -> Option<String> {
+        self.fatal_reason
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn snapshot(&self) -> BTreeMap<&'static str, BackgroundTaskSnapshot> {
+        self.tasks
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+struct BackgroundTaskGuard {
+    name: &'static str,
+    shutdown: Arc<AtomicBool>,
+    health: Arc<BackgroundTaskHealth>,
+}
+
+impl Drop for BackgroundTaskGuard {
+    fn drop(&mut self) {
+        self.health
+            .record_stopped(self.name, self.shutdown.load(Ordering::Acquire));
+    }
+}
+
+struct ManagedBackgroundTask {
+    name: &'static str,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+fn spawn_background_task<F>(
+    name: &'static str,
+    shutdown: Arc<AtomicBool>,
+    health: Arc<BackgroundTaskHealth>,
+    future: F,
+) -> ManagedBackgroundTask
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    health.register(name);
+    let guard_health = Arc::clone(&health);
+    let guard_shutdown = Arc::clone(&shutdown);
+    let handle = tokio::spawn(async move {
+        let _guard = BackgroundTaskGuard {
+            name,
+            shutdown: guard_shutdown,
+            health: guard_health,
+        };
+        future.await;
+    });
+    ManagedBackgroundTask { name, handle }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 /// DB 管理器
 ///
 /// 所有逻辑数据库共享同一个底层 KvStore（kv_engine 实例），
@@ -74,12 +221,11 @@ pub struct DatabaseManager {
     options: Options,
     version_counter: Arc<VersionCounter>,
     ttl_manager: Arc<TtlManager>,
+    mutation_tracker: Arc<KeyMutationTracker>,
+    background_health: Arc<BackgroundTaskHealth>,
     fulltext_shutdown: Arc<AtomicBool>,
     version_scan_shutdown: Arc<AtomicBool>,
-    list_notify: Arc<Notify>,
-    zset_notify: Arc<Notify>,
-    stream_notify: Arc<Notify>,
-    background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    background_tasks: std::sync::Mutex<Vec<ManagedBackgroundTask>>,
 }
 
 impl DatabaseManager {
@@ -87,9 +233,7 @@ impl DatabaseManager {
         self.fulltext_shutdown.store(true, Ordering::Release);
         self.version_scan_shutdown.store(true, Ordering::Release);
         self.ttl_manager.shutdown();
-        self.list_notify.notify_waiters();
-        self.zset_notify.notify_waiters();
-        self.stream_notify.notify_waiters();
+        self.mutation_tracker.notify_all_waiters();
     }
 
     pub async fn shutdown(&self, timeout: Duration) -> Result<(), Error> {
@@ -102,19 +246,28 @@ impl DatabaseManager {
             std::mem::take(&mut *tasks)
         };
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut shutdown_errors = Vec::new();
         for mut task in tasks {
-            if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
-                task.abort();
-                let _ = task.await;
+            match tokio::time::timeout_at(deadline, &mut task.handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    shutdown_errors.push(format!("{} join failed: {error}", task.name));
+                }
+                Err(_) => {
+                    task.handle.abort();
+                    let _ = task.handle.await;
+                    shutdown_errors.push(format!("{} exceeded shutdown deadline", task.name));
+                }
             }
         }
         for db in &self.dbs {
             db.shutdown_fulltext_runtime();
         }
-        self.store
-            .sync_wal()
-            .map_err(|err| Error::msg(format!("failed to checkpoint kv-engine WAL: {err}")))?;
-        Ok(())
+        if shutdown_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::msg(shutdown_errors.join("; ")))
+        }
     }
 
     pub async fn new_async(args: Arc<ResolvedArgs>) -> Self {
@@ -147,14 +300,11 @@ impl DatabaseManager {
         let mutation_tracker = Arc::new(KeyMutationTracker::default());
         let vector_runtimes = Arc::new(VectorRuntimeRegistry::default());
         let counter_cache = Arc::new(CounterCacheRuntime::default());
-        let list_notify = Arc::new(Notify::new());
-        let zset_notify = Arc::new(Notify::new());
-        let stream_notify = Arc::new(Notify::new());
 
         // Rebuild TTL index and recover version counter from existing data
         ttl_manager
             .rebuild_from_store_async(args.databases as u16, &version_counter)
-            .await;
+            .await?;
 
         let mut dbs = Vec::new();
         for id in 0..args.databases {
@@ -168,6 +318,13 @@ impl DatabaseManager {
                 counter_cache.clone(),
             )?);
             dbs.push(db);
+        }
+
+        for db in &dbs {
+            let startup_db = Arc::clone(db);
+            tokio::task::spawn_blocking(move || startup_db.load_vector_runtimes_for_startup())
+                .await
+                .map_err(|error| Error::msg(format!("vector startup worker failed: {error}")))??;
         }
 
         let weak_vector_runtimes = Arc::downgrade(&vector_runtimes);
@@ -218,49 +375,103 @@ impl DatabaseManager {
         }));
 
         let fulltext_shutdown = Arc::new(AtomicBool::new(false));
+        let background_health = Arc::new(BackgroundTaskHealth::default());
         let fulltext_worker_shutdown = fulltext_shutdown.clone();
         let fulltext_worker_dbs = dbs.clone();
-        let fulltext_task = tokio::spawn(async move {
-            while !fulltext_worker_shutdown.load(Ordering::Acquire) {
-                for db in &fulltext_worker_dbs {
-                    if let Err(err) = db.fulltext_maintenance_tick_async().await {
-                        log::error!("fulltext maintenance failed db={}: {err}", db.db_index());
+        let fulltext_health = Arc::clone(&background_health);
+        let fulltext_task = spawn_background_task(
+            "fulltext-maintenance",
+            Arc::clone(&fulltext_shutdown),
+            Arc::clone(&background_health),
+            async move {
+                while !fulltext_worker_shutdown.load(Ordering::Acquire) {
+                    for db in &fulltext_worker_dbs {
+                        if let Err(err) = db.fulltext_maintenance_tick_async().await {
+                            fulltext_health.record_error(
+                                "fulltext-maintenance",
+                                format!("db={}: {err}", db.db_index()),
+                            );
+                            log::error!("fulltext maintenance failed db={}: {err}", db.db_index());
+                        }
                     }
+                    fulltext_health.record_success("fulltext-maintenance");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        });
+            },
+        );
 
         let vector_worker_shutdown = fulltext_shutdown.clone();
         let vector_worker_dbs = dbs.clone();
-        let vector_task = tokio::spawn(async move {
-            while !vector_worker_shutdown.load(Ordering::Acquire) {
-                for db in &vector_worker_dbs {
-                    if let Err(err) = db.vector_maintenance_tick_async().await {
-                        log::error!("vector maintenance failed db={}: {err}", db.db_index());
+        let vector_health = Arc::clone(&background_health);
+        let vector_task = spawn_background_task(
+            "vector-maintenance",
+            Arc::clone(&fulltext_shutdown),
+            Arc::clone(&background_health),
+            async move {
+                while !vector_worker_shutdown.load(Ordering::Acquire) {
+                    for db in &vector_worker_dbs {
+                        if let Err(err) = db.vector_maintenance_tick_async().await {
+                            vector_health.record_error(
+                                "vector-maintenance",
+                                format!("db={}: {err}", db.db_index()),
+                            );
+                            log::error!("vector maintenance failed db={}: {err}", db.db_index());
+                        }
                     }
+                    vector_health.record_success("vector-maintenance");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        });
+            },
+        );
 
         let version_scan_shutdown = Arc::new(AtomicBool::new(false));
         let version_scan_worker_shutdown = version_scan_shutdown.clone();
         let version_scan_worker_dbs = dbs.clone();
-        let version_scan_task = tokio::spawn(async move {
-            while !version_scan_worker_shutdown.load(Ordering::Acquire) {
-                for db in &version_scan_worker_dbs {
-                    let retired = db.refresh_retired_versions_for_compaction();
-                    if retired > 0 {
-                        log::debug!("marked {retired} retired version namespace(s) for compaction");
+        let version_health = Arc::clone(&background_health);
+        let version_scan_task = spawn_background_task(
+            "version-compaction",
+            Arc::clone(&version_scan_shutdown),
+            Arc::clone(&background_health),
+            async move {
+                while !version_scan_worker_shutdown.load(Ordering::Acquire) {
+                    for db in &version_scan_worker_dbs {
+                        let retired = match db.refresh_retired_versions_for_compaction() {
+                            Ok(retired) => retired,
+                            Err(error) => {
+                                version_health.record_error(
+                                    "version-compaction",
+                                    format!("db={}: {error}", db.db_index()),
+                                );
+                                log::warn!("version compaction refresh failed: {error}");
+                                continue;
+                            }
+                        };
+                        if retired > 0 {
+                            log::debug!(
+                                "marked {retired} retired version namespace(s) for compaction"
+                            );
+                        }
                     }
+                    version_health.record_success("version-compaction");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
+            },
+        );
 
         // Start background TTL sweeper
-        let ttl_task = ttl_manager.start_sweeper();
+        let ttl_inner_task = ttl_manager.start_sweeper();
+        let ttl_health = Arc::clone(&background_health);
+        let ttl_task = spawn_background_task(
+            "ttl-sweeper",
+            Arc::clone(&fulltext_shutdown),
+            Arc::clone(&background_health),
+            async move {
+                match ttl_inner_task.await {
+                    Ok(()) => ttl_health.record_success("ttl-sweeper"),
+                    Err(error) => ttl_health.record_error("ttl-sweeper", error.to_string()),
+                }
+            },
+        );
 
         Ok(DatabaseManager {
             dbs,
@@ -268,11 +479,10 @@ impl DatabaseManager {
             options,
             version_counter,
             ttl_manager,
+            mutation_tracker,
+            background_health,
             fulltext_shutdown,
             version_scan_shutdown,
-            list_notify,
-            zset_notify,
-            stream_notify,
             background_tasks: std::sync::Mutex::new(vec![
                 fulltext_task,
                 vector_task,
@@ -306,31 +516,11 @@ impl DatabaseManager {
         &self.ttl_manager
     }
 
-    pub fn list_notify(&self) -> &Arc<Notify> {
-        &self.list_notify
+    pub fn background_health(&self) -> &Arc<BackgroundTaskHealth> {
+        &self.background_health
     }
 
-    pub fn notify_list_waiters(&self) {
-        self.list_notify.notify_waiters();
-    }
-
-    pub fn zset_notify(&self) -> &Arc<Notify> {
-        &self.zset_notify
-    }
-
-    pub fn notify_zset_waiters(&self) {
-        self.zset_notify.notify_waiters();
-    }
-
-    pub fn stream_notify(&self) -> &Arc<Notify> {
-        &self.stream_notify
-    }
-
-    pub fn notify_stream_waiters(&self) {
-        self.stream_notify.notify_waiters();
-    }
-
-    pub fn render_observability_prometheus(&self) -> String {
+    pub fn render_observability_prometheus(&self) -> Result<String, Error> {
         let mut out = String::new();
         let mut expired_keys = 0;
         let mut ttl_stale_entries = 0;
@@ -355,11 +545,11 @@ impl DatabaseManager {
         let _ = writeln!(out, "# TYPE onedis_db_expires gauge");
         let _ = writeln!(out, "# TYPE onedis_db_avg_ttl_milliseconds gauge");
         for (db_index, db) in self.dbs.iter().enumerate() {
-            let ttl = db.ttl_observability_snapshot();
+            let ttl = db.ttl_observability_snapshot()?;
             expired_keys = ttl.expired_keys;
             ttl_stale_entries = ttl.stale_entries_skipped;
             ttl_sweep_cycles = ttl.sweep_cycles;
-            let _ = writeln!(out, "onedis_db_keys{{db=\"{db_index}\"}} {}", db.len());
+            let _ = writeln!(out, "onedis_db_keys{{db=\"{db_index}\"}} {}", db.len()?);
             let _ = writeln!(
                 out,
                 "onedis_db_expires{{db=\"{db_index}\"}} {}",
@@ -371,7 +561,7 @@ impl DatabaseManager {
                 ttl.avg_ttl_millis
             );
 
-            let fulltext = db.fulltext_observability_snapshot();
+            let fulltext = db.fulltext_observability_snapshot()?;
             fulltext_creating += fulltext.creating;
             fulltext_backfilling += fulltext.backfilling;
             fulltext_ready += fulltext.ready;
@@ -381,11 +571,11 @@ impl DatabaseManager {
             fulltext_outbox_pending += fulltext.outbox_pending;
             fulltext_backfill_pending += fulltext.backfill_pending;
 
-            let stream = db.stream_observability_snapshot();
+            let stream = db.stream_observability_snapshot()?;
             stream_groups += stream.groups;
             stream_pending_entries += stream.pending_entries;
 
-            let vector = db.vector_observability_snapshot();
+            let vector = db.vector_observability_snapshot()?;
             vector_indexes += vector.indexes;
             vector_segments += vector.segments;
             vector_pending_segments += vector.pending_segments;
@@ -436,14 +626,37 @@ impl DatabaseManager {
             out,
             "onedis_fulltext_backfill_pending {fulltext_backfill_pending}"
         );
-        self.render_storage_engine_properties(&mut out);
-        out
+        let _ = writeln!(out, "# TYPE onedis_background_task_running gauge");
+        let _ = writeln!(out, "# TYPE onedis_background_task_failures_total counter");
+        let _ = writeln!(
+            out,
+            "# TYPE onedis_background_task_last_success_milliseconds gauge"
+        );
+        for (task, state) in self.background_health.snapshot() {
+            let _ = writeln!(
+                out,
+                "onedis_background_task_running{{task=\"{task}\"}} {}",
+                u8::from(state.running)
+            );
+            let _ = writeln!(
+                out,
+                "onedis_background_task_failures_total{{task=\"{task}\"}} {}",
+                state.failures
+            );
+            let _ = writeln!(
+                out,
+                "onedis_background_task_last_success_milliseconds{{task=\"{task}\"}} {}",
+                state.last_success_ms
+            );
+        }
+        self.render_storage_engine_properties(&mut out)?;
+        Ok(out)
     }
 
-    fn render_storage_engine_properties(&self, out: &mut String) {
+    fn render_storage_engine_properties(&self, out: &mut String) -> Result<(), Error> {
         let _ = writeln!(out, "# TYPE onedis_storage_engine_property gauge");
         for property in STORAGE_ENGINE_PROPERTIES {
-            let Ok(Some(value)) = self.store.get_property(property) else {
+            let Some(value) = self.store.get_property(property)? else {
                 continue;
             };
             if let Some(number) = parse_property_number(&value) {
@@ -460,6 +673,7 @@ impl DatabaseManager {
                 );
             }
         }
+        Ok(())
     }
 }
 
@@ -507,7 +721,7 @@ impl Drop for DatabaseManager {
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for task in tasks.drain(..) {
-            task.abort();
+            task.handle.abort();
         }
         for db in &self.dbs {
             db.shutdown_fulltext_runtime();

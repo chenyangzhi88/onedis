@@ -14,7 +14,10 @@ impl Db {
             }
         }
         let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let metas = match self.store.multi_get_raw_async(&meta_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(command_keys.len(), error),
+        };
         let now = now_ms();
         let mut lengths = Vec::with_capacity(keys.len());
         for (key, raw) in keys.iter().zip(metas) {
@@ -48,13 +51,20 @@ impl Db {
                             Ok(cached.len)
                         } else {
                             let prefix = zset_member_prefix(self.db_index, key, header.version);
-                            let len = self
+                            let len = match self
                                 .store
                                 .count_range_raw_keys_async(
                                     &prefix,
                                     prefix_exclusive_upper_bound(&prefix),
                                 )
-                                .await;
+                                .await
+                            {
+                                Ok(len) => len,
+                                Err(error) => {
+                                    lengths.push(Err(error.to_string()));
+                                    continue;
+                                }
+                            };
                             if self
                                 .counter_cache
                                 .zset_key_epoch(self.db_index, key.as_bytes())
@@ -97,7 +107,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .and_then(|entries| entries.get(member).copied()));
@@ -105,7 +115,7 @@ impl Db {
 
         Ok(self
             .store
-            .get_raw(&zset_member_key(self.db_index, key, version, member))
+            .get_raw(&zset_member_key(self.db_index, key, version, member))?
             .and_then(|value| decode_zset_score(&value)))
     }
 
@@ -119,7 +129,7 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .and_then(|entries| entries.get(member).copied()));
@@ -128,7 +138,7 @@ impl Db {
         Ok(self
             .store
             .get_raw_async(&zset_member_key(self.db_index, key, version, member))
-            .await
+            .await?
             .and_then(|value| decode_zset_score(&value)))
     }
 
@@ -145,7 +155,7 @@ impl Db {
             let entries = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .ok_or_else(|| Error::msg("Failed to decode packed sorted set"))?;
@@ -161,7 +171,7 @@ impl Db {
         Ok(self
             .store
             .multi_get_raw_async(&member_keys)
-            .await
+            .await?
             .into_iter()
             .map(|value| value.and_then(|value| decode_zset_score(&value)))
             .collect())
@@ -177,7 +187,10 @@ impl Db {
             .iter()
             .map(|(key, _)| self.mk(key))
             .collect::<Vec<_>>();
-        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let metas = match self.store.multi_get_raw_async(&meta_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         let now = now_ms();
         let mut member_keys = Vec::new();
         let mut plans = Vec::with_capacity(commands.len());
@@ -220,7 +233,10 @@ impl Db {
                 count: members.len(),
             });
         }
-        let values = self.store.multi_get_raw_async(&member_keys).await;
+        let values = match self.store.multi_get_raw_async(&member_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         plans
             .into_iter()
             .map(|plan| match plan {
@@ -246,7 +262,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map_or(0, |entries| entries.len()));
@@ -256,7 +272,7 @@ impl Db {
             let prefix = zset_member_prefix(self.db_index, key, version);
             return Ok(self
                 .store
-                .count_range_raw_keys(&prefix, prefix_exclusive_upper_bound(&prefix)));
+                .count_range_raw_keys(&prefix, prefix_exclusive_upper_bound(&prefix))?);
         }
         let logical_key = key.as_bytes().to_vec();
         self.counter_cache
@@ -277,7 +293,7 @@ impl Db {
         let prefix = zset_member_prefix(self.db_index, key, version);
         let len = self
             .store
-            .count_range_raw_keys(&prefix, prefix_exclusive_upper_bound(&prefix));
+            .count_range_raw_keys(&prefix, prefix_exclusive_upper_bound(&prefix))?;
         if self
             .counter_cache
             .zset_key_epoch(self.db_index, key.as_bytes())
@@ -308,7 +324,7 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map_or(0, |entries| entries.len()));
@@ -319,7 +335,7 @@ impl Db {
             return Ok(self
                 .store
                 .count_range_raw_keys_async(&prefix, prefix_exclusive_upper_bound(&prefix))
-                .await);
+                .await?);
         }
         let logical_key = key.as_bytes().to_vec();
         self.counter_cache
@@ -341,7 +357,7 @@ impl Db {
         let len = self
             .store
             .count_range_raw_keys_async(&prefix, prefix_exclusive_upper_bound(&prefix))
-            .await;
+            .await?;
         if self
             .counter_cache
             .zset_key_epoch(self.db_index, key.as_bytes())
@@ -375,7 +391,7 @@ impl Db {
 
         if version == 0 {
             return Ok(self
-                .zset_ranked_members(key, version)
+                .zset_ranked_members(key, version)?
                 .iter()
                 .position(|(candidate, _)| candidate == member));
         }
@@ -383,7 +399,7 @@ impl Db {
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let rank_key = zset_rank_key(self.db_index, key, version, score, member);
         Ok(Some(
-            self.store.count_range_raw_keys(&prefix, Some(rank_key)),
+            self.store.count_range_raw_keys(&prefix, Some(rank_key))?,
         ))
     }
 
@@ -400,7 +416,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .zset_ranked_members_async(key, version)
-                .await
+                .await?
                 .iter()
                 .position(|(candidate, _)| candidate == member));
         }
@@ -410,7 +426,7 @@ impl Db {
         Ok(Some(
             self.store
                 .count_range_raw_keys_async(&prefix, Some(rank_key))
-                .await,
+                .await?,
         ))
     }
 
@@ -423,7 +439,7 @@ impl Db {
         };
         if version == 0 {
             return Ok(self
-                .zset_ranked_members(key, version)
+                .zset_ranked_members(key, version)?
                 .iter()
                 .rev()
                 .position(|(candidate, _)| candidate == member));
@@ -434,7 +450,7 @@ impl Db {
         Ok(Some(self.store.count_range_raw_keys(
             &lower,
             prefix_exclusive_upper_bound(&prefix),
-        )))
+        )?))
     }
 
     pub async fn zset_rev_rank_async(
@@ -451,7 +467,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .zset_ranked_members_async(key, version)
-                .await
+                .await?
                 .iter()
                 .rev()
                 .position(|(candidate, _)| candidate == member));
@@ -462,7 +478,7 @@ impl Db {
         Ok(Some(
             self.store
                 .count_range_raw_keys_async(&lower, prefix_exclusive_upper_bound(&prefix))
-                .await,
+                .await?,
         ))
     }
 
@@ -490,7 +506,7 @@ impl Db {
         };
         if version == 0 {
             return Ok(self
-                .zset_ranked_members(key, version)
+                .zset_ranked_members(key, version)?
                 .into_iter()
                 .filter(|(_, score)| {
                     (*score > min || min_inclusive && *score == min)
@@ -509,7 +525,7 @@ impl Db {
         ) else {
             return Ok(0);
         };
-        Ok(self.store.count_range_raw_keys(&lower, upper))
+        Ok(self.store.count_range_raw_keys(&lower, upper)?)
     }
 
     pub(crate) async fn zset_count_bounded_async(
@@ -527,7 +543,7 @@ impl Db {
         if version == 0 {
             return Ok(self
                 .zset_ranked_members_async(key, version)
-                .await
+                .await?
                 .into_iter()
                 .filter(|(_, score)| {
                     (*score > min || min_inclusive && *score == min)
@@ -546,7 +562,7 @@ impl Db {
         ) else {
             return Ok(0);
         };
-        Ok(self.store.count_range_raw_keys_async(&lower, upper).await)
+        Ok(self.store.count_range_raw_keys_async(&lower, upper).await?)
     }
 
     pub fn zset_intersection_card(&self, keys: &[String], limit: usize) -> Result<usize, Error> {

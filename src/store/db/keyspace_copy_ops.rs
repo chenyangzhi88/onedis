@@ -27,12 +27,12 @@ impl Db {
         let target_store = store.for_db_index(target_db_index);
 
         let Some(source_raw) =
-            Self::load_live_raw_for_db_with_backend(&source_store, source_db_index, source_key)
+            Self::load_live_raw_for_db_with_backend(&source_store, source_db_index, source_key)?
         else {
             return Ok(false);
         };
         let target_raw =
-            Self::load_live_raw_for_db_with_backend(&target_store, target_db_index, target_key);
+            Self::load_live_raw_for_db_with_backend(&target_store, target_db_index, target_key)?;
         if target_raw.is_some() && !replace {
             return Ok(false);
         }
@@ -66,13 +66,15 @@ impl Db {
                 &source_raw,
                 version_counter,
             ),
-        );
+        )?;
         if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
             && header.expire_ms > 0
         {
             ttl_manager.add_to_batch(&mut batch, header.expire_ms, target_db_index, target_key);
         }
-        target_store.write_batch(&batch);
+        target_store
+            .write_batch(&batch)
+            .map_err(|error| Error::msg(error.to_string()))?;
         Ok(true)
     }
 
@@ -106,7 +108,7 @@ impl Db {
             source_db_index,
             source_key,
         )
-        .await
+        .await?
         else {
             return Ok(false);
         };
@@ -115,7 +117,7 @@ impl Db {
             target_db_index,
             target_key,
         )
-        .await;
+        .await?;
         if target_raw.is_some() && !replace {
             return Ok(false);
         }
@@ -150,13 +152,16 @@ impl Db {
                 version_counter,
             ),
         )
-        .await;
+        .await?;
         if let (Some(ttl_manager), Some(header)) = (ttl_manager, decode_meta_header(&source_raw))
             && header.expire_ms > 0
         {
             ttl_manager.add_to_batch(&mut batch, header.expire_ms, target_db_index, target_key);
         }
-        target_store.write_batch_async(&batch).await;
+        target_store
+            .write_batch_async(&batch)
+            .await
+            .map_err(|error| Error::msg(error.to_string()))?;
         Ok(true)
     }
 

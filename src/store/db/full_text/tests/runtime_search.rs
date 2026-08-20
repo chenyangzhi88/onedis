@@ -4,13 +4,15 @@ use super::support::*;
 #[test]
 fn runtime_indexes_searches_deletes_synonyms_and_registry_paths() {
     let store = test_store("runtime");
-    store.put_raw(
-        &fulltext_syn_key(0, "idx", "g1"),
-        &encode_record(&FullTextSynonymGroup {
-            terms: vec!["car".to_string(), "automobile".to_string()],
-        })
-        .unwrap(),
-    );
+    store
+        .put_raw(
+            &fulltext_syn_key(0, "idx", "g1"),
+            &encode_record(&FullTextSynonymGroup {
+                terms: vec!["car".to_string(), "automobile".to_string()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
 
     let meta = meta(vec![
         {

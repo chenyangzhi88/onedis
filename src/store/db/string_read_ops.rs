@@ -6,40 +6,52 @@ impl Db {
      *
      * 自动进行惰性过期检测。
      */
-    pub fn get(&self, key: &str) -> Option<Structure> {
-        self.expire_if_needed(key);
-        let raw = self.store.get_raw(&self.mk(key))?.clone();
+    pub fn get(&self, key: &str) -> Result<Option<Structure>, Error> {
+        self.expire_if_needed(key)?;
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
+            return Ok(None);
+        };
         if let Some(meta) = decode_list_meta(&raw) {
-            return Some(Structure::List(self.read_list_items(key, meta.version)));
+            return Ok(Some(Structure::List(
+                self.read_list_items(key, meta.version)?,
+            )));
         }
         if let Some(meta) = decode_stream_meta(&raw) {
-            return Some(Structure::Stream(
-                self.read_stream_entries(key, meta.version),
-            ));
+            return Ok(Some(Structure::Stream(
+                self.read_stream_entries(key, meta.version)?,
+            )));
         }
         if let Some(meta) = decode_set_meta(&raw) {
-            return Some(Structure::Set(self.read_set_members(key, meta.version)));
+            return Ok(Some(Structure::Set(
+                self.read_set_members(key, meta.version)?,
+            )));
         }
         if let Some(meta) = decode_hash_meta(&raw) {
-            return Some(Structure::Hash(self.read_hash_fields(key, meta.version)));
+            return Ok(Some(Structure::Hash(
+                self.read_hash_fields(key, meta.version)?,
+            )));
         }
-        let (_, version, structure) = decode_entry(&raw)?;
-        match structure {
-            Structure::Hash(_) => Some(Structure::Hash(self.read_hash_fields(key, version))),
+        let (_, version, structure) =
+            decode_entry(&raw).ok_or_else(|| Error::msg("ERR corrupted stored structure"))?;
+        Ok(match structure {
+            Structure::Hash(_) => Some(Structure::Hash(self.read_hash_fields(key, version)?)),
             Structure::SortedSet(_) => {
-                Some(Structure::SortedSet(self.read_zset_members(key, version)))
+                Some(Structure::SortedSet(self.read_zset_members(key, version)?))
             }
-            Structure::Set(_) => Some(Structure::Set(self.read_set_members(key, version))),
-            Structure::List(_) => Some(Structure::List(self.read_list_items(key, version))),
-            Structure::Stream(_) => Some(Structure::Stream(self.read_stream_entries(key, version))),
-            Structure::Json(json) if json == JSON_INDEXED_MARKER => self
-                .read_json_value_at_path(key, version, &[])
-                .ok()
-                .flatten()
-                .and_then(|value| serde_json::to_string(&value).ok())
-                .map(Structure::Json),
+            Structure::Set(_) => Some(Structure::Set(self.read_set_members(key, version)?)),
+            Structure::List(_) => Some(Structure::List(self.read_list_items(key, version)?)),
+            Structure::Stream(_) => {
+                Some(Structure::Stream(self.read_stream_entries(key, version)?))
+            }
+            Structure::Json(json) if json == JSON_INDEXED_MARKER => {
+                let value = self.read_json_value_at_path(key, version, &[])?;
+                value
+                    .map(|value| serde_json::to_string(&value))
+                    .transpose()?
+                    .map(Structure::Json)
+            }
             other => Some(other),
-        }
+        })
     }
 
     pub fn get_string(&self, key: &str) -> Result<Option<String>, Error> {
@@ -61,7 +73,7 @@ impl Db {
     }
 
     pub fn get_string_bytes(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
-        let Some(raw) = self.read_live_raw(key) else {
+        let Some(raw) = self.read_live_raw(key)? else {
             return Ok(None);
         };
         if let Some(value) = decode_string_bytes(&raw) {
@@ -72,7 +84,7 @@ impl Db {
     }
 
     pub async fn get_string_bytes_async(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
-        let Some(raw) = self.read_live_raw_async(key).await else {
+        let Some(raw) = self.read_live_raw_async(key).await? else {
             return Ok(None);
         };
         if let Some(value) = decode_string_bytes(&raw) {
@@ -83,12 +95,16 @@ impl Db {
     }
 
     /// MGET-compatible bulk read. Missing, expired, and non-string keys become nil.
-    pub async fn get_string_bytes_many_async(&self, keys: &[String]) -> Vec<Option<Vec<u8>>> {
+    pub async fn get_string_bytes_many_async(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<Option<Vec<u8>>>, Error> {
         let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
         let now = now_ms();
-        self.store
+        Ok(self
+            .store
             .multi_get_raw_async(&raw_keys)
-            .await
+            .await?
             .into_iter()
             .map(|raw| {
                 let raw = raw?;
@@ -98,7 +114,7 @@ impl Db {
                 }
                 decode_string_bytes(&raw)
             })
-            .collect()
+            .collect())
     }
 
     /// Bulk string read for commands where a non-string source is an error.
@@ -110,7 +126,7 @@ impl Db {
         let now = now_ms();
         self.store
             .multi_get_raw_async(&raw_keys)
-            .await
+            .await?
             .into_iter()
             .map(|raw| -> Result<Option<Vec<u8>>, Error> {
                 let Some(raw) = raw else {

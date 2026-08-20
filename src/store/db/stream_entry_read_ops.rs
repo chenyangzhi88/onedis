@@ -38,9 +38,9 @@ impl Db {
         }
 
         if reverse {
-            Ok(self.stream_entries_between_limited_reverse(key, meta.version, lower, upper, limit))
+            self.stream_entries_between_limited_reverse(key, meta.version, lower, upper, limit)
         } else {
-            let mut entries = self.stream_entries_between(key, meta.version, lower, upper);
+            let mut entries = self.stream_entries_between(key, meta.version, lower, upper)?;
             entries.truncate(limit);
             Ok(entries)
         }
@@ -76,11 +76,11 @@ impl Db {
                     upper,
                     limit,
                 )
-                .await)
+                .await?)
         } else {
             Ok(self
                 .stream_entries_between_limited_async(key, meta.version, lower, upper, limit)
-                .await)
+                .await?)
         }
     }
 
@@ -109,7 +109,7 @@ impl Db {
                 seq: u64::MAX,
             };
             let mut entries = self
-                .stream_entries_between(key, meta.version, lower, upper)
+                .stream_entries_between(key, meta.version, lower, upper)?
                 .into_iter()
                 .filter(|entry| parse_stream_id(&entry.id).is_some_and(|id| id > lower))
                 .collect::<Vec<_>>();
@@ -150,7 +150,7 @@ impl Db {
             };
             let entries = self
                 .stream_entries_between_limited_async(key, meta.version, lower, upper, limit)
-                .await;
+                .await?;
             if !entries.is_empty() {
                 result.push((key.clone(), entries));
             }

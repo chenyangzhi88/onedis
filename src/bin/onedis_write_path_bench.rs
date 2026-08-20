@@ -94,7 +94,10 @@ async fn main() {
                 let key = format!("{key_prefix}:{:08}", rng % keyspace);
                 if use_async {
                     match mode {
-                        Mode::Set => db.insert_string_bytes_refs_async(&[(&key, &value)]).await,
+                        Mode::Set => db
+                            .insert_string_bytes_refs_async(&[(&key, &value)])
+                            .await
+                            .expect("set failed"),
                         Mode::Lpush => {
                             db.list_push_left_bytes_async(&key, &[value.as_slice()], false)
                                 .await
@@ -103,7 +106,9 @@ async fn main() {
                     }
                 } else {
                     match mode {
-                        Mode::Set => db.insert_string_bytes_ref(&key, &value),
+                        Mode::Set => db
+                            .insert_string_bytes_ref(&key, &value)
+                            .expect("set failed"),
                         Mode::Lpush => {
                             db.list_push_left_bytes(&key, &[value.as_slice()], false)
                                 .expect("lpush failed");

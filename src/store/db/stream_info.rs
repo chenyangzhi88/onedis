@@ -7,14 +7,14 @@ impl Db {
         };
         let prefix = stream_group_prefix(self.db_index, key, meta.version);
         let mut groups = Vec::new();
-        for (group_key, raw) in self.store.scan_prefix_raw(&prefix) {
+        for (group_key, raw) in self.store.scan_prefix_raw(&prefix)? {
             let name = String::from_utf8(group_key[prefix.len()..].to_vec()).unwrap_or_default();
             let Some(state) = decode_stream_group_state(&raw) else {
                 continue;
             };
-            let pending = self.stream_pending_raw(key, meta.version, &name);
+            let pending = self.stream_pending_raw(key, meta.version, &name)?;
             let mut consumers = self
-                .stream_consumers_raw(key, meta.version, &name)
+                .stream_consumers_raw(key, meta.version, &name)?
                 .into_keys()
                 .collect::<HashSet<_>>();
             consumers.extend(pending.iter().map(|(_, pel)| pel.consumer.clone()));
@@ -36,17 +36,17 @@ impl Db {
         };
         let prefix = stream_group_prefix(self.db_index, key, meta.version);
         let mut groups = Vec::new();
-        for (group_key, raw) in self.store.scan_prefix_raw_async(&prefix).await {
+        for (group_key, raw) in self.store.scan_prefix_raw_async(&prefix).await? {
             let name = String::from_utf8(group_key[prefix.len()..].to_vec()).unwrap_or_default();
             let Some(state) = decode_stream_group_state(&raw) else {
                 continue;
             };
             let pending = self
                 .stream_pending_raw_async(key, meta.version, &name)
-                .await;
+                .await?;
             let mut consumers = self
                 .stream_consumers_raw_async(key, meta.version, &name)
-                .await
+                .await?
                 .into_keys()
                 .collect::<HashSet<_>>();
             consumers.extend(pending.iter().map(|(_, pel)| pel.consumer.clone()));
@@ -74,11 +74,11 @@ impl Db {
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let now = now_ms();
         let mut consumers: BTreeMap<String, (usize, u64)> = self
-            .stream_consumers_raw(key, meta.version, group)
+            .stream_consumers_raw(key, meta.version, group)?
             .into_iter()
             .map(|(name, state)| (name, (0, state.last_seen_ms)))
             .collect();
-        for (_, pel) in self.stream_pending_raw(key, meta.version, group) {
+        for (_, pel) in self.stream_pending_raw(key, meta.version, group)? {
             let entry = consumers
                 .entry(pel.consumer)
                 .or_insert((0, pel.last_delivery_ms));
@@ -108,13 +108,13 @@ impl Db {
         let now = now_ms();
         let mut consumers: BTreeMap<String, (usize, u64)> = self
             .stream_consumers_raw_async(key, meta.version, group)
-            .await
+            .await?
             .into_iter()
             .map(|(name, state)| (name, (0, state.last_seen_ms)))
             .collect();
         for (_, pel) in self
             .stream_pending_raw_async(key, meta.version, group)
-            .await
+            .await?
         {
             let entry = consumers
                 .entry(pel.consumer)
@@ -131,11 +131,12 @@ impl Db {
             .collect())
     }
 
-    pub fn stream_observability_snapshot(&self) -> StreamObservabilitySnapshot {
+    pub fn stream_observability_snapshot(&self) -> Result<StreamObservabilitySnapshot, Error> {
         let mut snapshot = StreamObservabilitySnapshot::default();
         let now = now_ms();
-        for key in self.logical_keys() {
-            let Some(raw) = self.store.get_raw(&self.mk(&key)) else {
+        let keys = self.logical_keys()?;
+        for key in keys {
+            let Some(raw) = self.store.get_raw(&self.mk(&key))? else {
                 continue;
             };
             let Some(header) = decode_meta_header(&raw) else {
@@ -148,14 +149,15 @@ impl Db {
                 continue;
             }
             let prefix = stream_group_prefix(self.db_index, &key, header.version);
-            for (group_key, _) in self.store.scan_prefix_raw(&prefix) {
+            let groups = self.store.scan_prefix_raw(&prefix)?;
+            for (group_key, _) in groups {
                 let name =
                     String::from_utf8(group_key[prefix.len()..].to_vec()).unwrap_or_default();
                 snapshot.groups += 1;
-                snapshot.pending_entries +=
-                    self.stream_pending_raw(&key, header.version, &name).len() as u64;
+                let pending = self.stream_pending_raw(&key, header.version, &name)?;
+                snapshot.pending_entries += pending.len() as u64;
             }
         }
-        snapshot
+        Ok(snapshot)
     }
 }

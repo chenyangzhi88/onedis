@@ -8,7 +8,7 @@ use super::{
     StringExpireUpdate, Structure, TYPE_HASH, TYPE_JSON, TYPE_LIST, TYPE_SET, TYPE_SORTED_SET,
     TYPE_STREAM, TYPE_VECTOR, VECTOR_DOC_NAMESPACE, VECTOR_GRAPH_NAMESPACE, VECTOR_META_NAMESPACE,
     VECTOR_NUMERIC_NAMESPACE, VECTOR_SEGMENT_NAMESPACE, VECTOR_TAG_NAMESPACE, WRONG_TYPE_ERROR,
-    ZSET_MEMBER_NAMESPACE, ZSET_RANK_NAMESPACE, ZsetAggregate, db_prefix,
+    ZSET_MEMBER_NAMESPACE, ZSET_RANK_NAMESPACE, ZsetAggregate, ZsetScoreWindow, db_prefix,
     db_prefix_exclusive_upper_bound, decode_db_prefix, decode_entry,
     delete_sub_keys_to_batch_bytes, encode_set_meta, hash_field_expire_key, hash_field_key,
     hash_field_prefix, internal_prefix, is_known_subkey_namespace, json_node_key, json_node_prefix,
@@ -61,19 +61,22 @@ fn recovered_nonempty_db_table_initializes_missing_table_local_layout() {
     std::fs::create_dir_all(&db_path).unwrap();
     std::fs::create_dir_all(&wal_dir).unwrap();
     let store = KvStore::new(db_path, wal_dir, 1).for_db_index(7);
-    store.put_raw(b"legacy-key", b"legacy-value");
+    store.put_raw(b"legacy-key", b"legacy-value").unwrap();
 
-    assert_eq!(store.get_raw(KEY_ENCODING_LAYOUT_META_KEY), None);
+    assert_eq!(store.get_raw(KEY_ENCODING_LAYOUT_META_KEY).unwrap(), None);
     assert_eq!(
         KeyEncodingLayout::open_or_initialize_for_table(&store),
         KeyEncodingLayout::TableLocalV2
     );
     assert_eq!(
-        store.get_raw(KEY_ENCODING_LAYOUT_META_KEY).as_deref(),
+        store
+            .get_raw(KEY_ENCODING_LAYOUT_META_KEY)
+            .unwrap()
+            .as_deref(),
         Some(b"table-local-v2".as_slice())
     );
     assert_eq!(
-        store.get_raw(b"legacy-key").as_deref(),
+        store.get_raw(b"legacy-key").unwrap().as_deref(),
         Some(b"legacy-value".as_slice())
     );
 }
@@ -86,7 +89,7 @@ fn nonempty_non_db_table_without_layout_still_fails_closed() {
     std::fs::create_dir_all(&db_path).unwrap();
     std::fs::create_dir_all(&wal_dir).unwrap();
     let store = KvStore::new(db_path, wal_dir, 1).for_table("legacy_custom_table");
-    store.put_raw(b"legacy-key", b"legacy-value");
+    store.put_raw(b"legacy-key", b"legacy-value").unwrap();
 
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -94,7 +97,7 @@ fn nonempty_non_db_table_without_layout_still_fails_closed() {
         }))
         .is_err()
     );
-    assert_eq!(store.get_raw(KEY_ENCODING_LAYOUT_META_KEY), None);
+    assert_eq!(store.get_raw(KEY_ENCODING_LAYOUT_META_KEY).unwrap(), None);
 }
 
 mod full_text_directory;

@@ -22,7 +22,9 @@ impl OnedisIntegerMergeOperator {
                 "existing value is not an onedis string".to_string(),
             ));
         }
-        let expire_ms = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+        let mut expire_bytes = [0u8; 8];
+        expire_bytes.copy_from_slice(&bytes[..8]);
+        let expire_ms = u64::from_be_bytes(expire_bytes);
         let text = std::str::from_utf8(&bytes[17..]).map_err(|_| {
             Status::InvalidArgument("existing string value is not valid UTF-8".to_string())
         })?;

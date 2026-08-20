@@ -30,6 +30,6 @@ impl Mget {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        checked_string_values(db.get_string_bytes_many_async(&self.keys).await)
+        checked_string_values(db.get_string_bytes_many_async(&self.keys).await?)
     }
 }

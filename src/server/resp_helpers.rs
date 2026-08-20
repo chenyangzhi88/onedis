@@ -184,7 +184,7 @@ fn parse_borrowed_string_mutations<'a>(
         .iter()
         .map(|args| {
             let command = args.first()?;
-            let key = std::str::from_utf8(*args.get(1)?).ok()?;
+            let key = std::str::from_utf8(args.get(1)?).ok()?;
             if command.eq_ignore_ascii_case(b"APPEND") && args.len() == 3 {
                 Some(StringBatchMutation::Append {
                     key,
@@ -249,7 +249,7 @@ fn parse_borrowed_key_expiration_mutations<'a>(
         .iter()
         .map(|args| {
             let command = args.first()?;
-            let key = std::str::from_utf8(*args.get(1)?).ok()?;
+            let key = std::str::from_utf8(args.get(1)?).ok()?;
             if command.eq_ignore_ascii_case(b"PERSIST") && args.len() == 2 {
                 Some(KeyExpirationBatchMutation::Persist { key })
             } else if command.eq_ignore_ascii_case(b"PEXPIRE") && args.len() == 3 {

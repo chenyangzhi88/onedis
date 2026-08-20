@@ -91,7 +91,12 @@ impl<'a> FullTextQueryParser<'a> {
                 expr = self.parse_vector_knn(expr)?;
             } else if self.peek_char() == Some('{') {
                 let attrs = self.read_balanced('{', '}')?;
-                let (weight, slop, inorder, phonetic) = parse_query_attributes(&attrs)?;
+                let QueryAttributes {
+                    weight,
+                    slop,
+                    inorder,
+                    phonetic,
+                } = parse_query_attributes(&attrs)?;
                 expr = FullTextQueryAst::Attributed {
                     expr: Box::new(expr),
                     weight,

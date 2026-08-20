@@ -52,22 +52,21 @@ impl TtlManager {
         self.store.for_db_index(db_index)
     }
 
-    pub fn index_size(&self) -> usize {
+    pub fn index_size(&self) -> common::types::status::Result<usize> {
         let db_count = self.db_count.load(Ordering::Acquire).max(1) as u16;
         (0..db_count)
-            .map(|db_idx| {
-                self.store_for_db(db_idx)
-                    .scan_prefix_raw(TTL_INDEX_PREFIX)
-                    .len()
-            })
+            .map(|db_idx| Ok(self.store_for_db(db_idx).scan_prefix_raw(TTL_INDEX_PREFIX)?.len()))
             .sum()
     }
 
-    pub fn index_snapshot_for_db(&self, db_index: u16) -> (usize, u64) {
+    pub fn index_snapshot_for_db(
+        &self,
+        db_index: u16,
+    ) -> common::types::status::Result<(usize, u64)> {
         let now = now_ms();
         let mut count = 0usize;
         let mut total_ttl = 0u64;
-        for (ttl_key, _) in self.store_for_db(db_index).scan_prefix_raw(&ttl_db_prefix(db_index)) {
+        for (ttl_key, _) in self.store_for_db(db_index).scan_prefix_raw(&ttl_db_prefix(db_index))? {
             let Some((expire_ms, parsed_db, _)) = parse_ttl_index_key(&ttl_key) else {
                 continue;
             };
@@ -82,19 +81,19 @@ impl TtlManager {
         } else {
             total_ttl / count as u64
         };
-        (count, avg_ttl)
+        Ok((count, avg_ttl))
     }
 
-    pub async fn index_size_async(&self) -> usize {
+    pub async fn index_size_async(&self) -> common::types::status::Result<usize> {
         let db_count = self.db_count.load(Ordering::Acquire).max(1) as u16;
         let mut total = 0usize;
         for db_idx in 0..db_count {
             total += self
                 .store_for_db(db_idx)
                 .scan_prefix_raw_async(TTL_INDEX_PREFIX)
-                .await
+                .await?
                 .len();
         }
-        total
+        Ok(total)
     }
 }

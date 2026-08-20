@@ -30,12 +30,12 @@ impl Mset {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        db.insert_string_bytes_many(self.key_vals);
+        db.insert_string_bytes_many(self.key_vals)?;
         Ok(Frame::Ok)
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        db.insert_string_bytes_many_async(self.key_vals).await;
+        db.insert_string_bytes_many_async(self.key_vals).await?;
         Ok(Frame::Ok)
     }
 }

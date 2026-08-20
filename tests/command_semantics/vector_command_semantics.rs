@@ -555,6 +555,7 @@ fn redis_vector_set_rebuilds_hnsw_runtime_after_reopen() {
 
     drop(db);
     let reopened = open_db_at(&dir);
+    reopened.load_vector_runtimes_for_startup().unwrap();
     assert_integer(apply(&reopened, &["VCARD", "reopen"]), 2);
     let result = apply(
         &reopened,

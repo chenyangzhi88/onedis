@@ -14,9 +14,60 @@ pub struct FullTextRuntimeRegistry {
     pub(super) source_routes: DashMap<u16, Arc<Vec<FullTextSourceRoute>>>,
     pub(super) outbox_pending: DashMap<FullTextRuntimeKey, u64>,
     pub(super) latest_outbox_seq: DashMap<FullTextRuntimeKey, u64>,
+    pub(super) progress_signals: DashMap<FullTextRuntimeKey, Arc<FullTextProgressSignal>>,
     pub(super) config_values: DashMap<(u16, String), Option<String>>,
     pub(super) aliases: DashMap<(u16, String), String>,
-    pub(super) query_asts: DashMap<FullTextQueryCacheKey, Arc<FullTextQueryAst>>,
+    pub(super) query_asts: DashMap<FullTextQueryCacheKey, FullTextQueryCacheEntry>,
+    pub(super) query_cache_clock: AtomicU64,
+    pub(super) query_cache_eviction_lock: Mutex<()>,
+    pub(super) maintenance_cursor: AtomicUsize,
+}
+
+pub(super) struct FullTextQueryCacheEntry {
+    pub(super) ast: Arc<FullTextQueryAst>,
+    pub(super) last_access: AtomicU64,
+}
+
+#[derive(Default)]
+pub(super) struct FullTextProgressSignal {
+    generation: Mutex<u64>,
+    changed: Condvar,
+}
+
+impl FullTextProgressSignal {
+    pub(super) fn generation(&self) -> Result<u64, Error> {
+        self.generation
+            .lock()
+            .map(|generation| *generation)
+            .map_err(|_| Error::msg("ERR fulltext progress signal lock poisoned"))
+    }
+
+    pub(super) fn notify(&self) {
+        let mut generation = self
+            .generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *generation = generation.wrapping_add(1);
+        self.changed.notify_all();
+    }
+
+    pub(super) fn wait_for_change(&self, observed: u64, deadline: Instant) -> Result<bool, Error> {
+        let generation = self
+            .generation
+            .lock()
+            .map_err(|_| Error::msg("ERR fulltext progress signal lock poisoned"))?;
+        if *generation != observed {
+            return Ok(true);
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(false);
+        };
+        let (generation, _) = self
+            .changed
+            .wait_timeout_while(generation, remaining, |generation| *generation == observed)
+            .map_err(|_| Error::msg("ERR fulltext progress signal lock poisoned"))?;
+        Ok(*generation != observed)
+    }
 }
 
 #[derive(Clone)]

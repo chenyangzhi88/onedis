@@ -21,8 +21,8 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed(key);
-            let observed = self.store.get_raw_observed(&key_bytes);
+            self.expire_if_needed(key)?;
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let (expire_ms, mut items) = match observed.value() {
                 None if only_if_exists => return Ok(Some(0)),
                 None => (0, PackedListItems::new()),
@@ -84,10 +84,10 @@ impl Db {
     ) -> Result<Option<Vec<Result<usize, Error>>>, Error> {
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
             for key in keys {
-                self.expire_if_needed_async(key).await;
+                self.expire_if_needed_async(key).await?;
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await?;
             let mut states = Vec::with_capacity(keys.len());
             for observed in &observations {
                 states.push(match observed.value() {
@@ -230,7 +230,7 @@ impl Db {
         .expect("write batch append invariant violated");
         let len = (meta.tail - meta.head) as usize;
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.cache_list_meta_if_non_transactional(key, meta);
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -304,7 +304,7 @@ impl Db {
         .expect("write batch append invariant violated");
         let len = (meta.tail - meta.head) as usize;
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.cache_list_meta_if_non_transactional(key, meta);
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -537,10 +537,16 @@ impl Db {
         }
         if changed > 0 {
             if has_new_version {
-                self.write_batch_if_not_empty_async(&batch).await;
+                if let Err(error) = self.write_batch_if_not_empty_async(&batch).await {
+                    return fail_successful_batch_replies(replies, error);
+                }
             } else {
-                self.write_existing_version_batch_if_not_empty_async(&batch)
-                    .await;
+                if let Err(error) = self
+                    .write_existing_version_batch_if_not_empty_async(&batch)
+                    .await
+                {
+                    return fail_successful_batch_replies(replies, error);
+                }
             }
             self.changes.fetch_add(changed, Ordering::Relaxed);
             for (position, state) in states.iter().enumerate() {

@@ -32,19 +32,19 @@ impl Info {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let info = self.generate_info(db, db.len());
+        let info = self.generate_info(db, db.len()?)?;
         Ok(Frame::bulk_string(info))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let info = self.generate_info(db, db.len_async().await);
+        let info = self.generate_info(db, db.len_async().await?)?;
         Ok(Frame::bulk_string(info))
     }
 
-    fn generate_info(&self, db: &Db, db_size: usize) -> String {
+    fn generate_info(&self, db: &Db, db_size: usize) -> Result<String, Error> {
         let mut info = String::new();
         let metrics = global_metrics().snapshot();
-        let ttl = db.ttl_observability_snapshot();
+        let ttl = db.ttl_observability_snapshot()?;
 
         // Default sections to show
         let show_all = self.section.is_none() || self.section.as_ref().is_some_and(|s| s == "all");
@@ -193,7 +193,7 @@ impl Info {
             ));
         }
 
-        info
+        Ok(info)
     }
 }
 
@@ -278,8 +278,8 @@ mod tests {
     #[test]
     fn info_default_all_specific_and_unknown_sections_are_rendered() {
         let db = test_db();
-        db.insert_string_ref("k1", "v1");
-        db.insert_string_ref("k2", "v2");
+        db.insert_string_ref("k1", "v1").unwrap();
+        db.insert_string_ref("k2", "v2").unwrap();
 
         let default_info = bulk_text(command(&["info"]).apply(&db).unwrap());
         for section in [
@@ -323,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn info_async_uses_async_db_size() {
         let db = test_db();
-        db.insert_string_ref("async-key", "value");
+        db.insert_string_ref("async-key", "value").unwrap();
 
         let info = bulk_text(
             command(&["info", "keyspace"])

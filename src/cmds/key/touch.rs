@@ -18,14 +18,17 @@ impl Touch {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let count = self.keys.into_iter().filter(|key| db.touch(key)).count() as i64;
+        let mut count = 0i64;
+        for key in self.keys {
+            count += i64::from(db.touch(&key)?);
+        }
         Ok(Frame::Integer(count))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         let count = db
             .exists_readonly_many_async(&self.keys)
-            .await
+            .await?
             .into_iter()
             .filter(|exists| *exists)
             .count() as i64;

@@ -277,9 +277,9 @@ impl Db {
         }
         let len = out.len();
         if len == 0 {
-            self.delete_key(dest);
+            self.delete_key(dest)?;
         } else {
-            self.insert_string_bytes(dest.to_string(), out, None);
+            self.insert_string_bytes(dest.to_string(), out, None)?;
         }
         Ok(len)
     }
@@ -348,7 +348,7 @@ impl Db {
             .map(|key| self.mk(key))
             .collect::<Vec<_>>();
 
-        let raw_values = self.store.multi_get_raw_async(&raw_keys).await;
+        let raw_values = self.store.multi_get_raw_async(&raw_keys).await?;
         let now = now_ms();
         let mut out = Vec::new();
         for (source_index, key) in keys.iter().enumerate() {
@@ -385,7 +385,7 @@ impl Db {
                 old_dest_raw,
             );
         }
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(len)
     }
@@ -482,7 +482,10 @@ impl Db {
             .collect::<Vec<_>>();
 
         {
-            let raw_values = self.store.multi_get_raw_async(&raw_keys).await;
+            let raw_values = match self.store.multi_get_raw_async(&raw_keys).await {
+                Ok(values) => values,
+                Err(error) => return storage_batch_error(commands.len(), error),
+            };
             let now = now_ms();
             let mut values = raw_values
                 .iter()
@@ -577,10 +580,12 @@ impl Db {
             // Every logical source and destination is held by an exclusive key barrier for this
             // whole simulation, so a second storage-level compare phase cannot detect a writer
             // that the barrier has not already excluded.
-            self.write_batch_if_not_empty_async(&batch).await;
+            if let Err(error) = self.write_batch_if_not_empty_async(&batch).await {
+                return fail_successful_batch_replies(replies, error);
+            }
             self.changes
                 .fetch_add(successful_commands, Ordering::Relaxed);
-            return replies;
+            replies
         }
     }
 

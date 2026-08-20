@@ -1,12 +1,5 @@
-#[cfg(feature = "tcp-integration-tests")]
 mod support;
 
-#[cfg(not(feature = "tcp-integration-tests"))]
-#[test]
-#[ignore = "requires local TCP socket creation; run with --features tcp-integration-tests"]
-fn basic_commands_tcp_e2e_requires_tcp_socket() {}
-
-#[cfg(feature = "tcp-integration-tests")]
 mod tests {
 
     use std::{thread::sleep, time::Duration};

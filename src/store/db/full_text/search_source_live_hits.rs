@@ -27,7 +27,7 @@ impl Db {
             .iter()
             .map(|candidate| self.mk(&candidate.key))
             .collect::<Vec<_>>();
-        let raw_metas = self.store.multi_get_raw(&meta_keys);
+        let raw_metas = self.store.multi_get_raw(&meta_keys)?;
         let expected_type = match meta.source_type {
             FullTextSourceType::Hash => TYPE_HASH,
             FullTextSourceType::Json => TYPE_JSON,
@@ -43,25 +43,26 @@ impl Db {
                 continue;
             }
             if header.expire_ms != 0 && header.expire_ms <= now {
-                self.expire_if_needed(&candidate.key);
+                self.expire_if_needed(&candidate.key)?;
                 continue;
             }
             match meta.source_type {
                 FullTextSourceType::Hash => {
                     let fields = if let Some(projected) = &projected_hash_fields {
-                        projected
-                            .iter()
-                            .filter_map(|(source, output)| {
-                                let value = self.hash_live_field_value(
-                                    &candidate.key,
-                                    header.version,
-                                    source,
-                                )?;
-                                Some((output.clone(), String::from_utf8(value).ok()?))
-                            })
-                            .collect::<Vec<_>>()
+                        let mut fields = Vec::with_capacity(projected.len());
+                        for (source, output) in projected {
+                            let Some(value) =
+                                self.hash_live_field_value(&candidate.key, header.version, source)?
+                            else {
+                                continue;
+                            };
+                            if let Ok(value) = String::from_utf8(value) {
+                                fields.push((output.clone(), value));
+                            }
+                        }
+                        fields
                     } else {
-                        self.hash_live_entries_raw(&candidate.key, header.version)
+                        self.hash_live_entries_raw(&candidate.key, header.version)?
                             .into_iter()
                             .filter_map(|(field, value)| {
                                 Some((
@@ -186,14 +187,14 @@ impl Db {
         key: String,
         score: f32,
     ) -> Result<Option<FullTextLiveHit>, Error> {
-        self.expire_if_needed(&key);
+        self.expire_if_needed(&key)?;
         let expected_type = match meta.source_type {
             FullTextSourceType::Hash => TYPE_HASH,
             FullTextSourceType::Json => TYPE_JSON,
         };
         if self
             .store
-            .get_raw(&self.mk(&key))
+            .get_raw(&self.mk(&key))?
             .and_then(|raw| decode_meta_header(&raw))
             .is_none_or(|header| header.type_tag != expected_type)
         {

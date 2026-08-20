@@ -20,13 +20,13 @@ impl Ttl {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let millis = db.ttl_millis_readonly(&self.key);
+        let millis = db.ttl_millis_readonly(&self.key)?;
         let second = if millis < 0 { millis } else { millis / 1000 };
         Ok(Frame::Integer(second))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let millis = db.ttl_millis_readonly_async(&self.key).await;
+        let millis = db.ttl_millis_readonly_async(&self.key).await?;
         let second = if millis < 0 { millis } else { millis / 1000 };
         Ok(Frame::Integer(second))
     }

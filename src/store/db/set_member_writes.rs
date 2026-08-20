@@ -4,8 +4,8 @@ impl Db {
     fn try_set_add_packed(&self, key: &str, members: &[String]) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed(key);
-            let observed = self.store.get_raw_observed(&key_bytes);
+            self.expire_if_needed(key)?;
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let (expire_ms, mut packed) = match observed.value() {
                 None => (0, PackedSetMembers::new()),
                 Some(raw) => {
@@ -65,8 +65,8 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let (expire_ms, mut packed) = match observed.value() {
                 None => (0, PackedSetMembers::new()),
                 Some(raw) => {
@@ -125,8 +125,8 @@ impl Db {
     fn try_set_remove_packed(&self, key: &str, members: &[String]) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed(key);
-            let observed = self.store.get_raw_observed(&key_bytes);
+            self.expire_if_needed(key)?;
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(0));
             };
@@ -172,8 +172,8 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(0));
             };
@@ -239,10 +239,15 @@ impl Db {
 
         for attempt in 0..64 {
             for key in &keys {
-                self.expire_if_needed_async(key).await;
+                if let Err(error) = self.expire_if_needed_async(key).await {
+                    return storage_batch_error(mutations.len(), error);
+                }
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = match self.store.multi_get_raw_observed_async(&raw_keys).await {
+                Ok(observations) => observations,
+                Err(error) => return storage_batch_error(mutations.len(), error),
+            };
             let mut states = Vec::with_capacity(keys.len());
             for (position, key) in keys.iter().enumerate() {
                 states.push(
@@ -282,7 +287,10 @@ impl Db {
                 .iter()
                 .map(|(_, _, key)| key.clone())
                 .collect::<Vec<_>>();
-            let member_values = self.store.multi_get_raw_async(&member_keys).await;
+            let member_values = match self.store.multi_get_raw_async(&member_keys).await {
+                Ok(values) => values,
+                Err(error) => return storage_batch_error(mutations.len(), error),
+            };
             for ((position, member, _), value) in member_lookups.into_iter().zip(member_values) {
                 if value.is_some()
                     && let Ok((_, state)) = &mut states[position]
@@ -469,7 +477,7 @@ impl Db {
                 continue;
             }
             let member_key = set_member_key(self.db_index, key, version, member);
-            if !self.store.contains_key(&member_key) {
+            if !self.store.contains_key(&member_key)? {
                 (batch.put(&member_key, INDEX_MARKER_VALUE))
                     .expect("write batch append invariant violated");
                 added += 1;
@@ -484,7 +492,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(added)
@@ -504,7 +512,7 @@ impl Db {
             return Ok(added);
         }
         let key_bytes = self.mk(key);
-        let raw_meta = self.store.get_raw_async(&key_bytes).await;
+        let raw_meta = self.store.get_raw_async(&key_bytes).await?;
         let mut expired_header = None;
         let meta = match raw_meta.as_deref() {
             Some(raw) => {
@@ -550,7 +558,7 @@ impl Db {
                 .iter()
                 .map(|member| set_member_key(self.db_index, key, version, member))
                 .collect::<Vec<_>>();
-            let existing = self.store.multi_get_raw_async(&member_keys).await;
+            let existing = self.store.multi_get_raw_async(&member_keys).await?;
             for (member_key, old_raw) in member_keys.into_iter().zip(existing) {
                 if old_raw.is_some() {
                     continue;
@@ -578,9 +586,9 @@ impl Db {
         if batch.count() > 0 {
             if existing_version {
                 self.write_existing_version_batch_if_not_empty_async(&batch)
-                    .await;
+                    .await?;
             } else {
-                self.write_batch_if_not_empty_async(&batch).await;
+                self.write_batch_if_not_empty_async(&batch).await?;
             }
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
@@ -611,7 +619,7 @@ impl Db {
             .iter()
             .map(|member| set_member_key(self.db_index, key, meta.version, member))
             .collect::<Vec<_>>();
-        let existing = self.store.multi_get_raw(&member_keys);
+        let existing = self.store.multi_get_raw(&member_keys)?;
         for (member_key, old_raw) in member_keys.into_iter().zip(existing) {
             if old_raw.is_some() {
                 (batch.delete(&member_key)).expect("write batch append invariant violated");
@@ -634,7 +642,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(deleted)
@@ -661,7 +669,7 @@ impl Db {
             .iter()
             .map(|member| set_member_key(self.db_index, key, meta.version, member))
             .collect::<Vec<_>>();
-        let existing = self.store.multi_get_raw_async(&member_keys).await;
+        let existing = self.store.multi_get_raw_async(&member_keys).await?;
         for (member_key, old_raw) in member_keys.into_iter().zip(existing) {
             if old_raw.is_some() {
                 (batch.delete(&member_key)).expect("write batch append invariant violated");
@@ -684,7 +692,7 @@ impl Db {
         }
 
         if batch.count() > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(deleted)
@@ -701,7 +709,7 @@ impl Db {
         };
         let destination_meta = self.set_meta(destination)?;
         let source_member_key = set_member_key(self.db_index, source, source_meta.version, member);
-        if !self.store.contains_key(&source_member_key) {
+        if !self.store.contains_key(&source_member_key)? {
             return Ok(false);
         }
         let mut batch = WriteBatch::new();
@@ -738,7 +746,7 @@ impl Db {
             .unwrap_or_else(|| self.next_version());
         let destination_member_key =
             set_member_key(self.db_index, destination, destination_version, member);
-        if !self.store.contains_key(&destination_member_key) {
+        if !self.store.contains_key(&destination_member_key)? {
             let destination_len = destination_meta.map_or(0, |meta| meta.len);
             (batch.put(&destination_member_key, INDEX_MARKER_VALUE))
                 .expect("write batch append invariant violated");
@@ -753,7 +761,7 @@ impl Db {
             .expect("write batch append invariant violated");
         }
 
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(true)
     }
@@ -799,7 +807,7 @@ impl Db {
         };
         let destination_meta = self.set_meta_async(destination).await?;
         let source_member_key = set_member_key(self.db_index, source, source_meta.version, member);
-        if !self.store.contains_key_async(&source_member_key).await {
+        if !self.store.contains_key_async(&source_member_key).await? {
             return Ok(false);
         }
         let mut batch = WriteBatch::new();
@@ -837,7 +845,11 @@ impl Db {
         };
         let destination_member_key =
             set_member_key(self.db_index, destination, destination_version, member);
-        if !self.store.contains_key_async(&destination_member_key).await {
+        if !self
+            .store
+            .contains_key_async(&destination_member_key)
+            .await?
+        {
             let destination_len = destination_meta.map_or(0, |meta| meta.len);
             (batch.put(&destination_member_key, INDEX_MARKER_VALUE))
                 .expect("write batch append invariant violated");
@@ -852,7 +864,7 @@ impl Db {
             .expect("write batch append invariant violated");
         }
 
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(true)
     }

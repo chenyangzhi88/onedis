@@ -1,4 +1,63 @@
+type VectorMetaObservation = (
+    u64,
+    u64,
+    VectorIndexMeta,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+);
+
+struct VectorStateCommit<'a> {
+    index: &'a str,
+    internal: bool,
+    version: u64,
+    expected_marker: &'a [u8],
+    expected_meta: &'a [u8],
+    expected_state: Option<Vec<u8>>,
+    batch: &'a WriteBatch,
+}
+
 impl Db {
+    pub fn load_vector_runtimes_for_startup(&self) -> Result<(), Error> {
+        let mut indexes = HashSet::new();
+        for key in self.logical_keys()? {
+            let Some(raw) = self.store.get_raw(&self.mk(&key))? else {
+                continue;
+            };
+            if decode_meta_header(&raw).is_some_and(|header| header.type_tag == TYPE_VECTOR) {
+                indexes.insert(key);
+            }
+        }
+
+        let mut internal_prefix = self.key_layout.internal_prefix(self.db_index);
+        internal_prefix.extend_from_slice(&VECTOR_META_NAMESPACE);
+        for (raw_key, raw_value) in self.store.scan_prefix_raw(&internal_prefix)? {
+            if !decode_meta_header(&raw_value).is_some_and(|header| header.type_tag == TYPE_VECTOR) {
+                continue;
+            }
+            let Some(index) = internal_vector_index_from_marker_key(&internal_prefix, &raw_key)
+            else {
+                continue;
+            };
+            indexes.insert(index);
+        }
+
+        for index in indexes {
+            let (_, version, meta) = self.read_vector_meta(&index)?;
+            if meta.algorithm != VectorIndexAlgorithm::Flat {
+                self.ensure_vector_runtime(&index, version, &meta)?;
+                if let Err(error) =
+                    self.ensure_vector_search_segments_loaded(&index, version, &meta)
+                {
+                    self.vector_runtimes
+                        .remove(self.db_index, &index, version);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn record_public_vector_mutation(&self, index: &str, internal: bool) {
         if !internal {
             self.record_external_key_mutation(self.db_index, index.as_bytes().to_vec());
@@ -7,11 +66,13 @@ impl Db {
 
     pub(in crate::store::db) fn reconcile_vector_runtime_index(&self, db_index: u16, index: &str) {
         let store = self.store.non_transactional_view().for_db_index(db_index);
-        let current_version = store
-            .get_raw(&self.key_layout.main_key(db_index, index))
-            .and_then(|raw| decode_meta_header(&raw))
-            .filter(|header| header.type_tag == TYPE_VECTOR)
-            .map(|header| header.version);
+        let current_version = match store.get_raw(&self.key_layout.main_key(db_index, index)) {
+            Ok(raw) => raw
+                .and_then(|raw| decode_meta_header(&raw))
+                .filter(|header| header.type_tag == TYPE_VECTOR)
+                .map(|header| header.version),
+            Err(_) => None,
+        };
         self.vector_runtimes
             .retain_index_version(db_index, index, current_version);
     }
@@ -48,27 +109,17 @@ impl Db {
     fn read_vector_meta_observed(
         &self,
         index: &str,
-    ) -> Result<
-        (
-            u64,
-            u64,
-            VectorIndexMeta,
-            Vec<u8>,
-            Vec<u8>,
-            Option<Vec<u8>>,
-        ),
-        Error,
-    > {
+    ) -> Result<VectorMetaObservation, Error> {
         let internal = is_internal_fulltext_vector_index(index);
         if !internal {
-            self.expire_if_needed(index);
+            self.expire_if_needed(index)?;
         }
         let marker_key = if internal {
             vector_internal_marker_key(self.key_layout, self.db_index, index)
         } else {
             self.mk(index)
         };
-        let Some(raw) = self.store.get_raw(&marker_key) else {
+        let Some(raw) = self.store.get_raw(&marker_key)? else {
             return Err(Error::msg("ERR vector index does not exist"));
         };
         let header = decode_meta_header(&raw).ok_or_else(|| Error::msg("Type parsing error"))?;
@@ -80,7 +131,7 @@ impl Db {
             self.db_index,
             index,
             header.version,
-        )) else {
+        ))? else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
         let mut meta = decode_vector_meta(&meta_raw)?;
@@ -89,7 +140,7 @@ impl Db {
             self.db_index,
             index,
             header.version,
-        ));
+        ))?;
         if let Some(raw) = state_raw.as_deref() {
             decode_record::<VectorMutableState>(raw)?.apply_to(&mut meta);
         }
@@ -173,14 +224,17 @@ impl Db {
 
     fn commit_vector_batch_with_state_if_unchanged(
         &self,
-        index: &str,
-        internal: bool,
-        version: u64,
-        expected_marker: &[u8],
-        expected_meta: &[u8],
-        expected_state: Option<Vec<u8>>,
-        batch: &WriteBatch,
+        commit: VectorStateCommit<'_>,
     ) -> Result<(), Error> {
+        let VectorStateCommit {
+            index,
+            internal,
+            version,
+            expected_marker,
+            expected_meta,
+            expected_state,
+            batch,
+        } = commit;
         let marker_key = self.vector_marker_key(index, internal);
         let meta_key = vector_meta_key(self.key_layout, self.db_index, index, version);
         let state_key = vector_mutable_state_key(self.key_layout, self.db_index, index, version);
@@ -299,7 +353,7 @@ impl Db {
                 self.db_index,
                 index,
                 version,
-            ))
+            ))?
             .map(|raw| decode_record::<VectorVersionCheckpoint>(&raw))
             .transpose()?;
         let checkpoint_through = checkpoint
@@ -314,7 +368,7 @@ impl Db {
             index,
             version,
         );
-        let mutations = self.store.scan_prefix_raw(&mutation_prefix);
+        let mutations = self.store.scan_prefix_raw(&mutation_prefix)?;
         let mut expected_version = checkpoint_through.saturating_add(1);
         // A checkpoint may advance beyond the latest immutable segment. Keep
         // every checkpointed version newer than the segment snapshot in the
@@ -322,9 +376,8 @@ impl Db {
         // already been reclaimed.
         let mut latest_tail = current_versions
             .iter()
-            .filter_map(|(id, version)| {
-                (*version > meta.snapshot_doc_version).then(|| (id.clone(), *version))
-            })
+            .filter(|(_, version)| **version > meta.snapshot_doc_version)
+            .map(|(id, version)| (id.clone(), *version))
             .collect::<HashMap<String, u64>>();
         let mut complete = checkpoint_through < meta.next_doc_version;
         for (key, raw) in mutations {
@@ -369,7 +422,7 @@ impl Db {
                 })
                 .collect::<Vec<_>>();
             let mut tail_docs = Vec::with_capacity(keys.len());
-            for (id, raw) in ids.into_iter().zip(self.store.multi_get_raw(&keys)) {
+            for (id, raw) in ids.into_iter().zip(self.store.multi_get_raw(&keys)?) {
                 let raw = raw.ok_or_else(|| Error::msg("ERR vector mutation document missing"))?;
                 let doc = decode_record::<VectorDocRecord>(&raw)?;
                 if latest_tail.get(id).copied() != Some(doc.doc_version) {
@@ -385,7 +438,7 @@ impl Db {
         let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         let docs = self
             .store
-            .scan_prefix_raw(&prefix)
+            .scan_prefix_raw(&prefix)?
             .into_iter()
             .map(|(_, raw)| decode_record::<VectorDocRecord>(&raw))
             .collect::<Result<Vec<_>, Error>>()?;
@@ -410,7 +463,7 @@ impl Db {
     ) -> Result<(Vec<VectorSegmentRuntime>, u64, u64), Error> {
         let prefix = vector_segment_prefix(self.key_layout, self.db_index, index, version);
         let mut segments = Vec::new();
-        for (key, raw) in self.store.scan_prefix_raw(&prefix) {
+        for (key, raw) in self.store.scan_prefix_raw(&prefix)? {
             let segment = decode_record::<VectorSegmentMeta>(&raw)?;
             if segment.source_key.is_empty()
                 || segment.doc_count == 0
@@ -474,7 +527,7 @@ impl Db {
     ) -> Result<Arc<VectorSegmentBlob>, Error> {
         let raw = self
             .store
-            .get_raw(&segment.source_key)
+            .get_raw(&segment.source_key)?
             .ok_or_else(|| Error::msg("ERR vector source segment blob missing"))?;
         let source = decode_record::<VectorSegmentBlob>(&raw)?;
         if source.entries.len() != segment.doc_count as usize || source.entries.is_empty() {
@@ -516,7 +569,7 @@ impl Db {
     ) -> Result<Arc<VectorHnswIndexBlob>, Error> {
         let raw = self
             .store
-            .get_raw(&segment.index_key)
+            .get_raw(&segment.index_key)?
             .ok_or_else(|| Error::msg("ERR vector HNSW index blob missing"))?;
         let index_blob = decode_vector_hnsw_index(&raw)?;
         index_blob.validate()?;
@@ -571,7 +624,7 @@ impl Db {
             .map(|segment| {
                 Ok((
                     segment.segment_id,
-                    self.decode_vector_segment_source(&segment, meta)?,
+                    self.decode_vector_segment_source(segment, meta)?,
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -580,7 +633,7 @@ impl Db {
             .map(|segment| {
                 Ok((
                     segment.segment_id,
-                    self.decode_vector_segment_index(&segment, meta)?,
+                    self.decode_vector_segment_index(segment, meta)?,
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -651,27 +704,17 @@ impl Db {
     async fn read_vector_meta_observed_async(
         &self,
         index: &str,
-    ) -> Result<
-        (
-            u64,
-            u64,
-            VectorIndexMeta,
-            Vec<u8>,
-            Vec<u8>,
-            Option<Vec<u8>>,
-        ),
-        Error,
-    > {
+    ) -> Result<VectorMetaObservation, Error> {
         let internal = is_internal_fulltext_vector_index(index);
         if !internal {
-            self.expire_if_needed_async(index).await;
+            self.expire_if_needed_async(index).await?;
         }
         let marker_key = if internal {
             vector_internal_marker_key(self.key_layout, self.db_index, index)
         } else {
             self.mk(index)
         };
-        let Some(raw) = self.store.get_raw_async(&marker_key).await else {
+        let Some(raw) = self.store.get_raw_async(&marker_key).await? else {
             return Err(Error::msg("ERR vector index does not exist"));
         };
         let header = decode_meta_header(&raw).ok_or_else(|| Error::msg("Type parsing error"))?;
@@ -686,7 +729,7 @@ impl Db {
                 index,
                 header.version,
             ))
-            .await
+            .await?
         else {
             return Err(Error::msg("ERR vector index metadata missing"));
         };
@@ -699,7 +742,7 @@ impl Db {
                 index,
                 header.version,
             ))
-            .await;
+            .await?;
         if let Some(raw) = state_raw.as_deref() {
             decode_record::<VectorMutableState>(raw)?.apply_to(&mut meta);
         }
@@ -716,4 +759,17 @@ impl Db {
             state_raw,
         ))
     }
+}
+
+fn internal_vector_index_from_marker_key(prefix: &[u8], raw_key: &[u8]) -> Option<String> {
+    let encoded = raw_key.strip_prefix(prefix)?;
+    let owner_end = encoded.iter().position(|byte| *byte == 0)?;
+    let index = std::str::from_utf8(&encoded[..owner_end]).ok()?;
+    let version_start = owner_end.checked_add(1)?;
+    let version_end = version_start.checked_add(8)?;
+    let version = u64::from_be_bytes(encoded.get(version_start..version_end)?.try_into().ok()?);
+    if version != 0 || encoded.get(version_end..) != Some(b"meta") {
+        return None;
+    }
+    Some(index.to_string())
 }

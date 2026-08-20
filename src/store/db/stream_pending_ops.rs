@@ -15,13 +15,13 @@ impl Db {
                 continue;
             }
             let key = stream_pel_key(self.db_index, key, meta.version, group, *id);
-            if self.store.get_raw(&key).is_some() {
+            if self.store.get_raw(&key)?.is_some() {
                 (batch.delete(&key)).expect("write batch append invariant violated");
                 acked += 1;
             }
         }
         if acked > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(acked)
@@ -58,7 +58,7 @@ impl Db {
             .filter(|id| seen_ids.insert(*id))
             .map(|id| stream_pel_key(self.db_index, key, meta.version, group, id))
             .collect::<Vec<_>>();
-        let existing = self.store.multi_get_raw_async(&pel_keys).await;
+        let existing = self.store.multi_get_raw_async(&pel_keys).await?;
         for (pel_key, value) in pel_keys.into_iter().zip(existing) {
             if value.is_some() {
                 (batch.delete(&pel_key)).expect("write batch append invariant violated");
@@ -66,7 +66,7 @@ impl Db {
             }
         }
         if acked > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(acked)
@@ -87,7 +87,7 @@ impl Db {
         };
         self.stream_group_state(key, group)?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
-        let pending = self.stream_pending_raw(key, meta.version, group);
+        let pending = self.stream_pending_raw(key, meta.version, group)?;
         let mut by_consumer: BTreeMap<String, usize> = BTreeMap::new();
         for (_, pel) in &pending {
             *by_consumer.entry(pel.consumer.clone()).or_default() += 1;
@@ -118,7 +118,7 @@ impl Db {
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let pending = self
             .stream_pending_raw_async(key, meta.version, group)
-            .await;
+            .await?;
         let mut by_consumer: BTreeMap<String, usize> = BTreeMap::new();
         for (_, pel) in &pending {
             *by_consumer.entry(pel.consumer.clone()).or_default() += 1;
@@ -140,19 +140,30 @@ impl Db {
         count: usize,
         consumer: Option<&str>,
     ) -> Result<Vec<StreamPendingEntry>, Error> {
-        self.stream_pending_range_filtered(key, group, start, end, count, consumer, None)
+        self.stream_pending_range_filtered(StreamPendingRange {
+            key,
+            group,
+            start,
+            end,
+            count,
+            consumer,
+            min_idle_ms: None,
+        })
     }
 
     pub fn stream_pending_range_filtered(
         &self,
-        key: &str,
-        group: &str,
-        start: StreamId,
-        end: StreamId,
-        count: usize,
-        consumer: Option<&str>,
-        min_idle_ms: Option<u64>,
+        range: StreamPendingRange<'_>,
     ) -> Result<Vec<StreamPendingEntry>, Error> {
+        let StreamPendingRange {
+            key,
+            group,
+            start,
+            end,
+            count,
+            consumer,
+            min_idle_ms,
+        } = range;
         let Some(meta) = self.stream_meta(key)? else {
             return Ok(Vec::new());
         };
@@ -177,7 +188,7 @@ impl Db {
                 scan_start,
                 end,
                 scan_limit,
-            );
+            )?;
             if pending.is_empty() {
                 break;
             }
@@ -220,20 +231,31 @@ impl Db {
         count: usize,
         consumer: Option<&str>,
     ) -> Result<Vec<StreamPendingEntry>, Error> {
-        self.stream_pending_range_filtered_async(key, group, start, end, count, consumer, None)
-            .await
+        self.stream_pending_range_filtered_async(StreamPendingRange {
+            key,
+            group,
+            start,
+            end,
+            count,
+            consumer,
+            min_idle_ms: None,
+        })
+        .await
     }
 
     pub async fn stream_pending_range_filtered_async(
         &self,
-        key: &str,
-        group: &str,
-        start: StreamId,
-        end: StreamId,
-        count: usize,
-        consumer: Option<&str>,
-        min_idle_ms: Option<u64>,
+        range: StreamPendingRange<'_>,
     ) -> Result<Vec<StreamPendingEntry>, Error> {
+        let StreamPendingRange {
+            key,
+            group,
+            start,
+            end,
+            count,
+            consumer,
+            min_idle_ms,
+        } = range;
         let Some(meta) = self.stream_meta_async(key).await? else {
             return Ok(Vec::new());
         };
@@ -261,7 +283,7 @@ impl Db {
                     end,
                     scan_limit,
                 )
-                .await;
+                .await?;
             if pending.is_empty() {
                 break;
             }
@@ -314,7 +336,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         for id in ids {
             let pel_key = stream_pel_key(self.db_index, key, meta.version, group, *id);
-            let Some(raw) = self.store.get_raw(&pel_key) else {
+            let Some(raw) = self.store.get_raw(&pel_key)? else {
                 continue;
             };
             let Some(mut pel) = decode_stream_pel_state(&raw) else {
@@ -323,7 +345,7 @@ impl Db {
             if now.saturating_sub(pel.last_delivery_ms) < min_idle_ms {
                 continue;
             }
-            let Some(entry) = self.stream_entry_by_id(key, meta.version, *id) else {
+            let Some(entry) = self.stream_entry_by_id(key, meta.version, *id)? else {
                 continue;
             };
             pel.consumer = consumer.to_string();
@@ -339,7 +361,7 @@ impl Db {
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
             ))
             .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(claimed)
@@ -374,7 +396,7 @@ impl Db {
             .collect::<Vec<_>>();
         let mut lookup_keys = pel_keys.clone();
         lookup_keys.extend(entry_keys);
-        let mut lookup_values = self.store.multi_get_raw_async(&lookup_keys).await;
+        let mut lookup_values = self.store.multi_get_raw_async(&lookup_keys).await?;
         let entry_values = lookup_values.split_off(pel_keys.len());
         let pel_values = lookup_values;
         for (((id, pel_key), raw), entry_raw) in
@@ -411,7 +433,7 @@ impl Db {
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
             ))
             .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(claimed)
@@ -453,7 +475,7 @@ impl Db {
                 seq: u64::MAX,
             },
             attempts.saturating_add(1),
-        );
+        )?;
         let mut entry_lookup = vec![None; pending.len().min(attempts)];
         let mut entry_keys = Vec::new();
         for (position, (id, pel)) in pending.iter().take(attempts).enumerate() {
@@ -462,7 +484,7 @@ impl Db {
                 entry_keys.push(stream_entry_key(self.db_index, key, meta.version, *id));
             }
         }
-        let entry_values = self.store.multi_get_raw(&entry_keys);
+        let entry_values = self.store.multi_get_raw(&entry_keys)?;
         let mut entries = Vec::with_capacity(count);
         let mut processed = 0usize;
         let mut batch = WriteBatch::new();
@@ -504,7 +526,7 @@ impl Db {
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
             ))
             .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(StreamClaimedEntries {
@@ -553,7 +575,7 @@ impl Db {
                 },
                 attempts.saturating_add(1),
             )
-            .await;
+            .await?;
         let mut entry_lookup = vec![None; pending.len().min(attempts)];
         let mut entry_keys = Vec::new();
         for (position, (id, pel)) in pending.iter().take(attempts).enumerate() {
@@ -562,7 +584,7 @@ impl Db {
                 entry_keys.push(stream_entry_key(self.db_index, key, meta.version, *id));
             }
         }
-        let entry_values = self.store.multi_get_raw_async(&entry_keys).await;
+        let entry_values = self.store.multi_get_raw_async(&entry_keys).await?;
         let mut entries = Vec::with_capacity(count);
         let mut processed = 0usize;
         let mut batch = WriteBatch::new();
@@ -604,7 +626,7 @@ impl Db {
                 &encode_stream_consumer_state(&StreamConsumerState { last_seen_ms: now }),
             ))
             .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(StreamClaimedEntries {

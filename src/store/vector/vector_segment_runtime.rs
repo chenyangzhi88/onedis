@@ -16,6 +16,8 @@ struct VectorRuntime {
     /// per-document KV records; keeping them here would defeat the LSM memory
     /// bound.
     current_versions: Arc<DashMap<String, u64>>,
+    memtable_generation: u64,
+    memtable_snapshot: std::sync::Mutex<(u64, Arc<Vec<Arc<VectorDocRecord>>>)>,
     /// Ephemeral HNSW over the current mutable tail. It is rebuilt by
     /// maintenance and never participates in the durable write transaction.
     /// Documents newer than `delta_index_through` remain an exact-scan tail.
@@ -26,7 +28,7 @@ struct VectorRuntime {
 
 struct VectorRuntimeSearchSnapshot {
     segments: Vec<VectorSegmentRuntime>,
-    memtable: Vec<Arc<VectorDocRecord>>,
+    memtable: Arc<Vec<Arc<VectorDocRecord>>>,
     current_versions: Arc<DashMap<String, u64>>,
     delta_index: Option<Arc<VectorHnswIndexBlob>>,
     delta_index_through: u64,
@@ -84,6 +86,8 @@ impl VectorRuntime {
             segments: Vec::new(),
             next_segment_id,
             current_versions: Arc::new(DashMap::new()),
+            memtable_generation: 0,
+            memtable_snapshot: std::sync::Mutex::new((0, Arc::new(Vec::new()))),
             delta_index: None,
             delta_index_through: 0,
             config,
@@ -100,6 +104,8 @@ impl VectorRuntime {
             segments,
             next_segment_id,
             current_versions: Arc::new(DashMap::new()),
+            memtable_generation: 0,
+            memtable_snapshot: std::sync::Mutex::new((0, Arc::new(Vec::new()))),
             delta_index: None,
             delta_index_through: 0,
             config,
@@ -138,6 +144,7 @@ impl VectorRuntime {
                 .insert(doc.id.clone(), doc.doc_version);
         }
         self.memtable.insert(doc.id.clone(), Arc::new(doc));
+        self.mark_memtable_changed();
     }
 
     fn mark_deleted(&mut self, doc: VectorDocRecord) {
@@ -157,6 +164,7 @@ impl VectorRuntime {
                 self.current_versions.insert(doc.id, doc.doc_version);
             }
         }
+        self.mark_memtable_changed();
     }
 
     fn restore_version_state(
@@ -172,6 +180,7 @@ impl VectorRuntime {
             .into_iter()
             .map(|doc| (doc.id.clone(), Arc::new(doc)))
             .collect();
+        self.mark_memtable_changed();
         self.delta_index = None;
         self.delta_index_through = 0;
     }
@@ -182,6 +191,10 @@ impl VectorRuntime {
 
     fn memtable_len(&self) -> usize {
         self.memtable.len()
+    }
+
+    fn mark_memtable_changed(&mut self) {
+        self.memtable_generation = self.memtable_generation.wrapping_add(1);
     }
 
     fn segment_stats(&self) -> (usize, usize, usize) {
@@ -284,6 +297,7 @@ impl VectorRuntime {
                 self.memtable.remove(&doc.id);
             }
         }
+        self.mark_memtable_changed();
         self.next_segment_id = self
             .next_segment_id
             .max(meta.segment_id.saturating_add(1));
@@ -311,6 +325,7 @@ impl VectorRuntime {
                 self.memtable.remove(&doc.id);
             }
         }
+        self.mark_memtable_changed();
         if self.delta_index_through > 0 && flushed_through >= self.delta_index_through {
             self.delta_index = None;
             self.delta_index_through = 0;
@@ -407,6 +422,7 @@ impl VectorRuntime {
     fn set_attrs(&mut self, id: &str, attrs_json: String) {
         if let Some(doc) = self.memtable.get_mut(id) {
             Arc::make_mut(doc).attrs_json = attrs_json;
+            self.mark_memtable_changed();
         }
     }
 
@@ -486,9 +502,22 @@ impl VectorRuntime {
     }
 
     fn search_snapshot(&self) -> VectorRuntimeSearchSnapshot {
+        let memtable = {
+            let mut cached = self
+                .memtable_snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cached.0 != self.memtable_generation {
+                *cached = (
+                    self.memtable_generation,
+                    Arc::new(self.memtable.values().cloned().collect()),
+                );
+            }
+            Arc::clone(&cached.1)
+        };
         VectorRuntimeSearchSnapshot {
             segments: self.segments.clone(),
-            memtable: self.memtable.values().cloned().collect(),
+            memtable,
             current_versions: Arc::clone(&self.current_versions),
             delta_index: self.delta_index.clone(),
             delta_index_through: self.delta_index_through,
@@ -604,15 +633,14 @@ impl VectorRuntimeSearchSnapshot {
                 let segment_limit = candidate_budgets[graph_position];
                 let segment_ef = ef_budgets[graph_position].max(segment_limit);
                 graph_position += 1;
-                let candidates = index.search_prepared(
+                index.search_prepared(
                     query,
                     &query_payload,
                     segment_limit,
                     segment_ef,
                     allow_doc_ids,
                     &self.current_versions,
-                )?;
-                candidates
+                )?
             } else {
                 let source = segment.source.as_ref().ok_or_else(|| {
                     Error::msg("ERR vector source segment is not loaded")

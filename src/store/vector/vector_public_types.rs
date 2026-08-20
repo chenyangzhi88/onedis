@@ -47,6 +47,14 @@ pub struct VectorCreateOptions {
     pub quantization: VectorQuantization,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VectorAutocreateOptions {
+    pub m: Option<usize>,
+    pub ef_construction: Option<usize>,
+    pub quantization: Option<VectorQuantization>,
+    pub reduce_dim: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct VectorSearchOptions {
     pub k: usize,

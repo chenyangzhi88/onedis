@@ -89,16 +89,17 @@ use crate::{
     frame::Frame,
 };
 
-mod aof;
 mod capabilities;
 pub mod dispatch;
 mod kind;
 mod names;
 mod parse;
+mod spec;
 
 pub(crate) use capabilities::command_introspection_response;
 pub use capabilities::{command_capabilities, command_capability};
 pub use kind::Command;
+pub use spec::{BlockingKind, CommandAccess, CommandSpec};
 
 #[cfg(test)]
 mod tests;

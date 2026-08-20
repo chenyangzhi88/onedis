@@ -74,6 +74,5 @@ include!("vector/db_api.rs");
 include!("vector/storage_filter_helpers.rs");
 
 #[cfg(test)]
-mod tests {
-    include!("vector/tests.rs");
-}
+#[path = "vector/tests.rs"]
+mod tests;

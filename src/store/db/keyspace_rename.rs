@@ -3,7 +3,7 @@ use super::*;
 impl Db {
     pub fn rename_key(&self, old_key: &str, new_key: &str, replace: bool) -> Result<bool, Error> {
         if old_key == new_key {
-            return if Self::load_live_raw_for_db_with_backend(&self.store, self.db_index, old_key)
+            return if Self::load_live_raw_for_db_with_backend(&self.store, self.db_index, old_key)?
                 .is_some()
             {
                 Ok(replace)
@@ -15,13 +15,13 @@ impl Db {
         let old_key_bytes = self.mk(old_key);
         let new_key_bytes = self.mk(new_key);
         for _ in 0..64 {
-            self.expire_if_needed(old_key);
-            self.expire_if_needed(new_key);
+            self.expire_if_needed(old_key)?;
+            self.expire_if_needed(new_key)?;
 
-            let Some(source_raw) = self.store.get_raw(&old_key_bytes) else {
+            let Some(source_raw) = self.store.get_raw(&old_key_bytes)? else {
                 return Err(Error::msg("ERR no such key"));
             };
-            let target_raw = self.store.get_raw(&new_key_bytes);
+            let target_raw = self.store.get_raw(&new_key_bytes)?;
             if target_raw.is_some() && !replace {
                 return Ok(false);
             }
@@ -55,7 +55,7 @@ impl Db {
                     &source_raw,
                     &self.version_counter,
                 ),
-            );
+            )?;
             Self::delete_structure_for_db_to_batch(&mut batch, self.db_index, old_key, &source_raw);
             if let Some(header) = decode_meta_header(&source_raw)
                 && header.expire_ms > 0
@@ -124,7 +124,7 @@ impl Db {
     ) -> Result<bool, Error> {
         if old_key == new_key {
             if Self::load_live_raw_for_db_with_backend_async(&self.store, self.db_index, old_key)
-                .await
+                .await?
                 .is_some()
             {
                 return Ok(replace);
@@ -135,14 +135,14 @@ impl Db {
         let old_key_bytes = self.mk(old_key);
         let new_key_bytes = self.mk(new_key);
         for _ in 0..64 {
-            self.expire_if_needed_async(old_key).await;
-            self.expire_if_needed_async(new_key).await;
+            self.expire_if_needed_async(old_key).await?;
+            self.expire_if_needed_async(new_key).await?;
 
-            let source_observed = self.store.get_raw_observed_async(&old_key_bytes).await;
+            let source_observed = self.store.get_raw_observed_async(&old_key_bytes).await?;
             let Some(source_raw) = source_observed.value() else {
                 return Err(Error::msg("ERR no such key"));
             };
-            let target_observed = self.store.get_raw_observed_async(&new_key_bytes).await;
+            let target_observed = self.store.get_raw_observed_async(&new_key_bytes).await?;
             if target_observed.value().is_some() && !replace {
                 return Ok(false);
             }
@@ -177,7 +177,7 @@ impl Db {
                     &self.version_counter,
                 ),
             )
-            .await;
+            .await?;
             Self::delete_structure_for_db_to_batch(&mut batch, self.db_index, old_key, source_raw);
             if let Some(header) = decode_meta_header(source_raw)
                 && header.expire_ms > 0

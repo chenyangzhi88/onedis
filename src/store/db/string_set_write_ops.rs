@@ -1,8 +1,13 @@
 use super::*;
 
 impl Db {
-    pub fn insert_string(&self, key: String, value: String, ttl_ms: Option<u64>) {
-        self.insert_string_bytes(key, value.into_bytes(), ttl_ms);
+    pub fn insert_string(
+        &self,
+        key: String,
+        value: String,
+        ttl_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.insert_string_bytes(key, value.into_bytes(), ttl_ms)
     }
 
     pub async fn insert_string_async(
@@ -15,10 +20,15 @@ impl Db {
             .await
     }
 
-    pub fn insert_string_bytes(&self, key: String, value: Vec<u8>, ttl_ms: Option<u64>) {
+    pub fn insert_string_bytes(
+        &self,
+        key: String,
+        value: Vec<u8>,
+        ttl_ms: Option<u64>,
+    ) -> Result<(), Error> {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let expire_ms = ttl_ms.map_or(0, |ttl| now_ms().saturating_add(ttl));
-        self.write_plain_string(&key, &value, expire_ms);
+        self.write_plain_string(&key, &value, expire_ms)
     }
 
     pub async fn insert_string_bytes_async(
@@ -49,15 +59,15 @@ impl Db {
         {
             self.changes.fetch_add(1, Ordering::Relaxed);
             if expire_ms > 0 && now_ms() >= expire_ms {
-                self.remove_internal(&key, false);
+                self.remove_internal(&key, false)?;
             } else {
-                self.write_plain_string(&key, &value, expire_ms);
+                self.write_plain_string(&key, &value, expire_ms)?;
             }
             return Ok(SetOutcome::Set { old_value: None });
         }
 
-        self.expire_if_needed(&key);
-        let old_raw = self.store.get_raw(&self.mk(&key));
+        self.expire_if_needed(&key)?;
+        let old_raw = self.store.get_raw(&self.mk(&key))?;
         let old_header = old_raw.as_deref().and_then(decode_meta_header);
         let exists = old_header.is_some();
 
@@ -95,9 +105,9 @@ impl Db {
 
         self.changes.fetch_add(1, Ordering::Relaxed);
         if expire_ms > 0 && now_ms() >= expire_ms {
-            self.remove_internal(&key, false);
+            self.remove_internal(&key, false)?;
         } else {
-            self.write_string(&key, &value, expire_ms);
+            self.write_string(&key, &value, expire_ms)?;
         }
 
         Ok(SetOutcome::Set { old_value })
@@ -113,9 +123,9 @@ impl Db {
     ) -> Result<SetOutcome, Error> {
         let _write_guard = self.set_write_lock(&key).lock().await;
         for _ in 0..64 {
-            self.expire_if_needed_async(&key).await;
+            self.expire_if_needed_async(&key).await?;
             let key_bytes = self.mk(&key);
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let old_raw = observed.value().map(|value| value.to_vec());
             let old_header = old_raw.as_deref().and_then(decode_meta_header);
             let exists = old_header.is_some();
@@ -224,8 +234,8 @@ impl Db {
     {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed(key);
-            let old_raw = self.store.get_raw(&key_bytes);
+            self.expire_if_needed(key)?;
+            let old_raw = self.store.get_raw(&key_bytes)?;
             let exists = old_raw.is_some();
             let (expire_ms, mut value) = match old_raw.as_deref() {
                 Some(raw) => {
@@ -277,8 +287,8 @@ impl Db {
         let _write_guard = self.set_write_lock(key).lock().await;
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let exists = observed.value().is_some();
             let (expire_ms, mut value) = match observed.value() {
                 Some(raw) => {
@@ -322,8 +332,8 @@ impl Db {
     pub fn getdel_string_bytes(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed(key);
-            let Some(raw) = self.store.get_raw(&key_bytes) else {
+            self.expire_if_needed(key)?;
+            let Some(raw) = self.store.get_raw(&key_bytes)? else {
                 return Ok(None);
             };
             let header = decode_meta_header(&raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
@@ -351,8 +361,8 @@ impl Db {
         let _write_guard = self.set_write_lock(key).lock().await;
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(None);
             };
@@ -377,13 +387,13 @@ impl Db {
         Err(Error::msg("ERR string write conflict"))
     }
 
-    pub fn insert_string_ref(&self, key: &str, value: &str) {
-        self.insert_string_bytes_ref(key, value.as_bytes());
+    pub fn insert_string_ref(&self, key: &str, value: &str) -> Result<(), Error> {
+        self.insert_string_bytes_ref(key, value.as_bytes())
     }
 
-    pub fn insert_string_bytes_ref(&self, key: &str, value: &[u8]) {
+    pub fn insert_string_bytes_ref(&self, key: &str, value: &[u8]) -> Result<(), Error> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        self.write_plain_string(key, value, 0);
+        self.write_plain_string(key, value, 0)
     }
 }
 

@@ -8,14 +8,15 @@ fn set_is_stored_and_loaded_via_kv_entries() {
     let db = test_db();
     let set = HashSet::from(["a".to_string(), "b".to_string()]);
 
-    db.insert("tags".to_string(), Structure::Set(set.clone()));
+    db.insert("tags".to_string(), Structure::Set(set.clone()))
+        .unwrap();
 
     assert!(matches!(
-        db.get("tags"),
+        db.get("tags").unwrap(),
         Some(Structure::Set(value)) if value == set
     ));
 
-    assert_eq!(db.len(), 1);
+    assert_eq!(db.len().unwrap(), 1);
 }
 
 #[test]
@@ -34,12 +35,13 @@ fn set_native_ops_use_member_level_storage() {
     assert!(db.set_contains("tags", "rust").unwrap());
     assert!(!db.set_contains("tags", "redis").unwrap());
 
-    let raw = db.store.get_raw(&db.mk("tags")).unwrap();
+    let raw = db.store.get_raw(&db.mk("tags")).unwrap().unwrap();
     let meta = decode_set_meta(&raw).unwrap();
     assert!(meta.packed);
     assert_eq!(
         db.store
             .scan_prefix_raw(&set_member_prefix(db.db_index, "tags", 0))
+            .unwrap()
             .len(),
         0
     );
@@ -63,6 +65,7 @@ fn set_promotes_once_when_the_inline_member_limit_is_exceeded() {
     assert_eq!(
         db.store
             .scan_prefix_raw(&set_member_prefix(db.db_index, "large-set", meta.version))
+            .unwrap()
             .len(),
         members.len()
     );
@@ -85,7 +88,7 @@ fn set_remove_and_pop_cleanup_meta_when_empty() {
     let popped = db.set_pop("tags", 10).unwrap();
     assert_eq!(popped.len(), 2);
     assert_eq!(db.set_len("tags").unwrap(), 0);
-    assert!(!db.exists("tags"));
+    assert!(!db.exists("tags").unwrap());
 }
 
 #[test]
@@ -113,7 +116,7 @@ fn set_pop_single_member_keeps_remaining_set() {
     let popped = db.set_pop("tags", 1).unwrap();
 
     assert_eq!(popped.len(), 1);
-    assert!(db.exists("tags"));
+    assert!(db.exists("tags").unwrap());
     assert_eq!(db.set_len("tags").unwrap(), 2);
     assert!(!db.set_contains("tags", &popped[0]).unwrap());
 }
@@ -155,7 +158,8 @@ fn set_scan_paginates_and_filters_by_match() {
 #[test]
 fn set_native_ops_reject_wrong_type() {
     let db = test_db();
-    db.insert("plain".to_string(), Structure::String("value".to_string()));
+    db.insert("plain".to_string(), Structure::String("value".to_string()))
+        .unwrap();
 
     assert!(db.set_add("plain", &["x".to_string()]).is_err());
     assert!(db.set_remove("plain", &["x".to_string()]).is_err());
@@ -171,10 +175,11 @@ fn zset_is_stored_and_loaded_via_kv_entries() {
     let db = test_db();
     let set = BTreeMap::from([("alice".to_string(), 1.5), ("bob".to_string(), 2.0)]);
 
-    db.insert("leaders".to_string(), Structure::SortedSet(set.clone()));
+    db.insert("leaders".to_string(), Structure::SortedSet(set.clone()))
+        .unwrap();
 
     assert!(matches!(
-        db.get("leaders"),
+        db.get("leaders").unwrap(),
         Some(Structure::SortedSet(value)) if value == set
     ));
 }
@@ -198,7 +203,7 @@ fn zset_native_ops_use_dual_index_storage() {
     assert_eq!(db.zset_card("leaders").unwrap(), 2);
     assert_eq!(db.zset_score("leaders", "alice").unwrap(), Some(1.0));
     assert_eq!(db.zset_score("leaders", "bob").unwrap(), Some(4.0));
-    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap()).is_some());
+    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap().unwrap()).is_some());
 
     assert_eq!(
         db.zset_add("leaders", &[(3.0, "alice".to_string())])
@@ -221,18 +226,18 @@ async fn zset_pipeline_stays_packed_then_promotes_once_at_the_member_limit() {
         .collect::<Vec<_>>();
     let replies = db.zset_add_batch_async(&commands).await;
     assert!(replies.iter().all(Result::is_ok));
-    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap()).is_some());
+    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap().unwrap()).is_some());
 
     db.zset_add("leaders", &[(100.0, "overflow".to_string())])
         .unwrap();
-    let raw = db.store.get_raw(&db.mk("leaders")).unwrap();
+    let raw = db.store.get_raw(&db.mk("leaders")).unwrap().unwrap();
     let header = decode_meta_header(&raw).unwrap();
     assert_ne!(header.version, 0);
     assert!(decode_packed_zset(&raw).is_none());
 
     db.zset_remove("leaders", &["overflow".to_string()])
         .unwrap();
-    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap()).is_none());
+    assert!(decode_packed_zset(&db.store.get_raw(&db.mk("leaders")).unwrap().unwrap()).is_none());
 }
 
 #[test]
@@ -275,7 +280,7 @@ fn zset_remove_cleans_up_meta_when_empty() {
         1
     );
     assert_eq!(db.zset_card("leaders").unwrap(), 0);
-    assert!(!db.exists("leaders"));
+    assert!(!db.exists("leaders").unwrap());
 }
 
 #[test]
@@ -348,7 +353,8 @@ fn zset_range_by_score_and_scan_share_rank_storage() {
 #[test]
 fn zset_native_ops_reject_wrong_type() {
     let db = test_db();
-    db.insert("plain".to_string(), Structure::String("value".to_string()));
+    db.insert("plain".to_string(), Structure::String("value".to_string()))
+        .unwrap();
 
     assert!(db.zset_add("plain", &[(1.0, "x".to_string())]).is_err());
     assert!(db.zset_remove("plain", &["x".to_string()]).is_err());

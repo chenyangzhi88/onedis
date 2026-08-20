@@ -61,7 +61,7 @@ fn command_executor_can_shutdown_and_drop_inside_async_context() {
 }
 
 #[test]
-fn database_manager_accessors_and_waiter_notifications_are_wired() {
+fn database_manager_accessors_are_wired() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let args = test_args_with_config(3, None);
     let manager = rt.block_on(DatabaseManager::new_async(args.clone()));
@@ -69,7 +69,8 @@ fn database_manager_accessors_and_waiter_notifications_are_wired() {
     assert_eq!(manager.get_all_dbs().len(), 3);
     manager
         .get_db(2)
-        .insert_string("db2-only".to_string(), "value".to_string(), None);
+        .insert_string("db2-only".to_string(), "value".to_string(), None)
+        .unwrap();
     assert!(manager.get_db(0).get_string("db2-only").unwrap().is_none());
     assert_eq!(
         manager.get_db(2).get_string("db2-only").unwrap(),
@@ -79,35 +80,17 @@ fn database_manager_accessors_and_waiter_notifications_are_wired() {
     assert!(manager.options().wal_dir.ends_with("wal"));
     assert!(Arc::strong_count(manager.version_counter()) >= 4);
     assert!(Arc::strong_count(manager.ttl_manager()) >= 4);
-    manager.store().put_raw(b"manager-accessor:key", b"value");
+    let background = manager.background_health().snapshot();
+    assert_eq!(background.len(), 4);
+    assert!(background.values().all(|task| task.running));
+    manager
+        .store()
+        .put_raw(b"manager-accessor:key", b"value")
+        .unwrap();
     assert_eq!(
-        manager.store().get_raw(b"manager-accessor:key"),
+        manager.store().get_raw(b"manager-accessor:key").unwrap(),
         Some(b"value".to_vec())
     );
-
-    assert!(rt.block_on(async {
-        let list_notified = manager.list_notify().notified();
-        manager.notify_list_waiters();
-        tokio::time::timeout(Duration::from_millis(50), list_notified)
-            .await
-            .is_ok()
-    }));
-
-    assert!(rt.block_on(async {
-        let zset_notified = manager.zset_notify().notified();
-        manager.notify_zset_waiters();
-        tokio::time::timeout(Duration::from_millis(50), zset_notified)
-            .await
-            .is_ok()
-    }));
-
-    assert!(rt.block_on(async {
-        let stream_notified = manager.stream_notify().notified();
-        manager.notify_stream_waiters();
-        tokio::time::timeout(Duration::from_millis(50), stream_notified)
-            .await
-            .is_ok()
-    }));
 }
 
 #[test]
@@ -512,7 +495,8 @@ fn connect_commands_cover_reply_and_client_name_semantics() {
 
     db_manager
         .get_db(1)
-        .insert_string("copy-source".to_string(), "one".to_string(), None);
+        .insert_string("copy-source".to_string(), "one".to_string(), None)
+        .unwrap();
     let copy = Command::parse_from_frame(frame_args(&[
         "copy",
         "copy-source",
@@ -731,7 +715,8 @@ fn append_uses_kv_engine_backed_storage() {
     db.insert(
         "greeting".to_string(),
         Structure::String("hello".to_string()),
-    );
+    )
+    .unwrap();
 
     let frame = Append {
         key: "greeting".to_string(),
@@ -742,7 +727,7 @@ fn append_uses_kv_engine_backed_storage() {
 
     assert!(matches!(frame, Frame::Integer(11)));
     assert!(matches!(
-        db.get("greeting"),
+        db.get("greeting").unwrap(),
         Some(Structure::String(value)) if value == "hello world"
     ));
 }

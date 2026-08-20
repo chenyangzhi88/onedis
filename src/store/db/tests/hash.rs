@@ -148,7 +148,7 @@ async fn hash_field_ttl_getex_setex_and_async_conditions_cover_edges() {
         .unwrap(),
         vec![2]
     );
-    assert!(!db.exists_readonly_async("async-h").await);
+    assert!(!db.exists_readonly_async("async-h").await.unwrap());
     assert_eq!(
         db.hash_get_ex_async(
             "async-h",
@@ -292,7 +292,7 @@ async fn hash_random_float_expire_and_async_read_paths_cover_edges() {
         vec![-1]
     );
 
-    db.insert_string_ref("plain", "value");
+    db.insert_string_ref("plain", "value").unwrap();
     assert!(db.hash_random_fields("plain", None, false).is_err());
     assert!(db.hash_increment_by_float("plain", "f", 1.0).is_err());
     assert!(db.hash_set_nx_async("plain", "f", "v").await.is_err());
@@ -618,7 +618,7 @@ async fn hash_async_conditionals_ttls_and_concurrent_increments_cover_edges() {
             .await
             .is_err()
     );
-    db.insert_string_ref("plain", "value");
+    db.insert_string_ref("plain", "value").unwrap();
     assert!(
         db.hash_set_many_async("plain", &[("f".to_string(), "v".to_string())])
             .await
@@ -692,7 +692,7 @@ async fn hash_duplicate_fields_immediate_expiry_and_resource_limits_match_redis(
             .unwrap(),
         vec![2, -2]
     );
-    assert!(!db.exists_readonly_async("async").await);
+    assert!(!db.exists_readonly_async("async").await.unwrap());
 
     assert!(
         db.hash_set_ex_async(
@@ -706,10 +706,10 @@ async fn hash_duplicate_fields_immediate_expiry_and_resource_limits_match_redis(
         .await
         .unwrap()
     );
-    assert!(!db.exists_readonly_async("immediate").await);
+    assert!(!db.exists_readonly_async("immediate").await.unwrap());
 
     assert_eq!(db.hash_set_many_bytes("empty", &[]).unwrap(), 0);
-    assert!(!db.exists_readonly("empty"));
+    assert!(!db.exists_readonly("empty").unwrap());
     assert!(
         db.hash_random_fields("missing", Some(i64::MIN), false)
             .is_err()

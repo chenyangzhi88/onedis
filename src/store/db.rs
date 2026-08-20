@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use anyhow::Error;
@@ -12,6 +12,7 @@ use common::types::write_batch::{WriteBatch, WriteType};
 use dashmap::{DashMap, mapref::entry::Entry};
 use serde_json::Value as JsonValue;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
 
 use super::key_write_locks::{
     KEY_WRITE_LOCK_SHARDS, KeyWriteLock, KeyWriteLocks, hash_field_write_lock_shard,
@@ -39,16 +40,21 @@ pub use full_text::{
     FullTextSearchOptions, FullTextSortBy, FullTextSourceType, FullTextSpellcheckDictionary,
     FullTextSummarizeOptions, FullTextVectorAlgorithm, FullTextVectorOptions,
 };
+use vector::VectorExactDistanceRequest;
 pub use vector::{
-    VectorCreateOptions, VectorFieldKind, VectorFieldSchema, VectorQuantization,
-    VectorRuntimeRegistry, VectorSearchOptions, VectorSearchResult,
+    VectorAutocreateOptions, VectorCreateOptions, VectorFieldKind, VectorFieldSchema,
+    VectorQuantization, VectorRuntimeRegistry, VectorSearchOptions, VectorSearchResult,
 };
 pub type VectorLinkLayers = Vec<Vec<(String, f32)>>;
+type RawKeyValue = (Vec<u8>, Vec<u8>);
+type ZsetLexScanBounds = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+type JsonStorageTarget = (Vec<JsonPathToken>, Vec<JsonPathToken>, JsonNode);
 
 mod collection_key_codec;
 mod core_key_watch;
 mod core_lifecycle;
 mod core_write_batch;
+use core_write_batch::{fail_successful_batch_replies, storage_batch_error};
 mod hash_basic_write;
 mod hash_field_ttl;
 mod hash_get_set_ex;

@@ -46,32 +46,12 @@ impl Handler {
             self.clear_transaction_and_watches();
             return Ok(Frame::Error("ERR transaction state is missing".to_string()));
         };
-        if self.watched_keys_modified() {
+        if self.watched_keys_modified()? {
             self.transaction_db = None;
             self.clear_transaction_and_watches();
             return Ok(Frame::Null);
         }
-        let notify_list = parsed_commands
-            .iter()
-            .any(Self::is_list_mutating_command);
-        let notify_zset = parsed_commands
-            .iter()
-            .any(Self::is_zset_mutating_command);
-        let notify_stream = parsed_commands
-            .iter()
-            .any(Self::is_stream_mutating_command);
         let frame = Self::execute_transaction_commands(txn_db, parsed_commands, self.args.databases);
-        if matches!(&frame, Ok(Frame::Array(_))) {
-            if notify_list {
-                self.db_manager.notify_list_waiters();
-            }
-            if notify_zset {
-                self.db_manager.notify_zset_waiters();
-            }
-            if notify_stream {
-                self.db_manager.notify_stream_waiters();
-            }
-        }
         self.transaction_db = None;
         self.clear_transaction_and_watches();
         frame
@@ -123,34 +103,14 @@ impl Handler {
             self.clear_transaction_and_watches();
             return Ok(Frame::Error("ERR transaction state is missing".to_string()));
         };
-        if self.watched_keys_modified() {
+        if self.watched_keys_modified()? {
             self.transaction_db = None;
             self.clear_transaction_and_watches();
             return Ok(Frame::Null);
         }
-        let notify_list = parsed_commands
-            .iter()
-            .any(Self::is_list_mutating_command);
-        let notify_zset = parsed_commands
-            .iter()
-            .any(Self::is_zset_mutating_command);
-        let notify_stream = parsed_commands
-            .iter()
-            .any(Self::is_stream_mutating_command);
         let frame =
             Self::execute_transaction_commands_async(txn_db, parsed_commands, self.args.databases)
                 .await;
-        if matches!(&frame, Ok(Frame::Array(_))) {
-            if notify_list {
-                self.db_manager.notify_list_waiters();
-            }
-            if notify_zset {
-                self.db_manager.notify_zset_waiters();
-            }
-            if notify_stream {
-                self.db_manager.notify_stream_waiters();
-            }
-        }
         self.transaction_db = None;
         self.clear_transaction_and_watches();
         frame

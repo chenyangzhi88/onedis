@@ -69,10 +69,11 @@ fn raw_key_namespace_helpers_cover_prefix_bounds_and_delete_batches() {
 fn get_returns_inserted_string_value() {
     let db = test_db();
 
-    db.insert("test".to_string(), Structure::String("value".to_string()));
+    db.insert("test".to_string(), Structure::String("value".to_string()))
+        .unwrap();
 
     assert!(matches!(
-        db.get("test"),
+        db.get("test").unwrap(),
         Some(Structure::String(value)) if value == "value"
     ));
 }
@@ -91,7 +92,8 @@ fn integer_increment_cache_is_invalidated_by_string_set() {
     let db = test_db();
 
     assert_eq!(db.increment_integer_string("counter", 1).unwrap(), 1);
-    db.insert_string("counter".to_string(), "100".to_string(), None);
+    db.insert_string("counter".to_string(), "100".to_string(), None)
+        .unwrap();
 
     assert_eq!(db.increment_integer_string("counter", 1).unwrap(), 101);
     assert_eq!(db.get_string("counter").unwrap(), Some("101".to_string()));
@@ -101,10 +103,11 @@ fn integer_increment_cache_is_invalidated_by_string_set() {
 fn integer_increment_preserves_existing_ttl() {
     let db = test_db();
 
-    db.insert_string("counter".to_string(), "1".to_string(), Some(10_000));
+    db.insert_string("counter".to_string(), "1".to_string(), Some(10_000))
+        .unwrap();
 
     assert_eq!(db.increment_integer_string("counter", 1).unwrap(), 2);
-    assert!(db.ttl_millis_readonly("counter") > 0);
+    assert!(db.ttl_millis_readonly("counter").unwrap() > 0);
     assert_eq!(db.get_string("counter").unwrap(), Some("2".to_string()));
 }
 
@@ -116,7 +119,8 @@ fn integer_increment_rejects_complex_type_after_overwrite() {
     db.insert(
         "counter".to_string(),
         Structure::Set(HashSet::from(["member".to_string()])),
-    );
+    )
+    .unwrap();
 
     let err = db.increment_integer_string("counter", 1).unwrap_err();
     assert_eq!(err.to_string(), WRONG_TYPE_ERROR);
@@ -170,12 +174,12 @@ async fn concurrent_msetnx_has_exactly_one_winner() {
 
     let mut winners = 0;
     for task in tasks {
-        winners += usize::from(task.await.unwrap());
+        winners += usize::from(task.await.unwrap().unwrap());
     }
     assert_eq!(winners, 1);
     assert_eq!(
         (0..16)
-            .filter(|index| db.exists(&format!("msetnx-side-{index}")))
+            .filter(|index| db.exists(&format!("msetnx-side-{index}")).unwrap())
             .count(),
         1
     );
@@ -227,8 +231,10 @@ async fn concurrent_async_bit_updates_do_not_lose_writes() {
 #[tokio::test]
 async fn ordered_string_pipeline_batches_preserve_per_command_replies_and_final_state() {
     let db = test_db();
-    db.insert_string("batch".to_string(), "a".to_string(), Some(30_000));
-    db.insert_string("delete-batch".to_string(), "gone".to_string(), Some(30_000));
+    db.insert_string("batch".to_string(), "a".to_string(), Some(30_000))
+        .unwrap();
+    db.insert_string("delete-batch".to_string(), "gone".to_string(), Some(30_000))
+        .unwrap();
 
     let replies = db
         .apply_string_batch_mutations_async(&[
@@ -295,15 +301,16 @@ async fn ordered_string_pipeline_batches_preserve_per_command_replies_and_final_
     assert!(matches!(replies[8], Ok(StringBatchReply::Bulk(None))));
     assert!(matches!(replies[9], Ok(StringBatchReply::Integer(0))));
     assert_eq!(db.get_string("batch").unwrap().as_deref(), Some("qr"));
-    assert!(db.ttl_millis_readonly("batch") > 0);
-    assert!(!db.exists_readonly("missing-empty"));
-    assert!(!db.exists_readonly("delete-batch"));
+    assert!(db.ttl_millis_readonly("batch").unwrap() > 0);
+    assert!(!db.exists_readonly("missing-empty").unwrap());
+    assert!(!db.exists_readonly("delete-batch").unwrap());
     assert_eq!(db.string_get_bit("bitmap-batch", 9).unwrap(), 1);
 
     db.insert(
         "wrong-type".to_string(),
         Structure::Set(HashSet::from(["member".to_string()])),
-    );
+    )
+    .unwrap();
     let replies = db
         .apply_string_batch_mutations_async(&[
             StringBatchMutation::Append {
@@ -349,7 +356,8 @@ async fn ordered_string_pipeline_batches_preserve_per_command_replies_and_final_
 #[tokio::test]
 async fn ordered_key_expiration_batches_preserve_per_command_replies_and_ttl_index_state() {
     let db = test_db();
-    db.insert_string("ttl-batch".to_string(), "value".to_string(), None);
+    db.insert_string("ttl-batch".to_string(), "value".to_string(), None)
+        .unwrap();
 
     let replies = db
         .apply_key_expiration_batch_async(&[
@@ -373,7 +381,7 @@ async fn ordered_key_expiration_batches_preserve_per_command_replies_and_ttl_ind
     assert!(matches!(replies[2], Ok(1)));
     assert!(matches!(replies[3], Ok(0)));
     assert!(matches!(replies[4], Ok(0)));
-    assert_eq!(db.ttl_millis_readonly("ttl-batch"), -1);
+    assert_eq!(db.ttl_millis_readonly("ttl-batch").unwrap(), -1);
 
     let replies = db
         .apply_key_expiration_batch_async(&[
@@ -388,19 +396,20 @@ async fn ordered_key_expiration_batches_preserve_per_command_replies_and_ttl_ind
         ])
         .await;
     assert!(replies.into_iter().all(|reply| matches!(reply, Ok(1))));
-    assert!(db.ttl_millis_readonly("ttl-batch") > 50_000);
+    assert!(db.ttl_millis_readonly("ttl-batch").unwrap() > 50_000);
 }
 
 #[tokio::test]
 async fn ordered_hll_pipeline_batch_preserves_replies_ttl_and_errors() {
     let db = test_db();
-    db.insert_string("hll-batch".to_string(), "not-an-hll".to_string(), None);
+    db.insert_string("hll-batch".to_string(), "not-an-hll".to_string(), None)
+        .unwrap();
     let invalid = db
         .hll_add_batch_async(&[("hll-batch", vec![b"a".as_slice()])])
         .await;
     assert!(invalid[0].is_err());
 
-    db.delete_key("hll-batch");
+    db.delete_key("hll-batch").unwrap();
     let replies = db
         .hll_add_batch_async(&[
             ("hll-batch", vec![b"a".as_slice()]),
@@ -426,18 +435,19 @@ async fn ordered_hll_pipeline_batch_preserves_replies_ttl_and_errors() {
         2
     );
 
-    db.expire("hll-batch".to_string(), 30_000);
+    db.expire("hll-batch".to_string(), 30_000).unwrap();
     let replies = db
         .hll_add_batch_async(&[("hll-batch", vec![b"c".as_slice()])])
         .await;
     assert!(replies[0].is_ok());
-    assert!(db.ttl_millis_readonly("hll-batch") > 0);
+    assert!(db.ttl_millis_readonly("hll-batch").unwrap() > 0);
 }
 
 #[tokio::test]
 async fn multi_key_delete_is_atomic_deduplicated_and_cleans_native_subkeys() {
     let db = test_db();
-    db.insert_string("delete-string".to_string(), "value".to_string(), None);
+    db.insert_string("delete-string".to_string(), "value".to_string(), None)
+        .unwrap();
     db.set_add_async("delete-set", &["a".to_string(), "b".to_string()])
         .await
         .unwrap();
@@ -452,29 +462,35 @@ async fn multi_key_delete_is_atomic_deduplicated_and_cleans_native_subkeys() {
             "missing".to_string(),
             "delete-list".to_string(),
         ])
-        .await,
+        .await
+        .unwrap(),
         3
     );
-    assert!(!db.exists_readonly("delete-string"));
-    assert!(!db.exists_readonly("delete-set"));
-    assert!(!db.exists_readonly("delete-list"));
+    assert!(!db.exists_readonly("delete-string").unwrap());
+    assert!(!db.exists_readonly("delete-set").unwrap());
+    assert!(!db.exists_readonly("delete-list").unwrap());
 }
 
 #[tokio::test]
 async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
     let db = test_db();
 
-    db.insert_string_bytes_refs_async(&[]).await;
+    db.insert_string_bytes_refs_async(&[]).await.unwrap();
     db.insert_string_bytes_refs_async(&[("a", b"\x0f"), ("b", b"\xf0")])
-        .await;
+        .await
+        .unwrap();
     db.insert_string_bytes_refs_without_watch_publish_async(&[("c", b"plain")])
-        .await;
+        .await
+        .unwrap();
     db.insert_string_byte_keys_async(&[(b"raw-key".as_slice(), b"raw-value".as_slice())])
-        .await;
+        .await
+        .unwrap();
     db.insert_string_byte_keys_without_watch_publish_async(&[(b"raw-key-2".as_slice(), b"v2")])
-        .await;
+        .await
+        .unwrap();
     db.insert_string_bytes_many_async(vec![("d".to_string(), b"value".to_vec())])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(db.get_string("c").unwrap(), Some("plain".to_string()));
     assert_eq!(
         db.get_string_bytes_async("raw-key").await.unwrap(),
@@ -485,17 +501,29 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
         Some(b"v2".to_vec())
     );
 
-    assert!(!db.insert_string_bytes_many_nx(Vec::new()));
-    assert!(db.insert_string_bytes_many_nx(vec![("nx-a".to_string(), b"1".to_vec())]));
-    assert!(!db.insert_string_bytes_many_nx(vec![("nx-a".to_string(), b"2".to_vec())]));
-    assert!(!db.insert_string_bytes_many_nx_async(Vec::new()).await);
+    assert!(!db.insert_string_bytes_many_nx(Vec::new()).unwrap());
+    assert!(
+        db.insert_string_bytes_many_nx(vec![("nx-a".to_string(), b"1".to_vec())])
+            .unwrap()
+    );
+    assert!(
+        !db.insert_string_bytes_many_nx(vec![("nx-a".to_string(), b"2".to_vec())])
+            .unwrap()
+    );
+    assert!(
+        !db.insert_string_bytes_many_nx_async(Vec::new())
+            .await
+            .unwrap()
+    );
     assert!(
         db.insert_string_bytes_many_nx_async(vec![("nx-b".to_string(), b"1".to_vec())])
             .await
+            .unwrap()
     );
     assert!(
         !db.insert_string_bytes_many_nx_async(vec![("nx-b".to_string(), b"2".to_vec())])
             .await
+            .unwrap()
     );
 
     assert_eq!(
@@ -545,19 +573,20 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
         .unwrap(),
         SetOutcome::Set { .. }
     ));
-    assert!(!db.exists_readonly("set-expired"));
+    assert!(!db.exists_readonly("set-expired").unwrap());
 
     assert_eq!(db.string_get_bit("bits", 100).unwrap(), 0);
     assert_eq!(db.string_set_bit_async("bits", 3, 1).await.unwrap(), 0);
     assert_eq!(db.string_set_bit("bits", 3, 0).unwrap(), 1);
     assert!(db.string_set_bit("bits", 0, 2).is_err());
-    db.insert_string("ttl-bits".to_string(), "x".to_string(), Some(30_000));
+    db.insert_string("ttl-bits".to_string(), "x".to_string(), Some(30_000))
+        .unwrap();
     db.string_set_bit("ttl-bits", 0, 1).unwrap();
-    assert!(db.ttl_millis_readonly("ttl-bits") > 0);
+    assert!(db.ttl_millis_readonly("ttl-bits").unwrap() > 0);
     db.string_write_bits_async("ttl-bits", 1, 3, 0b101)
         .await
         .unwrap();
-    assert!(db.ttl_millis_readonly("ttl-bits") > 0);
+    assert!(db.ttl_millis_readonly("ttl-bits").unwrap() > 0);
     db.string_write_bits("bits", 0, 8, 0b1010_0101).unwrap();
     assert_eq!(
         db.string_read_bits("bits", 0, 8, false).unwrap(),
@@ -596,7 +625,8 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
             .unwrap(),
         -1
     );
-    db.insert_string_bytes("range-bits".to_string(), vec![0xff, 0x01], None);
+    db.insert_string_bytes("range-bits".to_string(), vec![0xff, 0x01], None)
+        .unwrap();
     assert_eq!(
         db.string_bitcount("range-bits", Some(0), Some(-99))
             .unwrap(),
@@ -613,7 +643,8 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
         8
     );
     assert_eq!(db.string_bitpos("missing-bits", 0, None, None).unwrap(), 0);
-    db.insert_string_bytes("empty-bits".to_string(), Vec::new(), None);
+    db.insert_string_bytes("empty-bits".to_string(), Vec::new(), None)
+        .unwrap();
     assert_eq!(db.string_bitpos("empty-bits", 0, None, None).unwrap(), -1);
 
     assert_eq!(
@@ -646,24 +677,28 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
             .is_err()
     );
     assert!(db.string_bitop("BAD", "bad", &["a".to_string()]).is_err());
-    db.insert_string_bytes("empty-out".to_string(), b"stale".to_vec(), None);
+    db.insert_string_bytes("empty-out".to_string(), b"stale".to_vec(), None)
+        .unwrap();
     assert_eq!(
         db.string_bitop("OR", "empty-out", &["missing-a".to_string()])
             .unwrap(),
         0
     );
-    assert!(!db.exists_readonly("empty-out"));
-    db.insert_string_bytes("empty-out-async".to_string(), b"stale".to_vec(), None);
+    assert!(!db.exists_readonly("empty-out").unwrap());
+    db.insert_string_bytes("empty-out-async".to_string(), b"stale".to_vec(), None)
+        .unwrap();
     assert_eq!(
         db.string_bitop_async("NOT", "empty-out-async", &["missing-b".to_string()])
             .await
             .unwrap(),
         0
     );
-    assert!(!db.exists_readonly("empty-out-async"));
+    assert!(!db.exists_readonly("empty-out-async").unwrap());
 
-    db.insert_string_bytes("batch-a".to_string(), vec![0b1010_0000], None);
-    db.insert_string_bytes("batch-b".to_string(), vec![0b1100_0000], None);
+    db.insert_string_bytes("batch-a".to_string(), vec![0b1010_0000], None)
+        .unwrap();
+    db.insert_string_bytes("batch-b".to_string(), vec![0b1100_0000], None)
+        .unwrap();
     let replies = db
         .string_bitop_batch_async(&[
             ("OR", "batch-dst", vec!["batch-a", "batch-b"]),
@@ -682,7 +717,8 @@ async fn string_raw_async_bitmap_and_bitfield_paths_cover_edges() {
     );
 
     let db = Arc::new(db);
-    db.insert_string_bytes("hot-bitop".to_string(), vec![0], None);
+    db.insert_string_bytes("hot-bitop".to_string(), vec![0], None)
+        .unwrap();
     let mut bitop_tasks = Vec::new();
     for _ in 0..64 {
         let db = Arc::clone(&db);

@@ -277,14 +277,20 @@ impl Db {
             if fnx
                 && fields
                     .iter()
-                    .any(|(field, _)| self.hash_live_field_value(key, 0, field).is_some())
+                    .map(|(field, _)| self.hash_live_field_value(key, 0, field))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .any(|value| value.is_some())
             {
                 return Ok(false);
             }
             if fxx
                 && fields
                     .iter()
-                    .any(|(field, _)| self.hash_live_field_value(key, 0, field).is_none())
+                    .map(|(field, _)| self.hash_live_field_value(key, 0, field))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .any(|value| value.is_none())
             {
                 return Ok(false);
             }
@@ -302,14 +308,20 @@ impl Db {
         if fnx
             && fields
                 .iter()
-                .any(|(field, _)| self.hash_live_field_value(key, version, field).is_some())
+                .map(|(field, _)| self.hash_live_field_value(key, version, field))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|value| value.is_some())
         {
             return Ok(false);
         }
         if fxx
             && fields
                 .iter()
-                .any(|(field, _)| self.hash_live_field_value(key, version, field).is_none())
+                .map(|(field, _)| self.hash_live_field_value(key, version, field))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|value| value.is_none())
         {
             return Ok(false);
         }
@@ -322,7 +334,7 @@ impl Db {
             let Some((hash_expire_ms, _)) = meta else {
                 return Ok(true);
             };
-            let existing_fields = self.hash_live_entries_raw(key, version);
+            let existing_fields = self.hash_live_entries_raw(key, version)?;
             let existing_names = existing_fields
                 .iter()
                 .filter_map(|(field, _)| String::from_utf8(field.clone()).ok())
@@ -346,7 +358,7 @@ impl Db {
             } else {
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
             return Ok(true);
@@ -387,7 +399,7 @@ impl Db {
         }
         if batch.count() > 0 {
             self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -511,7 +523,7 @@ impl Db {
             let Some((hash_expire_ms, _)) = meta else {
                 return Ok(true);
             };
-            let existing_fields = self.hash_live_entries_raw_async(key, version).await;
+            let existing_fields = self.hash_live_entries_raw_async(key, version).await?;
             let existing_names = existing_fields
                 .iter()
                 .filter_map(|(field, _)| String::from_utf8(field.clone()).ok())
@@ -535,7 +547,7 @@ impl Db {
             } else {
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
             return Ok(true);
@@ -576,7 +588,7 @@ impl Db {
         }
         if batch.count() > 0 {
             self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }

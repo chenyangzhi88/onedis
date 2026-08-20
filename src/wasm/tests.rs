@@ -361,8 +361,8 @@ async fn wasm_host_imports_drive_string_hash_call_scan_and_readonly_edges() {
     );
     assert!(db.hash_get_async("wkey", "field").await.unwrap().is_none());
 
-    db.insert_string_ref("scan:1", "one");
-    db.insert_string_ref("scan:2", "two");
+    db.insert_string_ref("scan:1", "one").unwrap();
+    db.insert_string_ref("scan:2", "two").unwrap();
     let mut matched = registry
         .scan(db.clone(), "host", "scan_accept", "scan:", 10)
         .await

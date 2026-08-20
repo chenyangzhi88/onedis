@@ -30,7 +30,7 @@ impl Db {
 
         if meta.version == 0 {
             return Ok(self
-                .list_range_raw_values(key, meta.version, storage_index, storage_index)
+                .list_range_raw_values(key, meta.version, storage_index, storage_index)?
                 .into_iter()
                 .next()
                 .and_then(|value| String::from_utf8(value).ok()));
@@ -43,7 +43,7 @@ impl Db {
                 key,
                 meta.version,
                 storage_index,
-            ))
+            ))?
             .and_then(|value| String::from_utf8(value).ok()))
     }
 
@@ -60,7 +60,7 @@ impl Db {
         if meta.version == 0 {
             return Ok(self
                 .list_range_raw_values_async(key, meta.version, storage_index, storage_index)
-                .await
+                .await?
                 .into_iter()
                 .next()
                 .and_then(|value| String::from_utf8(value).ok()));
@@ -74,7 +74,7 @@ impl Db {
                 meta.version,
                 storage_index,
             ))
-            .await
+            .await?
             .and_then(|value| String::from_utf8(value).ok()))
     }
 
@@ -96,7 +96,8 @@ impl Db {
         let resolve_us = resolve_started_at.map(|started| started.elapsed().as_micros());
 
         let raw_started_at = trace_id.map(|_| Instant::now());
-        let raw_values = self.list_range_raw_values(key, meta.version, storage_start, storage_end);
+        let raw_values =
+            self.list_range_raw_values(key, meta.version, storage_start, storage_end)?;
         let raw_us = raw_started_at.map(|started| started.elapsed().as_micros());
         let convert_started_at = trace_id.map(|_| Instant::now());
         let mut result = Vec::with_capacity(raw_values.len());
@@ -145,7 +146,7 @@ impl Db {
 
         let raw_values = self
             .list_range_raw_values_async(key, meta.version, storage_start, storage_end)
-            .await;
+            .await?;
         let mut result = Vec::with_capacity(raw_values.len());
         for value in raw_values {
             let value =
@@ -170,9 +171,8 @@ impl Db {
             return Ok(Vec::new());
         };
 
-        Ok(self
-            .list_range_raw_values_async(key, meta.version, storage_start, storage_end)
-            .await)
+        self.list_range_raw_values_async(key, meta.version, storage_start, storage_end)
+            .await
     }
 
     pub async fn list_range_visit_bytes_async<F>(
@@ -194,15 +194,14 @@ impl Db {
             return Ok(0);
         };
 
-        Ok(self
-            .list_range_raw_values_visit_async(
-                key,
-                meta.version,
-                storage_start,
-                storage_end,
-                visitor,
-            )
-            .await)
+        self.list_range_raw_values_visit_async(
+            key,
+            meta.version,
+            storage_start,
+            storage_end,
+            visitor,
+        )
+        .await
     }
 
     pub fn list_positions(

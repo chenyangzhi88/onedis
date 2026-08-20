@@ -42,7 +42,7 @@ impl Db {
         let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
         let mut ids = self
             .store
-            .scan_prefix_raw(&prefix)
+            .scan_prefix_raw(&prefix)?
             .into_iter()
             .filter_map(|(_, raw)| decode_record::<VectorDocRecord>(&raw).ok())
             .filter(|doc| !doc.deleted)
@@ -86,7 +86,7 @@ impl Db {
                     }
                 }
             },
-        );
+        )?;
         result
     }
 
@@ -102,7 +102,7 @@ impl Db {
         let mut ids = self
             .store
             .scan_prefix_raw_async(&prefix)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(_, raw)| decode_record::<VectorDocRecord>(&raw).ok())
             .filter(|doc| !doc.deleted)
@@ -142,7 +142,7 @@ impl Db {
                         cardinality = cardinality.saturating_add(1);
                     }
                     true
-                });
+                })?;
             if cardinality == 0 {
                 return Ok(Vec::new());
             }
@@ -167,7 +167,7 @@ impl Db {
                     }
                     live_index += 1;
                     target_index < targets.len()
-                });
+                })?;
             return Ok(output.into_iter().flatten().collect());
         }
 
@@ -191,7 +191,7 @@ impl Db {
                     }
                 }
                 true
-            });
+            })?;
         Ok(reservoir)
     }
 
@@ -206,17 +206,15 @@ impl Db {
     }
 
     pub fn vector_links(&self, index: &str, id: &str) -> Result<Option<VectorLinkLayers>, Error> {
-        let (_, version, meta) = match self.read_vector_meta(index) {
+        let (_, version, _meta) = match self.read_vector_meta(index) {
             Ok(value) => value,
             Err(err) if err.to_string() == "ERR vector index does not exist" => return Ok(None),
             Err(err) => return Err(err),
         };
-        self.ensure_vector_runtime(index, version, &meta)?;
-        self.ensure_vector_search_segments_loaded(index, version, &meta)?;
         let runtime = self
             .vector_runtimes
             .get(self.db_index, index, version)
-            .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
+            .ok_or_else(|| Error::msg("INDEX_NOT_READY vector runtime is loading"))?;
         Ok(runtime
             .read()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
@@ -236,7 +234,14 @@ impl Db {
 
     pub fn vector_info(&self, index: &str) -> Result<Vec<(String, String)>, Error> {
         let (_, version, meta) = self.read_vector_meta(index)?;
-        self.ensure_vector_runtime(index, version, &meta)?;
+        if meta.algorithm != VectorIndexAlgorithm::Flat
+            && self
+                .vector_runtimes
+                .get(self.db_index, index, version)
+                .is_none()
+        {
+            return Err(Error::msg("INDEX_NOT_READY vector runtime is loading"));
+        }
         let (
             segment_count,
             total_nodes,
@@ -336,7 +341,14 @@ impl Db {
 
     pub async fn vector_info_async(&self, index: &str) -> Result<Vec<(String, String)>, Error> {
         let (_, version, meta) = self.read_vector_meta_async(index).await?;
-        self.ensure_vector_runtime(index, version, &meta)?;
+        if meta.algorithm != VectorIndexAlgorithm::Flat
+            && self
+                .vector_runtimes
+                .get(self.db_index, index, version)
+                .is_none()
+        {
+            return Err(Error::msg("INDEX_NOT_READY vector runtime is loading"));
+        }
         let (
             segment_count,
             total_nodes,
@@ -434,11 +446,12 @@ impl Db {
         ])
     }
 
-    pub fn vector_observability_snapshot(&self) -> VectorObservabilitySnapshot {
+    pub fn vector_observability_snapshot(&self) -> Result<VectorObservabilitySnapshot, Error> {
         let mut snapshot = VectorObservabilitySnapshot::default();
         let now = super::now_ms();
-        for key in self.logical_keys() {
-            let Some(raw) = self.store.get_raw(&self.mk(&key)) else {
+        let keys = self.logical_keys()?;
+        for key in keys {
+            let Some(raw) = self.store.get_raw(&self.mk(&key))? else {
                 continue;
             };
             let Some(header) = decode_meta_header(&raw) else {
@@ -468,7 +481,7 @@ impl Db {
                     .count() as u64,
             );
         }
-        snapshot
+        Ok(snapshot)
     }
 }
 

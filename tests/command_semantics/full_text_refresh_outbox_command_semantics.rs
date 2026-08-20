@@ -126,6 +126,7 @@ fn ft_refresh_timeout_cancels_and_later_resumes_backfill() {
         apply(&db, &["FT.CONFIG", "SET", "REFRESH_TIMEOUT_MS", "500"]),
         Frame::Ok
     ));
+    db.maintain_fulltext_indexes().unwrap();
     assert_eq!(
         total(&apply(&db, &["FT.SEARCH", "idx", "eventual"])),
         Some(1)
@@ -164,7 +165,7 @@ fn ft_outbox_compaction_keeps_latest_mutation_per_key() {
 
     // Outbox compaction belongs to the publication/maintenance coordinator;
     // source writes only append source + outbox atomically and update the watermark.
-    let _ = apply(&db, &["FT.SEARCH", "idx", "latest"]);
+    db.maintain_fulltext_indexes().unwrap();
     let info = array(apply(&db, &["FT.INFO", "idx"]));
     let Some(Frame::Integer(pending)) = info_value(&info, "pending_outbox") else {
         panic!("missing pending_outbox");
@@ -178,6 +179,7 @@ fn ft_outbox_compaction_keeps_latest_mutation_per_key() {
         apply(&db, &["FT.CONFIG", "SET", "REFRESH_MAX_DOCS", "10"]),
         Frame::Ok
     ));
+    db.maintain_fulltext_indexes().unwrap();
     assert_eq!(total(&apply(&db, &["FT.SEARCH", "idx", "latest"])), Some(1));
     assert_eq!(total(&apply(&db, &["FT.SEARCH", "idx", "first"])), Some(0));
     let info = array(apply(&db, &["FT.INFO", "idx"]));
@@ -197,6 +199,7 @@ fn ft_search_drains_multiple_backfill_batches_before_answering() {
         );
     }
     create_index(&db);
+    db.maintain_fulltext_indexes().unwrap();
 
     assert_eq!(
         total(&apply(
@@ -240,7 +243,7 @@ fn ft_config_exposes_storage_and_memory_budgets() {
 }
 
 #[test]
-fn ft_consistency_mode_controls_query_side_publication() {
+fn ft_consistency_mode_observes_publisher_watermark() {
     let (_dir, db) = make_db();
     create_index(&db);
     assert!(matches!(
@@ -260,6 +263,7 @@ fn ft_consistency_mode_controls_query_side_publication() {
         apply(&db, &["FT.CONFIG", "SET", "CONSISTENCY", "CONSISTENT"]),
         Frame::Ok
     ));
+    db.maintain_fulltext_indexes().unwrap();
     assert_eq!(
         total(&apply(&db, &["FT.SEARCH", "idx", "pending"])),
         Some(1)

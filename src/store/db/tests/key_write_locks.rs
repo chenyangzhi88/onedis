@@ -51,3 +51,30 @@ async fn transaction_commit_waits_for_a_shared_hash_structural_guard() {
         Some("value".to_string())
     );
 }
+
+#[tokio::test]
+async fn committed_mutations_only_wake_waiters_for_the_changed_database_key() {
+    let db = test_db();
+    let changed = db.wait_for_key_mutations(&["changed"]);
+    let unchanged = db.wait_for_key_mutations(&["unchanged"]);
+    let changed_notification = changed.notified();
+    let unchanged_notification = unchanged.notified();
+    tokio::pin!(changed_notification);
+    tokio::pin!(unchanged_notification);
+    changed_notification.as_mut().enable();
+    unchanged_notification.as_mut().enable();
+
+    db.list_push_right_async("changed", &["value".to_string()], false)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_millis(100), changed_notification)
+        .await
+        .expect("the changed key waiter must be notified");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), unchanged_notification)
+            .await
+            .is_err(),
+        "an unrelated key must not be woken"
+    );
+}

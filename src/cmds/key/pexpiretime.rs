@@ -21,12 +21,12 @@ impl PexpireTime {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        Ok(Frame::Integer(db.expire_time_millis_readonly(&self.key)))
+        Ok(Frame::Integer(db.expire_time_millis_readonly(&self.key)?))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         Ok(Frame::Integer(
-            db.expire_time_millis_readonly_async(&self.key).await,
+            db.expire_time_millis_readonly_async(&self.key).await?,
         ))
     }
 }

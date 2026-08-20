@@ -10,14 +10,15 @@ fn hash_is_stored_and_loaded_via_kv_entries() {
         ("city".to_string(), "paris".to_string()),
     ]);
 
-    db.insert("user:1".to_string(), Structure::Hash(hash.clone()));
+    db.insert("user:1".to_string(), Structure::Hash(hash.clone()))
+        .unwrap();
 
     assert!(matches!(
-        db.get("user:1"),
+        db.get("user:1").unwrap(),
         Some(Structure::Hash(value)) if value == hash
     ));
 
-    assert_eq!(db.len(), 1);
+    assert_eq!(db.len().unwrap(), 1);
 }
 
 #[test]
@@ -29,14 +30,15 @@ fn list_is_stored_and_loaded_via_kv_entries() {
         "job-3".to_string(),
     ];
 
-    db.insert("queue".to_string(), Structure::List(list.clone()));
+    db.insert("queue".to_string(), Structure::List(list.clone()))
+        .unwrap();
 
     assert!(matches!(
-        db.get("queue"),
+        db.get("queue").unwrap(),
         Some(Structure::List(value)) if value == list
     ));
 
-    assert_eq!(db.len(), 1);
+    assert_eq!(db.len().unwrap(), 1);
 }
 
 #[test]
@@ -65,10 +67,11 @@ fn stale_hash_field_expiry_cleanup_cannot_delete_new_value() {
     let expire_key = hash_field_expire_key(db.db_index, "hash", version, "field");
     let field_key = hash_field_key(db.db_index, "hash", version, "field");
     db.store
-        .put_raw(&expire_key, &now_ms().saturating_sub(1).to_be_bytes());
+        .put_raw(&expire_key, &now_ms().saturating_sub(1).to_be_bytes())
+        .unwrap();
 
-    let observed_expire = db.store.get_raw_observed(&expire_key);
-    let observed_field = db.store.get_raw_observed(&field_key);
+    let observed_expire = db.store.get_raw_observed(&expire_key).unwrap();
+    let observed_field = db.store.get_raw_observed(&field_key).unwrap();
     db.hash_set("hash", "field", "new").unwrap();
 
     let mut stale_cleanup = WriteBatch::new();
@@ -100,7 +103,7 @@ fn hash_delete_removes_meta_when_last_field_is_deleted() {
         1
     );
     assert_eq!(db.hash_len("user:2").unwrap(), 0);
-    assert!(!db.exists("user:2"));
+    assert!(!db.exists("user:2").unwrap());
 }
 
 #[test]
@@ -114,13 +117,14 @@ fn hash_delete_counts_duplicate_fields_once() {
             .unwrap(),
         1
     );
-    assert!(!db.exists("user:duplicate"));
+    assert!(!db.exists("user:duplicate").unwrap());
 }
 
 #[test]
 fn hash_native_ops_reject_wrong_type() {
     let db = test_db();
-    db.insert("plain".to_string(), Structure::String("value".to_string()));
+    db.insert("plain".to_string(), Structure::String("value".to_string()))
+        .unwrap();
 
     assert!(db.hash_get("plain", "field").is_err());
     assert!(db.hash_set("plain", "field", "value").is_err());
@@ -267,7 +271,8 @@ async fn cross_key_hash_set_batch_preserves_pipeline_order_and_isolates_errors()
     db.insert(
         "plain".to_string(),
         Structure::String("not-a-hash".to_string()),
-    );
+    )
+    .unwrap();
 
     let mutations = [
         HashSetBatchMutation {
@@ -316,7 +321,8 @@ async fn large_distinct_hash_set_batch_preserves_replies() {
     db.insert(
         "bulk:wrong-type".to_string(),
         Structure::String("value".to_string()),
-    );
+    )
+    .unwrap();
     let mut keys = (0..31)
         .map(|index| format!("bulk:{index}"))
         .collect::<Vec<_>>();
@@ -376,13 +382,14 @@ async fn small_hash_pipeline_uses_one_main_record_and_promotes_at_field_limit() 
             .unwrap(),
         SMALL_HASH_MAX_FIELDS
     );
-    let raw = db.store.get_raw(&db.mk("compact")).unwrap();
+    let raw = db.store.get_raw(&db.mk("compact")).unwrap().unwrap();
     let meta = decode_hash_meta_checked(&raw).unwrap();
     assert!(meta.packed);
     assert_eq!(meta.version, 0);
     assert!(
         db.store
             .scan_prefix_raw(&hash_field_prefix(db.db_index, "compact", 0))
+            .unwrap()
             .is_empty()
     );
 
@@ -391,7 +398,7 @@ async fn small_hash_pipeline_uses_one_main_record_and_promotes_at_field_limit() 
             .await
             .unwrap()
     );
-    let raw = db.store.get_raw(&db.mk("compact")).unwrap();
+    let raw = db.store.get_raw(&db.mk("compact")).unwrap().unwrap();
     let meta = decode_hash_meta_checked(&raw).unwrap();
     assert!(!meta.packed);
     assert_ne!(meta.version, 0);
@@ -420,17 +427,21 @@ async fn field_ttl_promotes_small_hash_before_writing_expiry_records() {
         .unwrap(),
         vec![1]
     );
-    let raw = db.store.get_raw(&db.mk("ttl-compact")).unwrap();
+    let raw = db.store.get_raw(&db.mk("ttl-compact")).unwrap().unwrap();
     let meta = decode_hash_meta_checked(&raw).unwrap();
     assert!(!meta.packed);
     assert!(meta.may_have_field_ttl);
     assert_ne!(meta.version, 0);
-    assert!(db.store.contains_key(&hash_field_expire_key(
-        db.db_index,
-        "ttl-compact",
-        meta.version,
-        "field",
-    )));
+    assert!(
+        db.store
+            .contains_key(&hash_field_expire_key(
+                db.db_index,
+                "ttl-compact",
+                meta.version,
+                "field",
+            ))
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -456,7 +467,11 @@ async fn numeric_and_conditional_updates_keep_small_hash_inline() {
             .await
             .unwrap()
     );
-    let raw = db.store.get_raw(&db.mk("compact-updates")).unwrap();
+    let raw = db
+        .store
+        .get_raw(&db.mk("compact-updates"))
+        .unwrap()
+        .unwrap();
     let meta = decode_hash_meta_checked(&raw).unwrap();
     assert!(meta.packed);
     assert_eq!(meta.version, 0);
@@ -742,7 +757,7 @@ async fn cached_hash_length_tracks_sets_and_deletes() {
         1
     );
     assert_eq!(db.hash_len_async("length-cache").await.unwrap(), 0);
-    assert!(!db.exists_readonly_async("length-cache").await);
+    assert!(!db.exists_readonly_async("length-cache").await.unwrap());
 }
 
 #[tokio::test]

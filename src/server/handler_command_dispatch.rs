@@ -87,19 +87,7 @@ impl Handler {
                 .await?;
         }
         if !Self::can_apply_on_worker(&command) {
-            let should_notify = Self::is_list_mutating_command(&command);
-            let should_notify_zset = Self::is_zset_mutating_command(&command);
-            let should_notify_stream = Self::is_stream_mutating_command(&command);
             let frame = self.apply_command(command).await?;
-            if should_notify && !matches!(frame, Frame::Error(_)) {
-                self.db_manager.notify_list_waiters();
-            }
-            if should_notify_zset && !matches!(frame, Frame::Error(_)) {
-                self.db_manager.notify_zset_waiters();
-            }
-            if should_notify_stream && !matches!(frame, Frame::Error(_)) {
-                self.db_manager.notify_stream_waiters();
-            }
             return Ok(self.encode_frame(&frame));
         }
         if let Command::Move(r#move) = &command
@@ -117,23 +105,11 @@ impl Handler {
 
         let db = self.session.get_db().clone();
         let direct = Self::can_apply_direct(&command);
-        let should_notify = Self::is_list_mutating_command(&command);
-        let should_notify_zset = Self::is_zset_mutating_command(&command);
-        let should_notify_stream = Self::is_stream_mutating_command(&command);
         let frame = if direct {
             crate::command_dispatch::handle_command_async(&db, command).await
         } else {
             crate::command_dispatch::handle_command_autocommit_async(&db, command).await
         }?;
-        if should_notify && !matches!(frame, Frame::Error(_)) {
-            self.db_manager.notify_list_waiters();
-        }
-        if should_notify_zset && !matches!(frame, Frame::Error(_)) {
-            self.db_manager.notify_zset_waiters();
-        }
-        if should_notify_stream && !matches!(frame, Frame::Error(_)) {
-            self.db_manager.notify_stream_waiters();
-        }
         Ok(self.encode_frame(&frame))
     }
 
@@ -234,7 +210,7 @@ impl Handler {
             Command::Bgsave(bgsave) => bgsave.apply_sync(&self.db_manager),
             Command::Flushall(_) => {
                 for db in self.db_manager.get_all_dbs() {
-                    db.clear_async().await;
+                    db.clear_async().await?;
                 }
                 Ok(Frame::Ok)
             }

@@ -14,13 +14,12 @@ impl Handler {
             None
         };
         loop {
-            let notified = self.db_manager.zset_notify().notified();
+            let db = self.session.get_db().clone();
+            let waiter = db.wait_for_key_mutations(&Self::blocking_zset_keys(&command));
+            let notified = waiter.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(frame) = self.try_blocking_zset_command_once(&command).await? {
-                if !matches!(frame, Frame::Null | Frame::Error(_)) {
-                    self.db_manager.notify_zset_waiters();
-                }
                 return Ok(self.encode_frame(&frame));
             }
             blocked.get_or_insert_with(|| self.client_control.begin_blocking());
@@ -141,10 +140,18 @@ impl Handler {
         }
     }
 
+    fn blocking_zset_keys(command: &Command) -> Vec<&str> {
+        match command {
+            Command::Bzpopmin(command) => command.keys.iter().map(String::as_str).collect(),
+            Command::Bzpopmax(command) => {
+                command.inner.keys.iter().map(String::as_str).collect()
+            }
+            Command::Bzmpop(command) => command.keys.iter().map(String::as_str).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     fn is_blocking_zset_command(command: &Command) -> bool {
-        matches!(
-            command,
-            Command::Bzpopmin(_) | Command::Bzpopmax(_) | Command::Bzmpop(_)
-        )
+        command.spec().blocking_kind == crate::command::BlockingKind::SortedSet
     }
 }

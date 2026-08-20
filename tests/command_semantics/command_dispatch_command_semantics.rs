@@ -317,7 +317,7 @@ fn command_dispatch_names_and_aof_flags_cover_wide_command_surface() {
             panic!("failed to parse {args:?}: {err}");
         });
         assert_eq!(command.name(), expected_name, "{args:?}");
-        let _ = command.propagate_aof_if_needed();
+        let _ = command.is_mutating();
     }
 }
 
@@ -445,7 +445,6 @@ fn new_stream_commands_are_dispatched_to_kv_engine() {
 }
 
 #[test]
-#[ignore = "requires local TCP socket creation, which is denied in the current sandbox"]
 fn move_command_moves_key_across_databases_in_shared_kv_engine() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -464,10 +463,13 @@ fn move_command_moves_key_across_databases_in_shared_kv_engine() {
         args,
     );
 
-    db_manager.get_db(0).insert(
-        "shared-key".to_string(),
-        Structure::String("value".to_string()),
-    );
+    db_manager
+        .get_db(0)
+        .insert(
+            "shared-key".to_string(),
+            Structure::String("value".to_string()),
+        )
+        .unwrap();
 
     let frame = Move::parse_from_frame(frame_args(&["move", "shared-key", "1"]))
         .unwrap()
@@ -475,9 +477,9 @@ fn move_command_moves_key_across_databases_in_shared_kv_engine() {
         .unwrap();
 
     assert!(matches!(frame, Frame::Integer(1)));
-    assert!(db_manager.get_db(0).get("shared-key").is_none());
+    assert!(db_manager.get_db(0).get("shared-key").unwrap().is_none());
     assert!(matches!(
-        db_manager.get_db(1).get("shared-key"),
+        db_manager.get_db(1).get("shared-key").unwrap(),
         Some(Structure::String(value)) if value == "value"
     ));
 

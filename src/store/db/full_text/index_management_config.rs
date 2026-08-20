@@ -13,7 +13,7 @@ impl Db {
             .map_err(|_| Error::msg("ERR fulltext lifecycle lock poisoned"))?;
         if self
             .store
-            .get_raw(&fulltext_meta_key(self.db_index, index))
+            .get_raw(&fulltext_meta_key(self.db_index, index))?
             .is_some()
             || self.read_fulltext_alias(index)?.is_some()
         {
@@ -81,7 +81,9 @@ impl Db {
                 .read_fulltext_meta_direct(index)
                 .is_ok_and(|current| current.generation == meta.generation);
             if !generation_is_still_published {
-                self.fulltext_cleanup_generation(index, &meta);
+                if let Err(cleanup_error) = self.fulltext_cleanup_generation(index, &meta) {
+                    log::warn!("failed to clean unpublished fulltext generation: {cleanup_error}");
+                }
                 self.fulltext_runtimes.remove(self.db_index, index);
             }
             return Err(error);
@@ -112,7 +114,7 @@ impl Db {
     pub fn fulltext_list(&self) -> Result<Frame, Error> {
         let mut names = Vec::new();
         for (index, meta) in self.read_all_fulltext_metas()? {
-            if self.fulltext_index_expired(&index, &meta) {
+            if self.fulltext_index_expired(&index, &meta)? {
                 self.fulltext_purge_index(&index, &meta)?;
             } else {
                 names.push(index);
@@ -286,7 +288,7 @@ impl Db {
         let staged_storage = meta.active_storage.clone();
         let mut cleanup_batch = WriteBatch::new();
         self.delete_fulltext_storage_to_batch(&mut cleanup_batch, &staged_storage)?;
-        self.write_batch_if_not_empty(&cleanup_batch);
+        self.write_batch_if_not_empty(&cleanup_batch)?;
         let stage_result = (|| {
             self.fulltext_create_vector_indexes(&index, &meta)?;
             let runtime_config = self.fulltext_runtime_config()?;
@@ -314,17 +316,21 @@ impl Db {
         let staged_runtime = match stage_result {
             Ok(runtime) => runtime,
             Err(error) => {
-                self.fulltext_cleanup_generation(&index, &meta);
+                if let Err(cleanup_error) = self.fulltext_cleanup_generation(&index, &meta) {
+                    log::warn!("failed to clean staged fulltext generation: {cleanup_error}");
+                }
                 return Err(error);
             }
         };
         meta.indexed_docs = staged_runtime.num_docs();
-        meta.indexed_bytes = self.fulltext_file_bytes(&staged_storage) as u64;
+        meta.indexed_bytes = self.fulltext_file_bytes(&staged_storage)? as u64;
         meta.state = FullTextIndexState::Ready;
 
         #[cfg(test)]
         if FULLTEXT_ALTER_FAIL_AFTER_SWAP.swap(false, AtomicOrdering::SeqCst) {
-            self.fulltext_cleanup_generation(&index, &meta);
+            if let Err(cleanup_error) = self.fulltext_cleanup_generation(&index, &meta) {
+                log::warn!("failed to clean injected fulltext generation: {cleanup_error}");
+            }
             return Err(Error::msg("ERR injected FT.ALTER runtime failure"));
         }
 
@@ -332,7 +338,9 @@ impl Db {
         if let Err(error) =
             self.fulltext_write_meta_cas(&index, &expected_raw, &mut meta, &mut swap_batch)
         {
-            self.fulltext_cleanup_generation(&index, &meta);
+            if let Err(cleanup_error) = self.fulltext_cleanup_generation(&index, &meta) {
+                log::warn!("failed to clean uncommitted fulltext generation: {cleanup_error}");
+            }
             return Err(error);
         }
         self.fulltext_runtimes
@@ -342,14 +350,18 @@ impl Db {
         if old_storage != staged_storage {
             let mut cleanup = WriteBatch::new();
             self.delete_fulltext_storage_to_batch(&mut cleanup, &old_storage)?;
-            self.write_batch_if_not_empty(&cleanup);
+            self.write_batch_if_not_empty(&cleanup)?;
         }
         self.fulltext_delete_vector_indexes(&index, &old_meta);
         self.fulltext_refresh_index_inner(&index, true, None)?;
         Ok(Frame::Ok)
     }
 
-    pub(super) fn fulltext_cleanup_generation(&self, index: &str, meta: &FullTextIndexMeta) {
+    pub(super) fn fulltext_cleanup_generation(
+        &self,
+        index: &str,
+        meta: &FullTextIndexMeta,
+    ) -> Result<(), Error> {
         let mut batch = WriteBatch::new();
         if let Err(error) = self.delete_fulltext_storage_to_batch(&mut batch, &meta.active_storage)
         {
@@ -357,10 +369,11 @@ impl Db {
                 "failed to plan fulltext generation cleanup db={} index={index}: {error}",
                 self.db_index
             );
-            return;
+            return Err(error);
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.fulltext_delete_vector_indexes(index, meta);
+        Ok(())
     }
 
     pub async fn fulltext_alter_async(
@@ -388,7 +401,7 @@ impl Db {
     pub fn fulltext_alias_add(&self, alias: &str, index: &str) -> Result<Frame, Error> {
         if self
             .store
-            .get_raw(&fulltext_meta_key(self.db_index, alias))
+            .get_raw(&fulltext_meta_key(self.db_index, alias))?
             .is_some()
             || self.read_fulltext_alias(alias)?.is_some()
         {
@@ -524,7 +537,7 @@ impl Db {
                 value.as_bytes(),
             )
             .map_err(|error| Error::msg(error.to_string()))?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.fulltext_runtimes
             .set_config_value(self.db_index, &normalized, value.to_string());
         Ok(Frame::Ok)

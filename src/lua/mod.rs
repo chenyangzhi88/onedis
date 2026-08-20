@@ -144,7 +144,7 @@ mod tests {
             .unwrap();
         assert!(matches!(write_result, Frame::BulkString(value) if value == b"value"));
         assert!(matches!(
-            db.get("lua-key"),
+            db.get("lua-key").unwrap(),
             Some(Structure::String(value)) if value == "value"
         ));
 
@@ -161,7 +161,7 @@ mod tests {
             Err(err) => err,
         };
         assert!(readonly_error.to_string().contains("read-only script"));
-        assert!(db.get("ro-key").is_none());
+        assert!(db.get("ro-key").unwrap().is_none());
 
         let protected = registry
             .eval(
@@ -189,7 +189,7 @@ mod tests {
                     Frame::Null,
                 ])
         ));
-        assert!(db.get("pcall-key").is_none());
+        assert!(db.get("pcall-key").unwrap().is_none());
     }
 
     #[test]
@@ -213,7 +213,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(denied.to_string().contains("NOPERM"));
-        assert!(db.get("acl-key").is_none());
+        assert!(db.get("acl-key").unwrap().is_none());
 
         let checks = registry
             .eval_authorized(
@@ -245,7 +245,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(error_reply, Frame::Error(message) if message == "ERR forced"));
-        assert!(db.get("rollback-key").is_none());
+        assert!(db.get("rollback-key").unwrap().is_none());
     }
 
     #[test]

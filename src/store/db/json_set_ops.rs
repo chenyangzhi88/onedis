@@ -19,7 +19,7 @@ impl Db {
     ) -> Result<Option<bool>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(None);
             };
@@ -98,11 +98,11 @@ impl Db {
             }
         }
         for key in &keys {
-            self.expire_if_needed_async(key).await;
+            self.expire_if_needed_async(key).await?;
         }
 
         let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+        let observations = self.store.multi_get_raw_observed_async(&raw_keys).await?;
         let mut expires = Vec::with_capacity(keys.len());
         let mut documents = Vec::with_capacity(keys.len());
         for (key, observation) in keys.iter().zip(&observations) {
@@ -192,10 +192,10 @@ impl Db {
     {
         let tokens = parse_json_path(path)?;
         let _structure_guard = self.set_write_lock(key).lock().await;
-        self.expire_if_needed_async(key).await;
+        self.expire_if_needed_async(key).await?;
 
         let key_bytes = self.mk(key);
-        let observed = self.store.get_raw_observed_async(&key_bytes).await;
+        let observed = self.store.get_raw_observed_async(&key_bytes).await?;
         let Some(raw) = observed.value() else {
             return Ok(None);
         };
@@ -310,10 +310,15 @@ impl Db {
             }
         }
         for key in &keys {
-            self.expire_if_needed_async(key).await;
+            if let Err(error) = self.expire_if_needed_async(key).await {
+                return storage_batch_error(commands.len(), error);
+            }
         }
         let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        let old_values = self.store.multi_get_raw_async(&raw_keys).await;
+        let old_values = match self.store.multi_get_raw_async(&raw_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         let mut versions = Vec::with_capacity(keys.len());
         let mut expires = Vec::with_capacity(keys.len());
         let mut eligible = Vec::with_capacity(keys.len());
@@ -372,21 +377,21 @@ impl Db {
                 }
                 continue;
             }
-            if expires[position] > 0 {
-                if let Err(error) = self.ttl_manager.try_add_to_batch(
+            if expires[position] > 0
+                && let Err(error) = self.ttl_manager.try_add_to_batch(
                     &mut key_batch,
                     expires[position],
                     self.db_index,
                     key,
-                ) {
-                    let message = error.to_string();
-                    for (index, (command_key, _)) in commands.iter().enumerate() {
-                        if command_key == key && replies[index].is_ok() {
-                            replies[index] = Err(Error::msg(message.clone()));
-                        }
+                )
+            {
+                let message = error.to_string();
+                for (index, (command_key, _)) in commands.iter().enumerate() {
+                    if command_key == key && replies[index].is_ok() {
+                        replies[index] = Err(Error::msg(message.clone()));
                     }
-                    continue;
                 }
+                continue;
             }
             if batch.count() == 0 {
                 batch = key_batch;
@@ -402,8 +407,18 @@ impl Db {
                 committed_keys.push(*key);
             }
         }
-        self.write_batch_with_logical_keys_if_not_empty_async(&batch, &committed_keys)
-            .await;
+        if let Err(error) = self
+            .write_batch_with_logical_keys_if_not_empty_async(&batch, &committed_keys)
+            .await
+        {
+            return fail_successful_batch_replies(
+                replies
+                    .into_iter()
+                    .map(|result| result.map(|_| ()))
+                    .collect(),
+                error,
+            );
+        }
         self.changes.fetch_add(
             replies.iter().filter(|value| value.is_ok()).count() as u64,
             Ordering::Relaxed,
@@ -431,11 +446,11 @@ impl Db {
             serde_json::from_str(json).map_err(|_| Error::msg("ERR invalid JSON value"))?;
         validate_json_value_limits(&new_value, json.len())?;
 
-        self.expire_if_needed(key);
+        self.expire_if_needed(key)?;
         if let Some(result) = self.try_json_set_packed(key, &tokens, &new_value, condition)? {
             return Ok(result);
         }
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
             if !tokens.is_empty() || condition == SetCondition::Xx {
                 return Ok(false);
             }
@@ -469,7 +484,7 @@ impl Db {
         else {
             return Ok(false);
         };
-        let target_exists = self.json_node_exists(key, version, &storage_tokens);
+        let target_exists = self.json_node_exists(key, version, &storage_tokens)?;
         let condition_matches = match condition {
             SetCondition::Always => true,
             SetCondition::Nx => !target_exists,
@@ -514,7 +529,7 @@ impl Db {
             &new_value,
         )?;
         self.fulltext_enqueue_json_upsert_to_batch(&mut batch, key)?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         self.fulltext_request_json_refresh(key)?;
         Ok(true)
@@ -627,9 +642,9 @@ impl Db {
         let mut conflict_guard = None;
 
         for attempt in 0..64 {
-            self.expire_if_needed_async(key).await;
+            self.expire_if_needed_async(key).await?;
             let key_bytes = self.mk(key);
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let meta_condition = CompareCondition::from_observed(&observed);
             let Some(raw) = observed.value().map(|value| value.to_vec()) else {
                 return Ok(false);
@@ -716,9 +731,9 @@ impl Db {
         condition: SetCondition,
     ) -> Result<bool, Error> {
         for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
+            self.expire_if_needed_async(key).await?;
             let key_bytes = self.mk(key);
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let meta_condition = CompareCondition::from_observed(&observed);
             let expire_ms = match observed.value() {
                 Some(raw) => {

@@ -69,7 +69,8 @@ async fn structural_set_does_not_allow_an_older_counter_merge_to_land_after_it()
 #[tokio::test]
 async fn ttl_counter_uses_strict_path_and_does_not_resurrect_after_expiry() {
     let db = test_db();
-    db.insert_string("ttl-counter".to_string(), "1".to_string(), Some(20));
+    db.insert_string("ttl-counter".to_string(), "1".to_string(), Some(20))
+        .unwrap();
 
     assert_eq!(
         db.increment_integer_string_async("ttl-counter", 1)
@@ -77,7 +78,7 @@ async fn ttl_counter_uses_strict_path_and_does_not_resurrect_after_expiry() {
             .unwrap(),
         2
     );
-    assert!(db.ttl_millis_readonly("ttl-counter") > 0);
+    assert!(db.ttl_millis_readonly("ttl-counter").unwrap() > 0);
 
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(
@@ -92,7 +93,8 @@ async fn ttl_counter_uses_strict_path_and_does_not_resurrect_after_expiry() {
 #[tokio::test]
 async fn arbitrary_increment_stays_correct_when_operand_aggregation_would_overflow() {
     let db = test_db();
-    db.insert_string_ref("wide-delta", &i64::MIN.to_string());
+    db.insert_string_ref("wide-delta", &i64::MIN.to_string())
+        .unwrap();
 
     assert_eq!(
         db.increment_integer_string_async("wide-delta", i64::MAX)
@@ -120,7 +122,7 @@ async fn transaction_commit_invalidates_a_warm_counter_cache() {
     );
 
     let txn = db.transactional_view().unwrap();
-    txn.insert_string_ref("txn-counter", "100");
+    txn.insert_string_ref("txn-counter", "100").unwrap();
     txn.commit_transaction_async().await.unwrap();
 
     assert_eq!(
@@ -138,7 +140,7 @@ async fn flushdb_invalidates_warm_counter_cache() {
         .await
         .unwrap();
 
-    db.flushdb_async().await;
+    db.flushdb_async().await.unwrap();
     assert_eq!(
         db.increment_integer_string_async("flush-counter", 1)
             .await
@@ -146,7 +148,7 @@ async fn flushdb_invalidates_warm_counter_cache() {
         1
     );
 
-    db.clear_async().await;
+    db.clear_async().await.unwrap();
     assert_eq!(
         db.increment_integer_string_async("flush-counter", 1)
             .await
@@ -158,13 +160,16 @@ async fn flushdb_invalidates_warm_counter_cache() {
 #[tokio::test]
 async fn counter_merge_publishes_watch_mutation() {
     let db = test_db();
-    let snapshot = db.watch_version_snapshot("watched-counter");
+    let snapshot = db.watch_version_snapshot("watched-counter").unwrap();
 
     db.increment_integer_string_async("watched-counter", 1)
         .await
         .unwrap();
 
-    assert!(db.watch_version_changed("watched-counter", snapshot.0, snapshot.1));
+    assert!(
+        db.watch_version_changed("watched-counter", snapshot.0, snapshot.1)
+            .unwrap()
+    );
     db.release_watch("watched-counter");
 }
 
@@ -200,7 +205,7 @@ async fn cross_db_copy_invalidates_the_target_counter_cache() {
         counters,
     );
 
-    db0.insert_string_ref("source-counter", "40");
+    db0.insert_string_ref("source-counter", "40").unwrap();
     assert_eq!(
         db1.increment_integer_string_async("target-counter", 1)
             .await

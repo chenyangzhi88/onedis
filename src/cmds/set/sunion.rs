@@ -29,7 +29,7 @@ impl Sunion {
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let mut result_set = std::collections::HashSet::new();
         for key in self.keys {
-            if let Some(structure) = db.get(&key) {
+            if let Some(structure) = db.get(&key)? {
                 match structure {
                     Structure::Set(set) => {
                         for member in set.iter() {

@@ -13,8 +13,8 @@ impl Db {
     ) -> Result<Option<Vec<Vec<u8>>>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            self.expire_if_needed(key);
-            let observed = self.store.get_raw_observed(&key_bytes);
+            self.expire_if_needed(key)?;
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(Vec::new()));
             };
@@ -68,10 +68,10 @@ impl Db {
     ) -> Result<Option<Vec<Result<Vec<Vec<u8>>, Error>>>, Error> {
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
             for key in keys {
-                self.expire_if_needed_async(key).await;
+                self.expire_if_needed_async(key).await?;
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await?;
             let mut states = Vec::with_capacity(keys.len());
             for observed in &observations {
                 states.push(match observed.value() {
@@ -191,7 +191,7 @@ impl Db {
                 list_item_key(self.db_index, key, meta.version, index)
             })
             .collect::<Vec<_>>();
-        let values = self.store.multi_get_raw(&item_keys);
+        let values = self.store.multi_get_raw(&item_keys)?;
         let mut batch = WriteBatch::new();
         let initial_head = meta.head;
         let initial_tail = meta.tail;
@@ -225,7 +225,7 @@ impl Db {
             ))
             .expect("write batch append invariant violated");
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if meta.head >= meta.tail {
             self.remove_list_meta_cache_if_non_transactional(key);
         } else {
@@ -268,7 +268,7 @@ impl Db {
                 list_item_key(self.db_index, key, meta.version, index)
             })
             .collect::<Vec<_>>();
-        let values = self.store.multi_get_raw_async(&item_keys).await;
+        let values = self.store.multi_get_raw_async(&item_keys).await?;
         let mut batch = WriteBatch::new();
         let initial_head = meta.head;
         let initial_tail = meta.tail;
@@ -302,7 +302,7 @@ impl Db {
             ))
             .expect("write batch append invariant violated");
         }
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         if meta.head >= meta.tail {
             self.remove_list_meta_cache_if_non_transactional(key);
         } else {
@@ -365,10 +365,15 @@ impl Db {
         }
 
         for key in &keys {
-            self.expire_if_needed_async(key).await;
+            if let Err(error) = self.expire_if_needed_async(key).await {
+                return storage_batch_error(commands.len(), error);
+            }
         }
         let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        let raw_values = self.store.multi_get_raw_async(&raw_keys).await;
+        let raw_values = match self.store.multi_get_raw_async(&raw_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         let mut states = raw_values
             .iter()
             .map(|raw| ListPopBatchState::from_raw(raw.as_deref()))
@@ -418,24 +423,34 @@ impl Db {
                 continue;
             };
             let left = if state.initial_head < state.head {
-                self.list_range_raw_values_async(
-                    keys[position],
-                    state.version,
-                    state.initial_head,
-                    state.head - 1,
-                )
-                .await
+                match self
+                    .list_range_raw_values_async(
+                        keys[position],
+                        state.version,
+                        state.initial_head,
+                        state.head - 1,
+                    )
+                    .await
+                {
+                    Ok(values) => values,
+                    Err(error) => return storage_batch_error(commands.len(), error),
+                }
             } else {
                 Vec::new()
             };
             let right = if state.tail < state.initial_tail {
-                self.list_range_raw_values_async(
-                    keys[position],
-                    state.version,
-                    state.tail,
-                    state.initial_tail - 1,
-                )
-                .await
+                match self
+                    .list_range_raw_values_async(
+                        keys[position],
+                        state.version,
+                        state.tail,
+                        state.initial_tail - 1,
+                    )
+                    .await
+                {
+                    Ok(values) => values,
+                    Err(error) => return storage_batch_error(commands.len(), error),
+                }
             } else {
                 Vec::new()
             };
@@ -512,8 +527,12 @@ impl Db {
                 .expect("write batch append invariant violated");
             }
         }
-        self.write_existing_version_batch_if_not_empty_async(&batch)
-            .await;
+        if let Err(error) = self
+            .write_existing_version_batch_if_not_empty_async(&batch)
+            .await
+        {
+            return fail_successful_batch_replies(replies, error);
+        }
         let changed = replies
             .iter()
             .filter_map(|reply| reply.as_ref().ok())
@@ -556,7 +575,7 @@ impl Db {
         if meta.head >= meta.tail {
             let mut batch = WriteBatch::new();
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.remove_list_meta_cache_if_non_transactional(key);
             return Ok(None);
         }
@@ -564,7 +583,7 @@ impl Db {
         let item_key = list_item_key(self.db_index, key, meta.version, meta.head);
         let value = self
             .store
-            .get_raw(&item_key)
+            .get_raw(&item_key)?
             .and_then(|value| String::from_utf8(value).ok());
         let mut batch = WriteBatch::new();
         (batch.delete(&item_key)).expect("write batch append invariant violated");
@@ -578,7 +597,7 @@ impl Db {
             ))
             .expect("write batch append invariant violated");
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if meta.head >= meta.tail {
             self.remove_list_meta_cache_if_non_transactional(key);
         } else {
@@ -614,7 +633,7 @@ impl Db {
         if meta.head >= meta.tail {
             let mut batch = WriteBatch::new();
             self.delete_main_key_with_ttl_to_batch(&mut batch, key, meta.expire_ms);
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.remove_list_meta_cache_if_non_transactional(key);
             return Ok(None);
         }
@@ -623,7 +642,7 @@ impl Db {
         let item_key = list_item_key(self.db_index, key, meta.version, meta.tail);
         let value = self
             .store
-            .get_raw(&item_key)
+            .get_raw(&item_key)?
             .and_then(|value| String::from_utf8(value).ok());
         let mut batch = WriteBatch::new();
         (batch.delete(&item_key)).expect("write batch append invariant violated");
@@ -636,7 +655,7 @@ impl Db {
             ))
             .expect("write batch append invariant violated");
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if meta.head >= meta.tail {
             self.remove_list_meta_cache_if_non_transactional(key);
         } else {

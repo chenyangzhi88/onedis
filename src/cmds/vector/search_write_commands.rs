@@ -86,10 +86,12 @@ impl VAdd {
                 &self.element,
                 self.vector,
                 self.attrs_json,
-                self.m,
-                self.ef,
-                self.quantization,
-                self.reduce_dim,
+                VectorAutocreateOptions {
+                    m: self.m,
+                    ef_construction: self.ef,
+                    quantization: self.quantization,
+                    reduce_dim: self.reduce_dim,
+                },
             )? {
                 1
             } else {
@@ -108,10 +110,12 @@ impl VAdd {
                 &self.element,
                 self.vector,
                 self.attrs_json,
-                self.m,
-                self.ef,
-                self.quantization,
-                self.reduce_dim,
+                VectorAutocreateOptions {
+                    m: self.m,
+                    ef_construction: self.ef,
+                    quantization: self.quantization,
+                    reduce_dim: self.reduce_dim,
+                },
             )
             .await?;
         Ok(Frame::Integer(if added { 1 } else { 0 }))

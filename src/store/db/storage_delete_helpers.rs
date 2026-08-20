@@ -16,7 +16,8 @@ impl Db {
             let observations = raw_keys
                 .iter()
                 .map(|key| self.store.get_raw_observed(key))
-                .collect::<Vec<_>>();
+                .collect::<common::types::status::Result<Vec<_>>>()
+                .map_err(|error| Error::msg(error.to_string()))?;
             let mut batch = WriteBatch::new();
             let mut conditions = Vec::new();
             let mut deleted = Vec::new();
@@ -77,9 +78,9 @@ impl Db {
     pub(crate) async fn delete_key_commands_batch_async(
         &self,
         commands: &[Vec<&str>],
-    ) -> Vec<usize> {
+    ) -> Result<Vec<usize>, Error> {
         if commands.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut key_positions = HashMap::new();
         let mut keys = Vec::new();
@@ -97,7 +98,11 @@ impl Db {
 
         for _ in 0..64 {
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = self
+                .store
+                .multi_get_raw_observed_async(&raw_keys)
+                .await
+                .map_err(|error| Error::msg(error.to_string()))?;
             let now = now_ms();
             let live_headers = observations
                 .iter()
@@ -125,7 +130,7 @@ impl Db {
                 replies.push(deleted);
             }
             if removed.is_empty() {
-                return replies;
+                return Ok(replies);
             }
 
             let mut positions = removed.into_iter().collect::<Vec<_>>();
@@ -157,7 +162,7 @@ impl Db {
                 };
                 if let Err(error) = fulltext {
                     log::error!("failed to enqueue fulltext delete for {key}: {error}");
-                    return vec![0; commands.len()];
+                    return Err(error);
                 }
                 conditions.push(observations[position].condition());
                 deleted.push((key, header.type_tag));
@@ -180,21 +185,19 @@ impl Db {
                             log::error!("failed to refresh fulltext delete for {key}: {error}");
                         }
                     }
-                    return replies;
+                    return Ok(replies);
                 }
                 Ok(false) => continue,
                 Err(error) => {
-                    log::error!("failed to delete key pipeline batch: {error}");
-                    return vec![0; commands.len()];
+                    return Err(error);
                 }
             }
         }
-        log::warn!("gave up deleting repeatedly modified key pipeline batch");
-        vec![0; commands.len()]
+        Err(Error::msg("ERR key pipeline delete conflict"))
     }
 
     /// Atomically delete multiple logical keys without materializing their values or subkeys.
-    pub async fn delete_keys_async(&self, keys: &[String]) -> usize {
+    pub async fn delete_keys_async(&self, keys: &[String]) -> Result<usize, Error> {
         let mut seen = HashSet::with_capacity(keys.len());
         let keys = keys
             .iter()
@@ -202,7 +205,7 @@ impl Db {
             .map(String::as_str)
             .collect::<Vec<_>>();
         if keys.is_empty() {
-            return 0;
+            return Ok(0);
         }
         let shards =
             unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
@@ -210,10 +213,14 @@ impl Db {
 
         for _ in 0..64 {
             for key in &keys {
-                self.expire_if_needed_async(key).await;
+                self.expire_if_needed_async(key).await?;
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = self
+                .store
+                .multi_get_raw_observed_async(&raw_keys)
+                .await
+                .map_err(|error| Error::msg(error.to_string()))?;
             let mut batch = WriteBatch::new();
             let mut conditions = Vec::new();
             let mut deleted = Vec::new();
@@ -245,15 +252,12 @@ impl Db {
                     TYPE_JSON => self.fulltext_enqueue_json_delete_to_batch(&mut batch, key),
                     _ => Ok(()),
                 };
-                if let Err(error) = fulltext {
-                    log::error!("failed to enqueue fulltext delete for {key}: {error}");
-                    return 0;
-                }
+                fulltext?;
                 conditions.push(CompareCondition::from_observed(observed));
                 deleted.push((key, header.type_tag));
             }
             if deleted.is_empty() {
-                return 0;
+                return Ok(0);
             }
             match self
                 .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
@@ -273,17 +277,15 @@ impl Db {
                             log::error!("failed to refresh fulltext delete for {key}: {error}");
                         }
                     }
-                    return deleted.len();
+                    return Ok(deleted.len());
                 }
                 Ok(false) => continue,
                 Err(error) => {
-                    log::error!("failed to delete key batch: {error}");
-                    return 0;
+                    return Err(error);
                 }
             }
         }
-        log::warn!("gave up deleting repeatedly modified key batch");
-        0
+        Err(Error::msg("ERR key batch delete conflict"))
     }
 
     pub(in crate::store::db) fn delete_main_key_with_ttl_to_batch(
@@ -301,9 +303,15 @@ impl Db {
         &self,
         key: &str,
         count_change: bool,
-    ) -> Option<Structure> {
+    ) -> Result<Option<Structure>, Error> {
         let key_bytes = self.mk(key);
-        let raw = self.store.get_raw(&key_bytes)?;
+        let Some(raw) = self
+            .store
+            .get_raw(&key_bytes)
+            .map_err(|error| Error::msg(error.to_string()))?
+        else {
+            return Ok(None);
+        };
 
         let mut batch = WriteBatch::new();
         (batch.delete(&key_bytes)).expect("write batch append invariant violated");
@@ -317,46 +325,47 @@ impl Db {
         }
 
         if let Some(meta) = decode_list_meta(&raw) {
-            let list = self.read_list_items(key, meta.version);
+            let list = self.read_list_items(key, meta.version)?;
             delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_LIST);
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             if count_change {
                 self.changes.fetch_add(1, Ordering::Relaxed);
             }
-            return Some(Structure::List(list));
+            return Ok(Some(Structure::List(list)));
         }
 
         if let Some(meta) = decode_stream_meta(&raw) {
-            let entries = self.read_stream_entries(key, meta.version);
+            let entries = self.read_stream_entries(key, meta.version)?;
             delete_sub_keys_to_batch(&mut batch, self.db_index, key, meta.version, TYPE_STREAM);
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             if count_change {
                 self.changes.fetch_add(1, Ordering::Relaxed);
             }
-            return Some(Structure::Stream(entries));
+            return Ok(Some(Structure::Stream(entries)));
         }
 
-        let (_, version, structure) = decode_entry(&raw)?;
+        let (_, version, structure) =
+            decode_entry(&raw).ok_or_else(|| Error::msg("ERR corrupted stored structure"))?;
         let type_tag = structure_type_tag(&structure);
         let result = match &structure {
             Structure::Hash(_) => {
-                let hash = self.read_hash_fields(key, version);
+                let hash = self.read_hash_fields(key, version)?;
                 Some(Structure::Hash(hash))
             }
             Structure::SortedSet(_) => {
-                let set = self.read_zset_members(key, version);
+                let set = self.read_zset_members(key, version)?;
                 Some(Structure::SortedSet(set))
             }
             Structure::Set(_) => {
-                let set = self.read_set_members(key, version);
+                let set = self.read_set_members(key, version)?;
                 Some(Structure::Set(set))
             }
             Structure::List(_) => {
-                let list = self.read_list_items(key, version);
+                let list = self.read_list_items(key, version)?;
                 Some(Structure::List(list))
             }
             Structure::Stream(_) => {
-                let entries = self.read_stream_entries(key, version);
+                let entries = self.read_stream_entries(key, version)?;
                 Some(Structure::Stream(entries))
             }
             _ => Some(structure),
@@ -367,18 +376,18 @@ impl Db {
             TYPE_HASH => {
                 if let Err(error) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key) {
                     log::error!("failed to enqueue fulltext delete for {key}: {error}");
-                    return None;
+                    return Err(error);
                 }
             }
             TYPE_JSON => {
                 if let Err(error) = self.fulltext_enqueue_json_delete_to_batch(&mut batch, key) {
                     log::error!("failed to enqueue fulltext JSON delete for {key}: {error}");
-                    return None;
+                    return Err(error);
                 }
             }
             _ => {}
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         let refresh = match type_tag {
             TYPE_HASH => self.fulltext_request_refresh(key),
             TYPE_JSON => self.fulltext_request_json_refresh(key),
@@ -390,41 +399,45 @@ impl Db {
         if count_change {
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
-        result
+        Ok(result)
     }
 
     pub(in crate::store::db) async fn remove_internal_async(
         &self,
         key: &str,
         count_change: bool,
-    ) -> Option<Structure> {
+    ) -> Result<Option<Structure>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
-            let raw = observed.value()?;
-            let header = decode_meta_header(raw)?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
+            let Some(raw) = observed.value() else {
+                return Ok(None);
+            };
+            let header = decode_meta_header(raw)
+                .ok_or_else(|| Error::msg("ERR corrupted stored structure"))?;
 
             let result = if let Some(meta) = decode_list_meta(raw) {
-                Structure::List(self.read_list_items_async(key, meta.version).await)
+                Structure::List(self.read_list_items_async(key, meta.version).await?)
             } else if let Some(meta) = decode_stream_meta(raw) {
-                Structure::Stream(self.read_stream_entries_async(key, meta.version).await)
+                Structure::Stream(self.read_stream_entries_async(key, meta.version).await?)
             } else {
-                let (_, version, structure) = decode_entry(raw)?;
+                let (_, version, structure) = decode_entry(raw)
+                    .ok_or_else(|| Error::msg("ERR corrupted stored structure"))?;
                 match structure {
                     Structure::Hash(_) => {
-                        Structure::Hash(self.read_hash_fields_async(key, version).await)
+                        Structure::Hash(self.read_hash_fields_async(key, version).await?)
                     }
                     Structure::SortedSet(_) => {
-                        Structure::SortedSet(self.read_zset_members_async(key, version).await)
+                        Structure::SortedSet(self.read_zset_members_async(key, version).await?)
                     }
                     Structure::Set(_) => {
-                        Structure::Set(self.read_set_members_async(key, version).await)
+                        Structure::Set(self.read_set_members_async(key, version).await?)
                     }
                     Structure::List(_) => {
-                        Structure::List(self.read_list_items_async(key, version).await)
+                        Structure::List(self.read_list_items_async(key, version).await?)
                     }
                     Structure::Stream(_) => {
-                        Structure::Stream(self.read_stream_entries_async(key, version).await)
+                        Structure::Stream(self.read_stream_entries_async(key, version).await?)
                     }
                     structure => structure,
                 }
@@ -450,14 +463,14 @@ impl Db {
                     if let Err(error) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key)
                     {
                         log::error!("failed to enqueue fulltext delete for {key}: {error}");
-                        return None;
+                        return Err(error);
                     }
                 }
                 TYPE_JSON => {
                     if let Err(error) = self.fulltext_enqueue_json_delete_to_batch(&mut batch, key)
                     {
                         log::error!("failed to enqueue fulltext JSON delete for {key}: {error}");
-                        return None;
+                        return Err(error);
                     }
                 }
                 _ => {}
@@ -481,23 +494,23 @@ impl Db {
                     if count_change {
                         self.changes.fetch_add(1, Ordering::Relaxed);
                     }
-                    return Some(result);
+                    return Ok(Some(result));
                 }
                 Ok(false) => continue,
-                Err(error) => {
-                    log::error!("failed to remove key {key}: {error}");
-                    return None;
-                }
+                Err(error) => return Err(error),
             }
         }
-        log::warn!("gave up removing repeatedly modified key {key}");
-        None
+        Err(Error::msg("ERR remove conflict"))
     }
 
-    pub(in crate::store::db) fn delete_key_internal(&self, key: &str, count_change: bool) -> bool {
+    pub(in crate::store::db) fn delete_key_internal(
+        &self,
+        key: &str,
+        count_change: bool,
+    ) -> Result<bool, Error> {
         let key_bytes = self.mk(key);
-        let Some(raw) = self.store.get_raw(&key_bytes) else {
-            return false;
+        let Some(raw) = self.store.get_raw(&key_bytes)? else {
+            return Ok(false);
         };
         let mut batch = WriteBatch::new();
         (batch.delete(&key_bytes)).expect("write batch append invariant violated");
@@ -519,19 +532,19 @@ impl Db {
                 TYPE_HASH => {
                     if let Err(err) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key) {
                         log::error!("failed to enqueue fulltext delete for {key}: {err}");
-                        return false;
+                        return Err(err);
                     }
                 }
                 TYPE_JSON => {
                     if let Err(err) = self.fulltext_enqueue_json_delete_to_batch(&mut batch, key) {
                         log::error!("failed to enqueue fulltext JSON delete for {key}: {err}");
-                        return false;
+                        return Err(err);
                     }
                 }
                 _ => {}
             }
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         if let Some(header) = decode_meta_header(&raw) {
             let refresh = match header.type_tag {
                 TYPE_HASH => self.fulltext_request_refresh(key),
@@ -545,22 +558,22 @@ impl Db {
         if count_change {
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
-        true
+        Ok(true)
     }
 
     pub(in crate::store::db) async fn delete_key_internal_async(
         &self,
         key: &str,
         count_change: bool,
-    ) -> bool {
+    ) -> Result<bool, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
-                return false;
+                return Ok(false);
             };
             let Some(header) = decode_meta_header(raw) else {
-                return false;
+                return Err(Error::msg("ERR corrupted stored structure"));
             };
             let mut batch = WriteBatch::new();
             (batch.delete(&key_bytes)).expect("write batch append invariant violated");
@@ -581,13 +594,13 @@ impl Db {
                 TYPE_HASH => {
                     if let Err(err) = self.fulltext_enqueue_hash_delete_to_batch(&mut batch, key) {
                         log::error!("failed to enqueue fulltext delete for {key}: {err}");
-                        return false;
+                        return Err(err);
                     }
                 }
                 TYPE_JSON => {
                     if let Err(err) = self.fulltext_enqueue_json_delete_to_batch(&mut batch, key) {
                         log::error!("failed to enqueue fulltext JSON delete for {key}: {err}");
-                        return false;
+                        return Err(err);
                     }
                 }
                 _ => {}
@@ -611,16 +624,12 @@ impl Db {
                     if count_change {
                         self.changes.fetch_add(1, Ordering::Relaxed);
                     }
-                    return true;
+                    return Ok(true);
                 }
                 Ok(false) => continue,
-                Err(error) => {
-                    log::error!("failed to delete key {key}: {error}");
-                    return false;
-                }
+                Err(error) => return Err(error),
             }
         }
-        log::warn!("gave up deleting repeatedly modified key {key}");
-        false
+        Err(Error::msg("ERR delete conflict"))
     }
 }

@@ -11,6 +11,7 @@ impl FullTextRuntimeRegistry {
         let key = Self::key(db_index, index);
         self.publish_search_generation(&key, runtime.search_generation());
         self.indexes.insert(key, Arc::new(RwLock::new(runtime)));
+        self.notify_progress(db_index, index);
     }
 
     pub(super) fn get_or_try_insert(
@@ -71,11 +72,13 @@ impl FullTextRuntimeRegistry {
 
     pub(super) fn remove(&self, db_index: u16, index: &str) {
         let key = Self::key(db_index, index);
+        self.notify_progress(db_index, index);
         self.remove_search_generation(&key);
         self.indexes.remove(&key);
         self.outbox_mutations_since_compaction.remove(&key);
         self.outbox_pending.remove(&key);
         self.latest_outbox_seq.remove(&key);
+        self.progress_signals.remove(&key);
         self.aliases
             .retain(|(db, _), target| *db != db_index || target != index);
         self.query_asts
@@ -103,10 +106,12 @@ impl FullTextRuntimeRegistry {
             Entry::Vacant(_) => false,
         };
         if removed {
+            self.notify_progress(db_index, index);
             self.remove_search_generation(&key);
             self.outbox_mutations_since_compaction.remove(&key);
             self.outbox_pending.remove(&key);
             self.latest_outbox_seq.remove(&key);
+            self.progress_signals.remove(&key);
             self.aliases
                 .retain(|(db, _), target| *db != db_index || target != index);
             self.query_asts
@@ -116,6 +121,11 @@ impl FullTextRuntimeRegistry {
     }
 
     pub(crate) fn remove_db(&self, db_index: u16) {
+        for signal in self.progress_signals.iter() {
+            if signal.key().db_index == db_index {
+                signal.value().notify();
+            }
+        }
         self.search_generations.retain(|key, slot| {
             let retain = key.db_index != db_index;
             if !retain && let Some(generation) = slot.swap(None) {
@@ -133,6 +143,8 @@ impl FullTextRuntimeRegistry {
         self.outbox_pending
             .retain(|key, _| key.db_index != db_index);
         self.latest_outbox_seq
+            .retain(|key, _| key.db_index != db_index);
+        self.progress_signals
             .retain(|key, _| key.db_index != db_index);
         self.config_values.retain(|(db, _), _| *db != db_index);
         self.aliases.retain(|(db, _), _| *db != db_index);
@@ -193,16 +205,39 @@ impl FullTextRuntimeRegistry {
             query: query.to_string(),
         };
         if let Some(cached) = self.query_asts.get(&key) {
+            cached.last_access.store(
+                self.query_cache_clock.fetch_add(1, AtomicOrdering::Relaxed),
+                AtomicOrdering::Relaxed,
+            );
             global_metrics().record_fulltext_query_cache(true);
-            return Ok(cached.value().clone());
+            return Ok(Arc::clone(&cached.ast));
         }
         let parsed = Arc::new(FullTextQueryParser::new(query, dialect).parse()?);
         if self.query_asts.len() >= MAX_CACHED_QUERIES {
-            self.query_asts.clear();
+            let _eviction = self
+                .query_cache_eviction_lock
+                .lock()
+                .map_err(|_| Error::msg("ERR fulltext query cache lock poisoned"))?;
+            if self.query_asts.len() >= MAX_CACHED_QUERIES
+                && let Some(oldest) = self
+                    .query_asts
+                    .iter()
+                    .min_by_key(|entry| entry.last_access.load(AtomicOrdering::Relaxed))
+                    .map(|entry| entry.key().clone())
+            {
+                self.query_asts.remove(&oldest);
+            }
         }
-        let cached = self.query_asts.entry(key).or_insert_with(|| parsed.clone());
+        let access = self.query_cache_clock.fetch_add(1, AtomicOrdering::Relaxed);
+        let cached = self
+            .query_asts
+            .entry(key)
+            .or_insert_with(|| FullTextQueryCacheEntry {
+                ast: Arc::clone(&parsed),
+                last_access: AtomicU64::new(access),
+            });
         global_metrics().record_fulltext_query_cache(false);
-        Ok(cached.value().clone())
+        Ok(Arc::clone(&cached.ast))
     }
 
     pub(super) fn lifecycle_lock(&self, db_index: u16, index: &str) -> Arc<RwLock<()>> {
@@ -318,6 +353,23 @@ impl FullTextRuntimeRegistry {
             .entry(Self::key(db_index, index))
             .or_default();
         *latest = (*latest).max(seq);
+    }
+
+    pub(super) fn progress_signal(
+        &self,
+        db_index: u16,
+        index: &str,
+    ) -> Arc<FullTextProgressSignal> {
+        self.progress_signals
+            .entry(Self::key(db_index, index))
+            .or_default()
+            .clone()
+    }
+
+    pub(super) fn notify_progress(&self, db_index: u16, index: &str) {
+        if let Some(signal) = self.progress_signals.get(&Self::key(db_index, index)) {
+            signal.notify();
+        }
     }
 
     pub(super) fn note_outbox_mutations(&self, db_index: u16, index: &str, delta: usize) {

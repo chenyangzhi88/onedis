@@ -231,6 +231,5 @@ include!("full_text/explain_info_auxiliary.rs");
 include!("full_text/parsing_helpers.rs");
 
 #[cfg(test)]
-mod tests {
-    include!("full_text/tests.rs");
-}
+#[path = "full_text/tests.rs"]
+mod tests;

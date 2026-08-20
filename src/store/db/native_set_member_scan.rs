@@ -1,11 +1,15 @@
 use super::*;
 
 impl Db {
-    pub(in crate::store::db) fn set_members_raw(&self, key: &str, version: u64) -> Vec<Vec<u8>> {
+    pub(in crate::store::db) fn set_members_raw(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Result<Vec<Vec<u8>>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_set)
                 .map(|members| {
@@ -14,30 +18,31 @@ impl Db {
                         .map(String::into_bytes)
                         .collect::<Vec<_>>()
                 })
-                .unwrap_or_default();
+                .unwrap_or_default());
         }
         let prefix = set_member_prefix(self.db_index, key, version);
-        self.store
-            .scan_prefix_raw(&prefix)
+        Ok(self
+            .store
+            .scan_prefix_raw(&prefix)?
             .into_iter()
             .filter_map(|(member_key, _)| {
                 member_key
                     .strip_prefix(prefix.as_slice())
                     .map(|member| member.to_vec())
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn set_members_raw_async(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_set)
                 .map(|members| {
@@ -46,18 +51,19 @@ impl Db {
                         .map(String::into_bytes)
                         .collect::<Vec<_>>()
                 })
-                .unwrap_or_default();
+                .unwrap_or_default());
         }
         let prefix = set_member_prefix(self.db_index, key, version);
-        self.store
+        Ok(self
+            .store
             .scan_prefix_raw_async(&prefix)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(member_key, _)| {
                 member_key
                     .strip_prefix(prefix.as_slice())
                     .map(|member| member.to_vec())
             })
-            .collect()
+            .collect())
     }
 }

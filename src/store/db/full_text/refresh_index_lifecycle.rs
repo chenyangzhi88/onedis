@@ -66,15 +66,6 @@ impl Db {
         self.fulltext_refresh_index_mode(index, force, external_deadline, true, true)
     }
 
-    fn fulltext_publish_index_inner(
-        &self,
-        index: &str,
-        force: bool,
-        external_deadline: Option<Instant>,
-    ) -> Result<(), Error> {
-        self.fulltext_refresh_index_mode(index, force, external_deadline, false, false)
-    }
-
     pub(super) fn fulltext_refresh_index_mode(
         &self,
         index: &str,
@@ -136,15 +127,15 @@ impl Db {
                     .unwrap_or_else(|| now + Duration::from_secs(100 * 365 * 24 * 60 * 60))
             }
         };
-        let result = self.fulltext_apply_pending(
+        let result = self.fulltext_apply_pending(FullTextApplyPending {
             index,
-            &mut meta,
-            &expected_meta_raw,
-            &runtime,
-            &policy,
+            meta: &mut meta,
+            expected_meta_raw: &expected_meta_raw,
+            runtime: &runtime,
+            policy: &policy,
             deadline,
             durable_checkpoint,
-        );
+        });
         if let Err(err) = result {
             if self.fulltext_mark_dirty_if_incarnation(index, meta.incarnation)? {
                 self.fulltext_runtimes.remove_if_incarnation(
@@ -163,52 +154,46 @@ impl Db {
         index: &str,
         deadline: Instant,
     ) -> Result<bool, Error> {
-        self.ensure_fulltext_runtime(index)?;
-        if self.fulltext_refresh_progress(index)?.0 {
-            return Ok(true);
+        if self.fulltext_runtimes.get(self.db_index, index).is_none() {
+            return Err(Error::msg("INDEX_NOT_READY fulltext runtime is loading"));
         }
-        let refresh_lock = self.fulltext_runtimes.refresh_lock(self.db_index, index);
-        let _refresh_guard = refresh_lock
-            .lock()
-            .map_err(|_| Error::msg("ERR fulltext refresh lock poisoned"))?;
+        let target_sequence = self.fulltext_latest_outbox_seq(index)?.unwrap_or(0);
+        let signal = self.fulltext_runtimes.progress_signal(self.db_index, index);
         loop {
-            let before = self.fulltext_refresh_progress(index)?;
-            if before.0 {
+            let runtime = self
+                .fulltext_runtimes
+                .get(self.db_index, index)
+                .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
+            let caught_up = {
+                let runtime = runtime
+                    .read()
+                    .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+                runtime.published_outbox_seq() >= target_sequence && runtime.backfill_complete
+            };
+            if caught_up {
                 return Ok(true);
             }
             if Instant::now() >= deadline {
                 return Ok(false);
             }
-            let started = Instant::now();
-            let result = self.fulltext_publish_index_inner(index, true, Some(deadline));
-            global_metrics().record_fulltext_refresh(elapsed_us(started), result.is_err());
-            result?;
-            let after = self.fulltext_refresh_progress(index)?;
-            if after.0 {
+            let observed = signal.generation()?;
+            let runtime = self
+                .fulltext_runtimes
+                .get(self.db_index, index)
+                .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
+            let caught_up = {
+                let runtime = runtime
+                    .read()
+                    .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
+                runtime.published_outbox_seq() >= target_sequence && runtime.backfill_complete
+            };
+            if caught_up {
                 return Ok(true);
             }
-            if after == before || Instant::now() >= deadline {
+            if !signal.wait_for_change(observed, deadline)? {
                 return Ok(false);
             }
         }
-    }
-
-    pub(super) fn fulltext_refresh_progress(
-        &self,
-        index: &str,
-    ) -> Result<(bool, usize, Option<String>), Error> {
-        let runtime = self
-            .fulltext_runtimes
-            .get(self.db_index, index)
-            .ok_or_else(|| Error::msg("ERR fulltext index does not exist"))?;
-        let runtime = runtime
-            .read()
-            .map_err(|_| Error::msg("ERR fulltext runtime lock poisoned"))?;
-        let published_seq = runtime.published_outbox_seq();
-        let latest = self.fulltext_latest_outbox_seq(index).unwrap_or(0);
-        let pending = latest.saturating_sub(published_seq).min(usize::MAX as u64) as usize;
-        let complete = pending == 0 && runtime.backfill_complete;
-        Ok((complete, pending, runtime.published_backfill_cursor.clone()))
     }
 
     pub(super) fn fulltext_rebuild_index(&self, index: &str) -> Result<(), Error> {
@@ -241,18 +226,22 @@ impl Db {
         let runtime = match stage_result {
             Ok(runtime) => runtime,
             Err(error) => {
-                self.fulltext_cleanup_generation(index, &meta);
+                if let Err(cleanup_error) = self.fulltext_cleanup_generation(index, &meta) {
+                    log::warn!("failed to clean staged fulltext rebuild: {cleanup_error}");
+                }
                 return Err(error);
             }
         };
         meta.indexed_docs = runtime.num_docs();
-        meta.indexed_bytes = self.fulltext_file_bytes(&meta.active_storage) as u64;
+        meta.indexed_bytes = self.fulltext_file_bytes(&meta.active_storage)? as u64;
         meta.state = FullTextIndexState::Ready;
         let mut swap_batch = WriteBatch::new();
         if let Err(error) =
             self.fulltext_write_meta_cas(index, &expected_meta_raw, &mut meta, &mut swap_batch)
         {
-            self.fulltext_cleanup_generation(index, &meta);
+            if let Err(cleanup_error) = self.fulltext_cleanup_generation(index, &meta) {
+                log::warn!("failed to clean uncommitted fulltext rebuild: {cleanup_error}");
+            }
             return Err(error);
         }
         self.fulltext_runtimes.insert(self.db_index, index, runtime);
@@ -261,7 +250,7 @@ impl Db {
         if previous_storage != meta.active_storage {
             let mut cleanup = WriteBatch::new();
             self.delete_fulltext_storage_to_batch(&mut cleanup, &previous_storage)?;
-            self.write_batch_if_not_empty(&cleanup);
+            self.write_batch_if_not_empty(&cleanup)?;
         }
         self.fulltext_delete_vector_indexes(index, &old_meta);
         self.fulltext_refresh_index_inner(index, true, None)
@@ -350,7 +339,7 @@ impl Db {
         let now = current_fulltext_millis();
         let throttle_ms = self.fulltext_repair_throttle_ms()?;
         let marker = fulltext_repair_marker_key(self.db_index, index);
-        if let Some(raw) = self.store.get_raw(&marker)
+        if let Some(raw) = self.store.get_raw(&marker)?
             && let Ok(value) = String::from_utf8(raw)
             && let Ok(previous) = value.parse::<u64>()
             && now.saturating_sub(previous) < throttle_ms
@@ -361,7 +350,7 @@ impl Db {
         batch
             .put(&marker, now.to_string().as_bytes())
             .map_err(|error| Error::msg(error.to_string()))?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         Ok(true)
     }
 }

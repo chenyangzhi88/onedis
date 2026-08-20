@@ -20,12 +20,12 @@ impl Pttl {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let millis = db.ttl_millis_readonly(&self.key);
+        let millis = db.ttl_millis_readonly(&self.key)?;
         Ok(Frame::Integer(millis))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        let millis = db.ttl_millis_readonly_async(&self.key).await;
+        let millis = db.ttl_millis_readonly_async(&self.key).await?;
         Ok(Frame::Integer(millis))
     }
 }

@@ -32,13 +32,13 @@ impl Db {
         }
         if let Some(raw) = self
             .store
-            .get_raw(&fulltext_meta_key(self.db_index, index_or_alias))
+            .get_raw(&fulltext_meta_key(self.db_index, index_or_alias))?
         {
             let meta = decode_fulltext_meta_for_index(index_or_alias, &raw)?;
             if matches!(meta.state, FullTextIndexState::Dropping) {
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
-            if self.fulltext_index_expired(index_or_alias, &meta) {
+            if self.fulltext_index_expired(index_or_alias, &meta)? {
                 self.fulltext_purge_index(index_or_alias, &meta)?;
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
@@ -50,7 +50,7 @@ impl Db {
             if matches!(meta.state, FullTextIndexState::Dropping) {
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
-            if self.fulltext_index_expired(&alias.index, &meta) {
+            if self.fulltext_index_expired(&alias.index, &meta)? {
                 self.fulltext_purge_index(&alias.index, &meta)?;
                 return Err(Error::msg("ERR fulltext index does not exist"));
             }
@@ -84,7 +84,10 @@ impl Db {
         &self,
         index: &str,
     ) -> Result<Option<(FullTextIndexMeta, Vec<u8>)>, Error> {
-        let Some(raw) = self.store.get_raw(&fulltext_meta_key(self.db_index, index)) else {
+        let Some(raw) = self
+            .store
+            .get_raw(&fulltext_meta_key(self.db_index, index))?
+        else {
             return Ok(None);
         };
         Ok(Some((decode_fulltext_meta_for_index(index, &raw)?, raw)))
@@ -145,7 +148,7 @@ impl Db {
         alias: &str,
     ) -> Result<Option<FullTextAliasMeta>, Error> {
         self.store
-            .get_raw(&fulltext_alias_key(self.db_index, alias))
+            .get_raw(&fulltext_alias_key(self.db_index, alias))?
             .map(|raw| decode_record::<FullTextAliasMeta>(&raw))
             .transpose()
     }
@@ -162,7 +165,7 @@ impl Db {
                 && route.prefixes.iter().any(|prefix| key.starts_with(prefix))
         }) {
             let meta = route.meta.clone();
-            if self.fulltext_index_expired(&route.index, &meta)
+            if self.fulltext_index_expired(&route.index, &meta)?
                 || matches!(meta.state, FullTextIndexState::Dropping)
             {
                 continue;
@@ -200,64 +203,64 @@ impl Db {
             .invalidate_source_routes(self.db_index);
     }
 
-    pub(super) fn fulltext_pending_outbox_count(&self, index: &str) -> u64 {
+    pub(super) fn fulltext_pending_outbox_count(&self, index: &str) -> Result<u64, Error> {
         if let Some(pending) = self.fulltext_runtimes.outbox_pending(self.db_index, index) {
-            return pending;
+            return Ok(pending);
         }
         let pending = self.store.scan_range_raw_visit(
             &fulltext_outbox_prefix(self.db_index, index),
             prefix_exclusive_upper_bound(&fulltext_outbox_prefix(self.db_index, index)),
             usize::MAX,
             |_, _| true,
-        ) as u64;
+        )? as u64;
         self.fulltext_runtimes
             .set_outbox_pending(self.db_index, index, pending);
-        pending
+        Ok(pending)
     }
 
-    pub(super) fn fulltext_latest_outbox_seq(&self, index: &str) -> Option<u64> {
+    pub(super) fn fulltext_latest_outbox_seq(&self, index: &str) -> Result<Option<u64>, Error> {
         if let Some(seq) = self
             .fulltext_runtimes
             .latest_outbox_seq(self.db_index, index)
         {
-            return (seq > 0).then_some(seq);
+            return Ok((seq > 0).then_some(seq));
         }
         if let Some(seq) = self
             .store
-            .get_raw(&fulltext_outbox_latest_key(self.db_index, index))
+            .get_raw(&fulltext_outbox_latest_key(self.db_index, index))?
             .and_then(|raw| raw.try_into().ok())
             .map(u64::from_be_bytes)
         {
             self.fulltext_runtimes
                 .note_latest_outbox_seq(self.db_index, index, seq);
-            return Some(seq);
+            return Ok(Some(seq));
         }
         let prefix = fulltext_outbox_prefix(self.db_index, index);
         let latest = self
             .store
-            .scan_range_raw_limited_reverse(&prefix, prefix_exclusive_upper_bound(&prefix), 1)
+            .scan_range_raw_limited_reverse(&prefix, prefix_exclusive_upper_bound(&prefix), 1)?
             .into_iter()
             .find_map(|(key, _)| fulltext_outbox_seq_from_key(self.db_index, index, &key));
         self.fulltext_runtimes
             .note_latest_outbox_seq(self.db_index, index, latest.unwrap_or(0));
-        latest
+        Ok(latest)
     }
 
     pub(super) fn fulltext_unpublished_outbox_count(
         &self,
         index: &str,
         published_seq: u64,
-    ) -> usize {
+    ) -> Result<usize, Error> {
         let Some(start_seq) = published_seq.checked_add(1) else {
-            return 0;
+            return Ok(0);
         };
         let prefix = fulltext_outbox_prefix(self.db_index, index);
-        self.store.scan_range_raw_visit(
+        Ok(self.store.scan_range_raw_visit(
             &fulltext_outbox_key(self.db_index, index, start_seq),
             prefix_exclusive_upper_bound(&prefix),
             usize::MAX,
             |_, _| true,
-        )
+        )?)
     }
 
     pub(super) fn fulltext_source_keys_page(
@@ -326,9 +329,9 @@ impl Db {
         let mut keys = Vec::new();
         let mut exhausted = false;
         while keys.len() < limit && !exhausted {
-            let entries = self
-                .store
-                .scan_range_raw_limited(&lower, upper.clone(), RAW_SCAN_CHUNK);
+            let entries =
+                self.store
+                    .scan_range_raw_limited(&lower, upper.clone(), RAW_SCAN_CHUNK)?;
             if entries.is_empty() {
                 exhausted = true;
                 break;
@@ -359,7 +362,7 @@ impl Db {
                     continue;
                 }
                 if header.expire_ms > 0 && current_fulltext_millis() >= header.expire_ms {
-                    self.expire_if_needed(&key);
+                    self.expire_if_needed(&key)?;
                     continue;
                 }
                 if after.is_none_or(|cursor| key.as_str() > cursor) {
@@ -392,7 +395,7 @@ impl Db {
         let mut aliases = Vec::new();
         for (key, raw) in self
             .store
-            .scan_prefix_raw(&fulltext_alias_prefix(self.db_index))
+            .scan_prefix_raw(&fulltext_alias_prefix(self.db_index))?
         {
             let Some(alias) = fulltext_alias_from_key(self.db_index, &key) else {
                 continue;
@@ -442,13 +445,14 @@ impl Db {
     pub(super) fn fulltext_config_value(&self, name: &str) -> Result<Option<String>, Error> {
         self.fulltext_runtimes
             .config_value(self.db_index, name, || {
-                self.store
-                    .get_raw(&fulltext_config_key(self.db_index, name))
-                    .map(|raw| {
-                        String::from_utf8(raw)
-                            .map_err(|_| Error::msg("ERR failed to decode fulltext config"))
-                    })
-                    .transpose()
+                let raw = self
+                    .store
+                    .get_raw(&fulltext_config_key(self.db_index, name))?;
+                raw.map(|raw| {
+                    String::from_utf8(raw)
+                        .map_err(|_| Error::msg("ERR failed to decode fulltext config"))
+                })
+                .transpose()
             })
     }
 
@@ -637,17 +641,22 @@ impl Db {
             .unwrap_or_else(|| default.to_string()))
     }
 
-    pub(super) fn fulltext_index_expired(&self, index: &str, meta: &FullTextIndexMeta) -> bool {
+    pub(super) fn fulltext_index_expired(
+        &self,
+        index: &str,
+        meta: &FullTextIndexMeta,
+    ) -> Result<bool, Error> {
         let Some(seconds) = meta.index_options.temporary_seconds else {
-            return false;
+            return Ok(false);
         };
         let last_activity_ms = self
             .store
-            .get_raw(&fulltext_temporary_activity_key(self.db_index, index))
+            .get_raw(&fulltext_temporary_activity_key(self.db_index, index))?
             .and_then(|raw| raw.try_into().ok())
             .map(u64::from_be_bytes)
             .unwrap_or(0);
-        current_fulltext_millis() >= last_activity_ms.saturating_add(seconds.saturating_mul(1_000))
+        Ok(current_fulltext_millis()
+            >= last_activity_ms.saturating_add(seconds.saturating_mul(1_000)))
     }
 
     pub(super) fn fulltext_touch_temporary_index(
@@ -665,12 +674,13 @@ impl Db {
                 &current_fulltext_millis().to_be_bytes(),
             )
             .map_err(|error| Error::msg(error.to_string()))?;
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         Ok(())
     }
 
-    pub(super) fn fulltext_file_bytes(&self, index: &str) -> usize {
+    pub(super) fn fulltext_file_bytes(&self, index: &str) -> Result<usize, Error> {
         KvTantivyDirectory::storage_bytes(&self.store, self.db_index, index)
+            .map_err(|error| Error::msg(error.to_string()))
     }
 
     pub(super) fn read_all_fulltext_metas(
@@ -679,7 +689,7 @@ impl Db {
         let mut metas = Vec::new();
         for (key, raw) in self
             .store
-            .scan_prefix_raw(&fulltext_meta_prefix(self.db_index))
+            .scan_prefix_raw(&fulltext_meta_prefix(self.db_index))?
         {
             let Some(index) = fulltext_index_from_meta_key(self.db_index, &key) else {
                 continue;
@@ -699,7 +709,7 @@ impl Db {
     pub(super) fn fulltext_dict_terms(&self, dict: &str) -> Result<HashSet<String>, Error> {
         Ok(self
             .store
-            .scan_prefix_raw(&fulltext_dict_prefix(self.db_index, dict))
+            .scan_prefix_raw(&fulltext_dict_prefix(self.db_index, dict))?
             .into_iter()
             .filter_map(|(key, _)| fulltext_dict_term_from_key(self.db_index, dict, &key))
             .collect())

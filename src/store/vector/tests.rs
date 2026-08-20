@@ -25,7 +25,8 @@ fn integration_test_db(prefix: &str, layout: KeyEncodingLayout) -> Db {
     let store = KvStore::new(db_path, wal_dir, 1);
     store
         .for_db_index(0)
-        .put_raw(KEY_ENCODING_LAYOUT_META_KEY, layout.encode());
+        .put_raw(KEY_ENCODING_LAYOUT_META_KEY, layout.encode())
+        .unwrap();
     let version_counter = Arc::new(VersionCounter::new());
     let ttl_manager = TtlManager::new(store.clone(), TtlConfig::default());
     Db::new(0, store, version_counter, ttl_manager)
@@ -102,6 +103,21 @@ fn meta(distance: VectorDistance) -> VectorIndexMeta {
         internal: false,
         algorithm: VectorIndexAlgorithm::Hnsw,
     }
+}
+
+#[test]
+fn vector_runtime_reuses_immutable_memtable_snapshots_between_writes() {
+    let config = VectorRuntimeConfig::from(&meta(VectorDistance::L2));
+    let mut runtime = VectorRuntime::new(config, 1);
+    runtime.upsert("a".to_string(), 1, vec![0.0, 0.0]).unwrap();
+    let first = runtime.search_snapshot();
+    let second = runtime.search_snapshot();
+    assert!(Arc::ptr_eq(&first.memtable, &second.memtable));
+
+    runtime.upsert("b".to_string(), 2, vec![1.0, 0.0]).unwrap();
+    let third = runtime.search_snapshot();
+    assert!(!Arc::ptr_eq(&second.memtable, &third.memtable));
+    assert_eq!(third.memtable.len(), 2);
 }
 
 #[test]
@@ -226,13 +242,15 @@ fn vector_doc_result_window_reduce_and_binary_helpers_cover_edges() {
     let result = runtime_doc_to_search_result(
         "doc1",
         &doc,
-        &meta,
-        &[1.0, 2.0],
-        5.0,
         None,
-        &["brand".to_string()],
-        true,
-        &parse_filter("brand == acme").unwrap(),
+        &VectorResultContext {
+            meta: &meta,
+            query: &[1.0, 2.0],
+            query_norm_squared: 5.0,
+            return_attrs: &["brand".to_string()],
+            return_attrs_json: true,
+            filters: &parse_filter("brand == acme").unwrap(),
+        },
     )
     .unwrap()
     .unwrap();
@@ -249,13 +267,15 @@ fn vector_doc_result_window_reduce_and_binary_helpers_cover_edges() {
         runtime_doc_to_search_result(
             "doc1",
             &doc,
-            &meta,
-            &[1.0, 2.0],
-            5.0,
             None,
-            &[],
-            false,
-            &parse_filter("brand == other").unwrap(),
+            &VectorResultContext {
+                meta: &meta,
+                query: &[1.0, 2.0],
+                query_norm_squared: 5.0,
+                return_attrs: &[],
+                return_attrs_json: false,
+                filters: &parse_filter("brand == other").unwrap(),
+            },
         )
         .unwrap()
         .is_none()
@@ -410,12 +430,12 @@ fn hnsw_graph_persisted_topology_and_registry_paths_cover_edges() {
     };
     let decoded_v2 = decode_vector_hnsw_index(&encode_record(&legacy_v2).unwrap()).unwrap();
     decoded_v2.validate().unwrap();
-    assert_eq!(decoded_v2.q8_norms, vec![q8_norm_squared(&legacy_q8_values)]);
-
-    let mut runtime = VectorRuntime::new(
-        VectorRuntimeConfig::from(&meta(VectorDistance::L2)),
-        10,
+    assert_eq!(
+        decoded_v2.q8_norms,
+        vec![q8_norm_squared(&legacy_q8_values)]
     );
+
+    let mut runtime = VectorRuntime::new(VectorRuntimeConfig::from(&meta(VectorDistance::L2)), 10);
     assert!(runtime.memtable_batch(2, false).is_none());
     runtime.upsert("r1".to_string(), 1, vec![1.0, 0.0]).unwrap();
     runtime.upsert("r2".to_string(), 2, vec![0.0, 1.0]).unwrap();
@@ -427,14 +447,8 @@ fn hnsw_graph_persisted_topology_and_registry_paths_cover_edges() {
             .map(VectorSegmentEntry::from)
             .collect(),
     });
-    let mut persisted_graph = HnswGraph::new(
-        2,
-        VectorDistance::L2,
-        4,
-        8,
-        2,
-        VectorQuantization::F32,
-    );
+    let mut persisted_graph =
+        HnswGraph::new(2, VectorDistance::L2, 4, 8, 2, VectorQuantization::F32);
     for doc in &source.entries {
         persisted_graph
             .upsert(doc.id.clone(), doc.doc_version, doc.vector.clone())
@@ -494,10 +508,7 @@ fn hnsw_graph_persisted_topology_and_registry_paths_cover_edges() {
     assert_eq!(segmented.next_segment_id, 20);
     assert_eq!(segmented.segments.len(), 1);
 
-    let mut recovered = VectorRuntime::new(
-        VectorRuntimeConfig::from(&meta(VectorDistance::L2)),
-        1,
-    );
+    let mut recovered = VectorRuntime::new(VectorRuntimeConfig::from(&meta(VectorDistance::L2)), 1);
     recovered.reconcile_docs(
         vec![
             VectorDocRecord {
@@ -643,6 +654,7 @@ fn vector_legacy_layout_round_trips_and_drop_deletes_namespace() {
                 "legacy-index",
                 version,
             ))
+            .unwrap()
             .is_empty()
     );
 
@@ -657,6 +669,7 @@ fn vector_legacy_layout_round_trips_and_drop_deletes_namespace() {
                 "legacy-index",
                 version,
             ))
+            .unwrap()
             .is_empty()
     );
 }
@@ -671,21 +684,22 @@ fn vector_lsm_flushes_source_then_builds_index() {
     let (_, version, meta_after_two) = db.read_vector_meta("idx").unwrap();
     let segment_prefix = vector_segment_prefix(db.key_layout, 0, "idx", version);
     assert_eq!(meta_after_two.snapshot_doc_version, 0);
-    assert_eq!(db.store.scan_prefix_raw(&segment_prefix).len(), 0);
+    assert_eq!(db.store.scan_prefix_raw(&segment_prefix).unwrap().len(), 0);
     let runtime = db.vector_runtimes.get(0, "idx", version).unwrap();
     assert_eq!(runtime.read().unwrap().memtable_len(), 2);
 
     db.vector_maintenance_tick().unwrap();
     let (_, _, meta_after_two) = db.read_vector_meta("idx").unwrap();
     assert_eq!(meta_after_two.snapshot_doc_version, 2);
-    let segment_raw = db.store.scan_prefix_raw(&segment_prefix);
+    let segment_raw = db.store.scan_prefix_raw(&segment_prefix).unwrap();
     assert_eq!(segment_raw.len(), 1);
     let segment = decode_record::<VectorSegmentMeta>(&segment_raw[0].1).unwrap();
     assert!(segment.index_key.is_empty());
-    assert!(db.store.get_raw(&segment.source_key).is_some());
+    assert!(db.store.get_raw(&segment.source_key).unwrap().is_some());
     let meta_key = vector_meta_key(db.key_layout, 0, "idx", version);
     let meta_before_reload = db.store.get_raw(&meta_key).unwrap();
     db.vector_runtimes.remove(0, "idx", version);
+    db.load_vector_runtimes_for_startup().unwrap();
     let brute_force = db
         .vector_search("idx", &[0.0, 0.0], search_options(1))
         .unwrap();
@@ -693,15 +707,15 @@ fn vector_lsm_flushes_source_then_builds_index() {
     assert_eq!(db.store.get_raw(&meta_key).unwrap(), meta_before_reload);
 
     db.vector_maintenance_tick().unwrap();
-    let segment_raw = db.store.scan_prefix_raw(&segment_prefix);
+    let segment_raw = db.store.scan_prefix_raw(&segment_prefix).unwrap();
     let segment = decode_record::<VectorSegmentMeta>(&segment_raw[0].1).unwrap();
     assert!(!segment.index_key.is_empty());
-    assert!(db.store.get_raw(&segment.index_key).is_some());
+    assert!(db.store.get_raw(&segment.index_key).unwrap().is_some());
 
     db.vector_add("idx", "c", vec![2.0, 0.0], None).unwrap();
     let (_, _, meta_after_three) = db.read_vector_meta("idx").unwrap();
     assert_eq!(meta_after_three.snapshot_doc_version, 2);
-    assert_eq!(db.store.scan_prefix_raw(&segment_prefix).len(), 1);
+    assert_eq!(db.store.scan_prefix_raw(&segment_prefix).unwrap().len(), 1);
 }
 
 #[test]
@@ -731,18 +745,17 @@ fn vector_lsm_merges_indexed_segments_and_reloads_topology() {
 
     let (_, version, _) = db.read_vector_meta("idx").unwrap();
     let prefix = vector_segment_prefix(db.key_layout, 0, "idx", version);
-    let persisted_segments = db.store.scan_prefix_raw(&prefix);
+    let persisted_segments = db.store.scan_prefix_raw(&prefix).unwrap();
     assert_eq!(persisted_segments.len(), 1);
     let merged = decode_record::<VectorSegmentMeta>(&persisted_segments[0].1).unwrap();
     assert_eq!(merged.level, 2);
     assert_eq!(merged.doc_count, 8);
     assert!(!merged.index_key.is_empty());
-    let source = decode_record::<VectorSegmentBlob>(
-        &db.store.get_raw(&merged.source_key).unwrap(),
-    )
-    .unwrap();
+    let source =
+        decode_record::<VectorSegmentBlob>(&db.store.get_raw(&merged.source_key).unwrap().unwrap())
+            .unwrap();
     let topology = decode_record::<VectorHnswIndexBlob>(
-        &db.store.get_raw(&merged.index_key).unwrap(),
+        &db.store.get_raw(&merged.index_key).unwrap().unwrap(),
     )
     .unwrap();
     assert_eq!(source.entries.len(), 8);
@@ -754,6 +767,7 @@ fn vector_lsm_merges_indexed_segments_and_reloads_topology() {
     let source_before_recovery = db.store.get_raw(&merged.source_key).unwrap();
     let index_before_recovery = db.store.get_raw(&merged.index_key).unwrap();
     db.vector_runtimes.remove(0, "idx", version);
+    db.load_vector_runtimes_for_startup().unwrap();
     let results = db
         .vector_search("idx", &[0.0, 0.0], search_options(2))
         .unwrap();
@@ -831,8 +845,13 @@ fn quantized_ann_unloads_fp32_sources_after_optional_rerank() {
     db.vector_create("idx", options).unwrap();
     for ordinal in 0..128 {
         let angle = (ordinal as f32) * 0.03125;
-        db.vector_add("idx", &format!("doc-{ordinal}"), vec![angle.cos(), angle.sin()], None)
-            .unwrap();
+        db.vector_add(
+            "idx",
+            &format!("doc-{ordinal}"),
+            vec![angle.cos(), angle.sin()],
+            None,
+        )
+        .unwrap();
     }
     db.vector_maintenance_tick().unwrap();
     db.vector_maintenance_tick().unwrap();
@@ -893,6 +912,7 @@ fn quantized_backends_rerank_with_original_vectors_and_survive_reload() {
         db.vector_maintenance_tick().unwrap();
         let (_, version, _) = db.read_vector_meta("idx").unwrap();
         db.vector_runtimes.remove(0, "idx", version);
+        db.load_vector_runtimes_for_startup().unwrap();
         let approximate = db
             .vector_search("idx", &[1.0, 0.0], search_options(1))
             .unwrap();
@@ -932,6 +952,7 @@ fn reduced_vectors_reuse_the_persisted_projection_after_reload() {
     db.vector_maintenance_tick().unwrap();
     let (_, version, _) = db.read_vector_meta("idx").unwrap();
     db.vector_runtimes.remove(0, "idx", version);
+    db.load_vector_runtimes_for_startup().unwrap();
     let reloaded = db
         .vector_search("idx", &[1.0, 0.0, 9.0], search_options(2))
         .unwrap();
@@ -964,6 +985,7 @@ fn vector_compaction_rewrites_partial_stale_segments_and_recovery_is_read_only()
     assert!(
         db.store
             .get_raw(&vector_doc_key(db.key_layout, 0, "idx", version, "b"))
+            .unwrap()
             .is_none()
     );
 
@@ -972,8 +994,10 @@ fn vector_compaction_rewrites_partial_stale_segments_and_recovery_is_read_only()
     let segment_count_before = db
         .store
         .scan_prefix_raw(&vector_segment_prefix(db.key_layout, 0, "idx", version))
+        .unwrap()
         .len();
     db.vector_runtimes.remove(0, "idx", version);
+    db.load_vector_runtimes_for_startup().unwrap();
     let results = db
         .vector_search("idx", &[0.25, 0.0], search_options(1))
         .unwrap();
@@ -982,6 +1006,7 @@ fn vector_compaction_rewrites_partial_stale_segments_and_recovery_is_read_only()
     assert_eq!(
         db.store
             .scan_prefix_raw(&vector_segment_prefix(db.key_layout, 0, "idx", version))
+            .unwrap()
             .len(),
         segment_count_before
     );
@@ -998,7 +1023,7 @@ fn generic_delete_evicts_vector_runtime() {
     let (_, version, _) = db.read_vector_meta("idx").unwrap();
     assert!(db.vector_runtimes.get(0, "idx", version).is_some());
 
-    assert!(db.delete_key("idx"));
+    assert!(db.delete_key("idx").unwrap());
     assert!(db.vector_runtimes.get(0, "idx", version).is_none());
 }
 
@@ -1008,18 +1033,20 @@ fn stale_vector_commit_cannot_resurrect_a_deleted_key() {
     db.vector_create("idx", create_options("L2", None)).unwrap();
     let (expire_ms, version, meta, marker_raw, meta_raw, _state_raw) =
         db.read_vector_meta_observed("idx").unwrap();
-    assert!(db.delete_key("idx"));
+    assert!(db.delete_key("idx").unwrap());
 
     let mut stale_batch = WriteBatch::new();
     put_vector_marker_to_batch(
         &mut stale_batch,
-        db.key_layout,
-        db.db_index,
-        "idx",
-        expire_ms,
-        version,
-        meta.dim,
-        meta.internal,
+        VectorMarker {
+            layout: db.key_layout,
+            db_index: db.db_index,
+            index: "idx",
+            expire_ms,
+            version,
+            dim: meta.dim,
+            internal: meta.internal,
+        },
     )
     .unwrap();
     stale_batch
@@ -1039,7 +1066,7 @@ fn stale_vector_commit_cannot_resurrect_a_deleted_key() {
         )
         .is_err()
     );
-    assert!(db.store.get_raw(&db.mk("idx")).is_none());
+    assert!(db.store.get_raw(&db.mk("idx")).unwrap().is_none());
 }
 
 #[test]
@@ -1050,15 +1077,13 @@ fn stale_vector_maintenance_cannot_touch_a_recreated_generation() {
     );
     db.vector_create("idx", create_options("L2", Some(2)))
         .unwrap();
-    db.vector_add("idx", "old", vec![0.0, 0.0], None)
-        .unwrap();
+    db.vector_add("idx", "old", vec![0.0, 0.0], None).unwrap();
     let (_, old_version, _) = db.read_vector_meta("idx").unwrap();
     db.vector_drop("idx").unwrap();
 
     db.vector_create("idx", create_options("L2", Some(2)))
         .unwrap();
-    db.vector_add("idx", "new", vec![1.0, 0.0], None)
-        .unwrap();
+    db.vector_add("idx", "new", vec![1.0, 0.0], None).unwrap();
     let (_, new_version, _) = db.read_vector_meta("idx").unwrap();
     assert_ne!(old_version, new_version);
 
@@ -1106,16 +1131,23 @@ fn missing_hnsw_blob_fails_approximate_search_and_rebuild_recovers_from_document
     let (_, version, _) = db.read_vector_meta("idx").unwrap();
     let persisted = db
         .store
-        .scan_prefix_raw(&vector_segment_prefix(db.key_layout, 0, "idx", version));
+        .scan_prefix_raw(&vector_segment_prefix(db.key_layout, 0, "idx", version))
+        .unwrap();
     let segment = decode_record::<VectorSegmentMeta>(&persisted[0].1).unwrap();
     assert!(!segment.index_key.is_empty());
-    assert!(db.store.delete_key(&segment.index_key));
+    assert!(db.store.delete_key(&segment.index_key).unwrap());
     db.vector_runtimes.remove(0, "idx", version);
+    let startup_error = db.load_vector_runtimes_for_startup().unwrap_err();
+    assert!(
+        startup_error
+            .to_string()
+            .contains("HNSW index blob missing")
+    );
 
     let error = db
         .vector_search("idx", &[0.0, 0.0], search_options(1))
         .unwrap_err();
-    assert!(error.to_string().contains("HNSW index blob missing"));
+    assert!(error.to_string().contains("INDEX_NOT_READY"));
 
     db.vector_rebuild("idx").unwrap();
     assert_eq!(
@@ -1178,7 +1210,7 @@ fn vector_updates_deletes_and_searches_remain_consistent_under_concurrency() {
 }
 
 #[test]
-fn concurrent_runtime_initialization_and_write_preserve_all_docs() {
+fn concurrent_runtime_startup_and_write_preserve_all_docs() {
     let db = Arc::new(integration_test_db(
         "onedis-vector-runtime-race",
         KeyEncodingLayout::TableLocalV2,
@@ -1191,13 +1223,11 @@ fn concurrent_runtime_initialization_and_write_preserve_all_docs() {
         db.vector_runtimes.remove(0, "idx", version);
         let barrier = Arc::new(std::sync::Barrier::new(3));
         std::thread::scope(|scope| {
-            let search_db = db.clone();
-            let search_barrier = barrier.clone();
+            let startup_db = db.clone();
+            let startup_barrier = barrier.clone();
             scope.spawn(move || {
-                search_barrier.wait();
-                search_db
-                    .vector_search("idx", &[0.0, 0.0], search_options(2))
-                    .unwrap();
+                startup_barrier.wait();
+                startup_db.load_vector_runtimes_for_startup().unwrap();
             });
             let write_db = db.clone();
             let write_barrier = barrier.clone();
@@ -1209,6 +1239,8 @@ fn concurrent_runtime_initialization_and_write_preserve_all_docs() {
             });
             barrier.wait();
         });
+        db.vector_search("idx", &[0.0, 0.0], search_options(2))
+            .unwrap();
         assert_eq!(db.vector_runtime_len("idx", version, 0), 2);
     }
 }
@@ -1316,11 +1348,7 @@ fn indexed_filters_use_bounded_ordered_ranges() {
 #[test]
 fn ip_candidates_are_comparable_across_segments_with_different_norms() {
     let query = [1.0, 0.0];
-    let query_payload = hnsw_query_payload(
-        VectorDistance::Ip,
-        &query,
-        VectorQuantization::F32,
-    );
+    let query_payload = hnsw_query_payload(VectorDistance::Ip, &query, VectorQuantization::F32);
     let small = hnsw_index_payload(
         VectorDistance::Ip,
         &[1.0, 0.0],
@@ -1374,10 +1402,8 @@ fn flat_internal_indexes_never_publish_hnsw_segments() {
     let index = "__onedis_fulltext_vector__:1:3:idx:3:vec";
     db.vector_create_internal(index, create_options("L2", Some(2)), true)
         .unwrap();
-    db.vector_add(index, "a", vec![0.0, 0.0], None)
-        .unwrap();
-    db.vector_add(index, "b", vec![1.0, 0.0], None)
-        .unwrap();
+    db.vector_add(index, "a", vec![0.0, 0.0], None).unwrap();
+    db.vector_add(index, "b", vec![1.0, 0.0], None).unwrap();
     db.vector_maintenance_tick().unwrap();
 
     let (_, version, meta) = db.read_vector_meta(index).unwrap();
@@ -1386,6 +1412,7 @@ fn flat_internal_indexes_never_publish_hnsw_segments() {
     assert!(
         db.store
             .scan_prefix_raw(&vector_segment_prefix(db.key_layout, 0, index, version))
+            .unwrap()
             .is_empty()
     );
     assert_eq!(
@@ -1404,21 +1431,16 @@ fn version_checkpoint_replays_only_the_unflushed_tail() {
     );
     db.vector_create("idx", create_options("L2", Some(2)))
         .unwrap();
-    db.vector_add("idx", "a", vec![0.0, 0.0], None)
-        .unwrap();
-    db.vector_add("idx", "b", vec![1.0, 0.0], None)
-        .unwrap();
+    db.vector_add("idx", "a", vec![0.0, 0.0], None).unwrap();
+    db.vector_add("idx", "b", vec![1.0, 0.0], None).unwrap();
     db.vector_maintenance_tick().unwrap();
     db.vector_maintenance_tick().unwrap();
     db.vector_compact("idx").unwrap();
-    db.vector_add("idx", "c", vec![2.0, 0.0], None)
-        .unwrap();
+    db.vector_add("idx", "c", vec![2.0, 0.0], None).unwrap();
 
     let (_, version, meta) = db.read_vector_meta("idx").unwrap();
     db.vector_runtimes.remove(0, "idx", version);
-    let (versions, tail) = db
-        .load_vector_version_state("idx", version, &meta)
-        .unwrap();
+    let (versions, tail) = db.load_vector_version_state("idx", version, &meta).unwrap();
     assert_eq!(versions.len(), 3);
     assert_eq!(versions.get("c"), Some(&3));
     assert_eq!(tail.len(), 1);
@@ -1479,8 +1501,7 @@ fn q8_integer_distance_kernel_matches_scalar_reference() {
     );
     assert!((optimized_l2 - reference_l2).abs() <= 1e-5 * reference_l2.max(1.0));
 
-    let denominator =
-        (q8_dot_scalar(&lhs, &lhs) as f64 * q8_dot_scalar(&rhs, &rhs) as f64).sqrt();
+    let denominator = (q8_dot_scalar(&lhs, &lhs) as f64 * q8_dot_scalar(&rhs, &rhs) as f64).sqrt();
     let reference_cosine = (1.0 - dot as f64 / denominator) as f32;
     let optimized_cosine = q8_distance(
         lhs_scale,
@@ -1510,14 +1531,25 @@ fn delta_hnsw_covers_mutable_tail_and_keeps_newer_updates_exact() {
     }
     db.vector_maintenance_tick().unwrap();
 
-    let info = db.vector_info("idx").unwrap().into_iter().collect::<HashMap<_, _>>();
-    assert_eq!(info.get("delta_hnsw_nodes").map(String::as_str), Some("128"));
+    let info = db
+        .vector_info("idx")
+        .unwrap()
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        info.get("delta_hnsw_nodes").map(String::as_str),
+        Some("128")
+    );
     assert_eq!(info.get("exact_tail_docs").map(String::as_str), Some("0"));
     assert_eq!(info.get("memtable_docs").map(String::as_str), Some("128"));
 
     db.vector_add("idx", "doc-0", vec![10_000.0, 0.0], None)
         .unwrap();
-    let info = db.vector_info("idx").unwrap().into_iter().collect::<HashMap<_, _>>();
+    let info = db
+        .vector_info("idx")
+        .unwrap()
+        .into_iter()
+        .collect::<HashMap<_, _>>();
     assert_eq!(info.get("exact_tail_docs").map(String::as_str), Some("1"));
     assert_eq!(
         db.vector_search("idx", &[10_000.0, 0.0], search_options(1))
@@ -1528,6 +1560,7 @@ fn delta_hnsw_covers_mutable_tail_and_keeps_newer_updates_exact() {
 
     let (_, version, _) = db.read_vector_meta("idx").unwrap();
     db.vector_runtimes.remove(0, "idx", version);
+    db.load_vector_runtimes_for_startup().unwrap();
     assert_eq!(
         db.vector_search("idx", &[10_000.0, 0.0], search_options(1))
             .unwrap()[0]
@@ -1548,7 +1581,10 @@ fn vector_mutation_checkpoint_reclaims_journal_and_recovers_tail() {
     assert_eq!(db.store.get_raw(&db.mk("idx")).unwrap(), marker_before);
 
     let (_, version, meta) = db.read_vector_meta("idx").unwrap();
-    assert!(db.checkpoint_vector_mutations("idx", version, true).unwrap());
+    assert!(
+        db.checkpoint_vector_mutations("idx", version, true)
+            .unwrap()
+    );
     assert!(
         db.store
             .scan_prefix_raw(&vector_version_mutation_prefix(
@@ -1557,6 +1593,7 @@ fn vector_mutation_checkpoint_reclaims_journal_and_recovers_tail() {
                 "idx",
                 version,
             ))
+            .unwrap()
             .is_empty()
     );
     let checkpoint = decode_record::<VectorVersionCheckpoint>(
@@ -1567,15 +1604,14 @@ fn vector_mutation_checkpoint_reclaims_journal_and_recovers_tail() {
                 "idx",
                 version,
             ))
+            .unwrap()
             .unwrap(),
     )
     .unwrap();
     assert_eq!(checkpoint.through_doc_version, meta.next_doc_version - 1);
 
     db.vector_runtimes.remove(0, "idx", version);
-    let (versions, tail) = db
-        .load_vector_version_state("idx", version, &meta)
-        .unwrap();
+    let (versions, tail) = db.load_vector_version_state("idx", version, &meta).unwrap();
     assert_eq!(versions.len(), 2);
     assert_eq!(tail.len(), 2);
 }

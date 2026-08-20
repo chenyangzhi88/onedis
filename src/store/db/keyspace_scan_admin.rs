@@ -140,7 +140,7 @@ impl Db {
                 };
                 match self
                     .store
-                    .scan_range_raw_start_at_offset(&lower, upper.clone(), offset)
+                    .scan_range_raw_start_at_offset(&lower, upper.clone(), offset)?
                 {
                     Some(start) => {
                         remaining_cursor = 0;
@@ -148,7 +148,7 @@ impl Db {
                     }
                     None => {
                         remaining_cursor = remaining_cursor.saturating_sub(
-                            self.store.count_range_raw_keys(&lower, upper.clone()) as u64,
+                            self.store.count_range_raw_keys(&lower, upper.clone())? as u64,
                         );
                         continue;
                     }
@@ -164,7 +164,7 @@ impl Db {
                 };
                 let entries =
                     self.store
-                        .scan_range_raw_limited(&next_lower, upper.clone(), batch_limit);
+                        .scan_range_raw_limited(&next_lower, upper.clone(), batch_limit)?;
                 if entries.is_empty() {
                     break;
                 }
@@ -225,7 +225,7 @@ impl Db {
                 match self
                     .store
                     .scan_range_raw_start_at_offset_async(&lower, upper.clone(), offset)
-                    .await
+                    .await?
                 {
                     Some(start) => {
                         remaining_cursor = 0;
@@ -235,7 +235,7 @@ impl Db {
                         remaining_cursor = remaining_cursor.saturating_sub(
                             self.store
                                 .count_range_raw_keys_async(&lower, upper.clone())
-                                .await as u64,
+                                .await? as u64,
                         );
                         continue;
                     }
@@ -252,7 +252,7 @@ impl Db {
                 let entries = self
                     .store
                     .scan_range_raw_limited_async(&next_lower, upper.clone(), batch_limit)
-                    .await;
+                    .await?;
                 if entries.is_empty() {
                     break;
                 }
@@ -286,31 +286,12 @@ impl Db {
         state.finish()
     }
 
-    pub fn keys(&self, pattern_str: &str) -> Vec<String> {
+    pub fn keys(&self, pattern_str: &str) -> Result<Vec<String>, Error> {
         let now = now_ms();
         let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
-        self.logical_keys()
-            .into_iter()
-            .filter(|key| {
-                // skip expired keys lazily
-                if let Some(raw) = self.store.get_raw(&self.mk(key)) {
-                    let expire_ms = decode_expire_ms(&raw);
-                    if expire_ms > 0 && now >= expire_ms {
-                        return false;
-                    }
-                }
-                matcher.as_ref().is_none_or(|matcher| matcher.is_match(key))
-            })
-            .collect()
-    }
-
-    pub async fn keys_async(&self, pattern_str: &str) -> Vec<String> {
-        let now = now_ms();
-        let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
-        let keys = self.logical_keys_async().await;
         let mut result = Vec::new();
-        for key in keys {
-            if let Some(raw) = self.store.get_raw_async(&self.mk(&key)).await {
+        for key in self.logical_keys()? {
+            if let Some(raw) = self.store.get_raw(&self.mk(&key))? {
                 let expire_ms = decode_expire_ms(&raw);
                 if expire_ms > 0 && now >= expire_ms {
                     continue;
@@ -323,13 +304,35 @@ impl Db {
                 result.push(key);
             }
         }
-        result
+        Ok(result)
+    }
+
+    pub async fn keys_async(&self, pattern_str: &str) -> Result<Vec<String>, Error> {
+        let now = now_ms();
+        let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
+        let keys = self.logical_keys_async().await?;
+        let mut result = Vec::new();
+        for key in keys {
+            if let Some(raw) = self.store.get_raw_async(&self.mk(&key)).await? {
+                let expire_ms = decode_expire_ms(&raw);
+                if expire_ms > 0 && now >= expire_ms {
+                    continue;
+                }
+            }
+            if matcher
+                .as_ref()
+                .is_none_or(|matcher| matcher.is_match(&key))
+            {
+                result.push(key);
+            }
+        }
+        Ok(result)
     }
 
     /**
      * 随机返回一个键
      */
-    pub fn random_key(&self) -> Option<String> {
+    pub fn random_key(&self) -> Result<Option<String>, Error> {
         let now = now_ms();
         let mut seen = 0u64;
         let mut selected = None;
@@ -348,12 +351,12 @@ impl Db {
                         selected = Some(key);
                     }
                     true
-                });
+                })?;
         }
-        selected
+        Ok(selected)
     }
 
-    pub async fn random_key_async(&self) -> Option<String> {
+    pub async fn random_key_async(&self) -> Result<Option<String>, Error> {
         let now = now_ms();
         let mut seen = 0u64;
         let mut selected = None;
@@ -373,15 +376,15 @@ impl Db {
                     }
                     true
                 })
-                .await;
+                .await?;
         }
-        selected
+        Ok(selected)
     }
 
     /**
      * 获取键值对数量
      */
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> Result<usize, Error> {
         let now = now_ms();
         let mut count = 0usize;
         for (lower, upper) in self.key_layout.logical_main_key_ranges(self.db_index) {
@@ -393,16 +396,16 @@ impl Db {
                         count = count.saturating_add(1);
                     }
                     true
-                });
+                })?;
         }
-        count
+        Ok(count)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub fn is_empty(&self) -> Result<bool, Error> {
+        Ok(self.len()? == 0)
     }
 
-    pub async fn len_async(&self) -> usize {
+    pub async fn len_async(&self) -> Result<usize, Error> {
         let now = now_ms();
         let mut count = 0usize;
         for (lower, upper) in self.key_layout.logical_main_key_ranges(self.db_index) {
@@ -415,20 +418,20 @@ impl Db {
                     }
                     true
                 })
-                .await;
+                .await?;
         }
-        count
+        Ok(count)
     }
 
     /**
      * 清空所有数据
      */
-    pub fn clear(&self) {
-        self.flushdb();
+    pub fn clear(&self) -> Result<(), Error> {
+        self.flushdb()
     }
 
-    pub async fn clear_async(&self) {
-        self.flushdb_async().await;
+    pub async fn clear_async(&self) -> Result<(), Error> {
+        self.flushdb_async().await
     }
 }
 

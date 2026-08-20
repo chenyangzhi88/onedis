@@ -230,16 +230,16 @@ impl Db {
         self.version_counter.next()
     }
 
-    pub fn ttl_observability_snapshot(&self) -> TtlObservabilitySnapshot {
+    pub fn ttl_observability_snapshot(&self) -> Result<TtlObservabilitySnapshot, Error> {
         let stats = self.ttl_manager.stats();
-        let (expires, avg_ttl_millis) = self.ttl_manager.index_snapshot_for_db(self.db_index);
-        TtlObservabilitySnapshot {
+        let (expires, avg_ttl_millis) = self.ttl_manager.index_snapshot_for_db(self.db_index)?;
+        Ok(TtlObservabilitySnapshot {
             expired_keys: stats.keys_expired.load(Ordering::Relaxed),
             stale_entries_skipped: stats.stale_entries_skipped.load(Ordering::Relaxed),
             sweep_cycles: stats.sweep_cycles.load(Ordering::Relaxed),
             expires,
             avg_ttl_millis,
-        }
+        })
     }
 
     pub(in crate::store::db) fn next_version_for_store(
@@ -272,7 +272,7 @@ impl Db {
             .map(|&shard| self.key_write_locks[shard].blocking_lock())
             .collect::<Vec<_>>();
         self.store.commit_transaction()?;
-        self.invalidate_counter_cache_for_committed_mutations(&keys, &dbs);
+        self.invalidate_caches_for_committed_mutations(&keys, &dbs);
         self.publish_mutations(keys.clone(), dbs.clone());
         for &db_index in &dbs {
             self.vector_runtimes.remove_db(db_index);
@@ -303,7 +303,7 @@ impl Db {
         };
         let _write_guards = self.lock_write_shards(&shards).await;
         self.store.commit_transaction_async().await?;
-        self.invalidate_counter_cache_for_committed_mutations(&keys, &dbs);
+        self.invalidate_caches_for_committed_mutations(&keys, &dbs);
         self.publish_mutations(keys.clone(), dbs.clone());
         for &db_index in &dbs {
             self.vector_runtimes.remove_db(db_index);

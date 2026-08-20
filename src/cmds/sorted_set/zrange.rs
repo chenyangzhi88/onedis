@@ -3,7 +3,7 @@ use anyhow::Error;
 use crate::{
     cmds::sorted_set::common::validate_entry_count,
     frame::{Frame, MAX_FRAME_BYTES},
-    store::db::Db,
+    store::db::{Db, ZsetScoreWindow},
 };
 
 pub struct Zrange {
@@ -144,15 +144,15 @@ impl Zrange {
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
         let result = match self.range {
             ZrangeBounds::Rank(start, stop) => db.zset_range(&self.key, start, stop, self.reverse),
-            ZrangeBounds::Score(min, max) => db.zset_range_by_score_window(
-                &self.key,
-                min.value,
-                min.inclusive,
-                max.value,
-                max.inclusive,
-                self.reverse,
-                self.limit,
-            ),
+            ZrangeBounds::Score(min, max) => db.zset_range_by_score_window(ZsetScoreWindow {
+                key: &self.key,
+                min: min.value,
+                min_inclusive: min.inclusive,
+                max: max.value,
+                max_inclusive: max.inclusive,
+                reverse: self.reverse,
+                limit: self.limit,
+            }),
             ZrangeBounds::Lex(min, max) => {
                 db.zset_range_by_lex_window(&self.key, &min, &max, self.reverse, self.limit)
             }
@@ -170,15 +170,15 @@ impl Zrange {
                     .await
             }
             ZrangeBounds::Score(min, max) => {
-                db.zset_range_by_score_window_async(
-                    &self.key,
-                    min.value,
-                    min.inclusive,
-                    max.value,
-                    max.inclusive,
-                    self.reverse,
-                    self.limit,
-                )
+                db.zset_range_by_score_window_async(ZsetScoreWindow {
+                    key: &self.key,
+                    min: min.value,
+                    min_inclusive: min.inclusive,
+                    max: max.value,
+                    max_inclusive: max.inclusive,
+                    reverse: self.reverse,
+                    limit: self.limit,
+                })
                 .await
             }
             ZrangeBounds::Lex(min, max) => {

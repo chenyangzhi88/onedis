@@ -56,6 +56,5 @@ include!("ttl/manager_sweeper.rs");
 include!("ttl/key_helpers.rs");
 
 #[cfg(test)]
-mod tests {
-    include!("ttl/tests.rs");
-}
+#[path = "ttl/tests.rs"]
+mod tests;

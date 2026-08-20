@@ -34,7 +34,10 @@ impl Db {
             }
         }
         let meta_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let metas = match self.store.multi_get_raw_async(&meta_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(command_keys.len(), error),
+        };
         let now = now_ms();
         let mut lengths = Vec::with_capacity(keys.len());
         for (key, raw) in keys.iter().zip(metas) {
@@ -46,9 +49,11 @@ impl Db {
                     Ok(meta) if meta.packed => decode_packed_hash(&raw)
                         .map(|fields| fields.len())
                         .ok_or_else(|| "Failed to decode packed hash".to_string()),
-                    Ok(meta) if meta.may_have_field_ttl => {
-                        Ok(self.hash_live_entries_for_meta_async(key, meta).await.len())
-                    }
+                    Ok(meta) if meta.may_have_field_ttl => self
+                        .hash_live_entries_for_meta_async(key, meta)
+                        .await
+                        .map(|entries| entries.len())
+                        .map_err(|error| error.to_string()),
                     Ok(meta) => {
                         let logical_key = key.as_bytes().to_vec();
                         let key_epoch = self
@@ -62,13 +67,20 @@ impl Db {
                             Ok(cached.len)
                         } else {
                             let prefix = hash_field_prefix(self.db_index, key, meta.version);
-                            let len = self
+                            let len = match self
                                 .store
                                 .count_range_raw_keys_async(
                                     &prefix,
                                     prefix_exclusive_upper_bound(&prefix),
                                 )
-                                .await;
+                                .await
+                            {
+                                Ok(len) => len,
+                                Err(error) => {
+                                    lengths.push(Err(error.to_string()));
+                                    continue;
+                                }
+                            };
                             self.counter_cache
                                 .hash_ever_populated
                                 .store(true, Ordering::Release);
@@ -102,7 +114,7 @@ impl Db {
             return Ok(false);
         };
 
-        Ok(self.hash_live_field_value(key, version, field).is_some())
+        Ok(self.hash_live_field_value(key, version, field)?.is_some())
     }
 
     pub async fn hash_exists_async(&self, key: &str, field: &str) -> Result<bool, Error> {
@@ -113,21 +125,21 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .and_then(|raw| decode_packed_hash(&raw))
                 .is_some_and(|fields| fields.contains_key(field)));
         }
         if meta.may_have_field_ttl
             && !self
                 .hash_field_is_live_async(key, meta.version, field)
-                .await
+                .await?
         {
             return Ok(false);
         }
         Ok(self
             .store
             .get_raw_async(&hash_field_key(self.db_index, key, meta.version, field))
-            .await
+            .await?
             .is_some())
     }
 
@@ -138,7 +150,7 @@ impl Db {
             return Ok(0);
         };
 
-        Ok(self.hash_live_entries_raw(key, version).len())
+        Ok(self.hash_live_entries_raw(key, version)?.len())
     }
 
     pub async fn hash_len_async(&self, key: &str) -> Result<usize, Error> {
@@ -149,12 +161,15 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .and_then(|raw| decode_packed_hash(&raw))
                 .map_or(0, |fields| fields.len()));
         }
         if meta.may_have_field_ttl {
-            return Ok(self.hash_live_entries_for_meta_async(key, meta).await.len());
+            return Ok(self
+                .hash_live_entries_for_meta_async(key, meta)
+                .await?
+                .len());
         }
         let logical_key = key.as_bytes().to_vec();
         let key_epoch = self
@@ -171,7 +186,7 @@ impl Db {
         let len = self
             .store
             .count_range_raw_keys_async(&prefix, prefix_exclusive_upper_bound(&prefix))
-            .await;
+            .await?;
         self.counter_cache
             .hash_ever_populated
             .store(true, Ordering::Release);
@@ -209,10 +224,10 @@ impl Db {
             return Ok(vec![None; fields.len()]);
         };
 
-        Ok(fields
+        fields
             .iter()
             .map(|field| self.hash_live_field_value(key, version, field))
-            .collect())
+            .collect()
     }
 
     pub async fn hash_multi_get_async(
@@ -240,7 +255,7 @@ impl Db {
             let packed = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .and_then(|raw| decode_packed_hash(&raw))
                 .unwrap_or_default();
             return Ok(fields
@@ -252,13 +267,13 @@ impl Db {
             .iter()
             .map(|field| hash_field_key(self.db_index, key, meta.version, field))
             .collect::<Vec<_>>();
-        let mut values = self.store.multi_get_raw_async(&field_keys).await;
+        let mut values = self.store.multi_get_raw_async(&field_keys).await?;
         if meta.may_have_field_ttl {
             let expire_keys = fields
                 .iter()
                 .map(|field| hash_field_expire_key(self.db_index, key, meta.version, field))
                 .collect::<Vec<_>>();
-            let expires = self.store.multi_get_raw_async(&expire_keys).await;
+            let expires = self.store.multi_get_raw_async(&expire_keys).await?;
             let now = now_ms();
             for (value, expire) in values.iter_mut().zip(expires) {
                 if expire
@@ -283,7 +298,10 @@ impl Db {
             .iter()
             .map(|(key, _)| self.mk(key))
             .collect::<Vec<_>>();
-        let metas = self.store.multi_get_raw_async(&meta_keys).await;
+        let metas = match self.store.multi_get_raw_async(&meta_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         let now = now_ms();
         let mut field_keys = Vec::new();
         let mut expire_keys = Vec::new();
@@ -350,8 +368,14 @@ impl Db {
             });
         }
 
-        let values = self.store.multi_get_raw_async(&field_keys).await;
-        let expires = self.store.multi_get_raw_async(&expire_keys).await;
+        let values = match self.store.multi_get_raw_async(&field_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
+        let expires = match self.store.multi_get_raw_async(&expire_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         plans
             .into_iter()
             .map(|plan| match plan {
@@ -401,7 +425,7 @@ impl Db {
         };
 
         Ok(self
-            .hash_live_entries_raw(key, version)
+            .hash_live_entries_raw(key, version)?
             .into_iter()
             .filter_map(|(field, value)| String::from_utf8(field).ok().map(|field| (field, value)))
             .collect())
@@ -426,7 +450,7 @@ impl Db {
 
         Ok(self
             .hash_live_entries_for_meta_async(key, meta)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(field, value)| String::from_utf8(field).ok().map(|field| (field, value)))
             .collect())
@@ -598,9 +622,9 @@ impl Db {
                         prefix_exclusive_upper_bound(&prefix),
                         &ordinals,
                     )
-                    .await;
+                    .await?;
                 let values = if with_values {
-                    self.store.multi_get_raw_async(&raw_keys).await
+                    self.store.multi_get_raw_async(&raw_keys).await?
                 } else {
                     vec![None; raw_keys.len()]
                 };

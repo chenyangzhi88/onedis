@@ -17,7 +17,7 @@ impl Db {
             let matcher = (pattern_str != "*").then(|| pattern::Matcher::new(pattern_str));
             let mut state = ZsetScanState::new(cursor, count);
             for (member, score) in self
-                .zset_ranked_members(key, version)
+                .zset_ranked_members(key, version)?
                 .into_iter()
                 .skip(offset)
             {
@@ -30,9 +30,9 @@ impl Db {
         let prefix = zset_rank_prefix(self.db_index, key, version);
         let upper = prefix_exclusive_upper_bound(&prefix);
         let offset = usize::try_from(cursor).map_err(|_| Error::msg("ERR invalid cursor"))?;
-        let Some(lower) = self
-            .store
-            .scan_range_raw_start_at_offset(&prefix, upper.clone(), offset)
+        let Some(lower) =
+            self.store
+                .scan_range_raw_start_at_offset(&prefix, upper.clone(), offset)?
         else {
             return Ok((0, Vec::new()));
         };
@@ -47,7 +47,7 @@ impl Db {
                     return true;
                 };
                 state.visit(member, score, matcher.as_ref())
-            });
+            })?;
         state.finish()
     }
 
@@ -67,7 +67,7 @@ impl Db {
             let mut state = ZsetScanState::new(cursor, count);
             for (member, score) in self
                 .zset_ranked_members_async(key, version)
-                .await
+                .await?
                 .into_iter()
                 .skip(offset)
             {
@@ -83,7 +83,7 @@ impl Db {
         let Some(lower) = self
             .store
             .scan_range_raw_start_at_offset_async(&prefix, upper.clone(), offset)
-            .await
+            .await?
         else {
             return Ok((0, Vec::new()));
         };
@@ -99,7 +99,7 @@ impl Db {
                 };
                 state.visit(member, score, matcher.as_ref())
             })
-            .await;
+            .await?;
         state.finish()
     }
 }

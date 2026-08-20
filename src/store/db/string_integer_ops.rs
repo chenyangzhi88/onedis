@@ -14,8 +14,8 @@ impl Db {
     {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let (expire_ms, current) =
                 Self::decode_integer_string_for_update(observed.value().map(|raw| raw.as_ref()))?;
             let next = update(current)
@@ -52,7 +52,7 @@ impl Db {
     where
         F: FnOnce(i64) -> Option<i64>,
     {
-        self.expire_if_needed(key);
+        self.expire_if_needed(key)?;
 
         let key_bytes = self.mk(key);
         let (expire_ms, current) = self.read_integer_string_for_update(&key_bytes)?;
@@ -71,7 +71,7 @@ impl Db {
             self.ttl_manager
                 .remove_to_batch(&mut batch, self.db_index, key);
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
 
         Ok(next)
     }
@@ -135,7 +135,7 @@ impl Db {
             return Ok(next);
         }
 
-        self.expire_if_needed_async(key).await;
+        self.expire_if_needed_async(key).await?;
         let (expire_ms, current) = self.read_integer_string_for_update_async(&raw_key).await?;
         if expire_ms > 0 {
             // TTL-bearing counters stay on the compare-and-write path. An expiry delete and a
@@ -216,12 +216,12 @@ impl Db {
             let _guard = guard;
             match db
                 .store
-                .try_merge_raw_async(&raw_key, &delta.to_be_bytes())
+                .merge_raw_async(&raw_key, &delta.to_be_bytes())
                 .await
             {
                 Ok(()) => {
                     db.changes.fetch_add(1, Ordering::Relaxed);
-                    if db.mutation_tracker.has_watched_keys() {
+                    if db.mutation_tracker.has_observers() {
                         db.record_external_key_mutation(db.db_index, raw_key);
                     }
                     commit_state.complete(sequence);
@@ -238,7 +238,7 @@ impl Db {
         &self,
         key_bytes: &[u8],
     ) -> Result<(u64, i64), Error> {
-        let raw = self.store.get_raw_async(key_bytes).await;
+        let raw = self.store.get_raw_async(key_bytes).await?;
         Self::decode_integer_string_for_update(raw.as_deref())
     }
 
@@ -246,7 +246,7 @@ impl Db {
         &self,
         key_bytes: &[u8],
     ) -> Result<(u64, i64), Error> {
-        let raw = self.store.get_raw(key_bytes);
+        let raw = self.store.get_raw(key_bytes)?;
         Self::decode_integer_string_for_update(raw.as_deref())
     }
 

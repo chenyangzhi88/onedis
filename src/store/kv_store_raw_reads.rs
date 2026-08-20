@@ -1,338 +1,199 @@
 impl KvStore {
-    pub fn get_raw(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let started = Instant::now();
-        if let Some(value) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction get")
-                    .map(|value| value.to_vec())
-            }),
-            || None,
-            "access transaction for get",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return value;
-        }
-        let value = storage_read_or(
-            self.table.get(key, &ReadOptions::default()),
-            || None,
-            "get",
-        )
-        .map(|value| value.to_vec());
+    fn finish_storage_read<T>(
+        &self,
+        operation: &str,
+        started: Instant,
+        result: KvResult<T>,
+    ) -> KvResult<T> {
         global_metrics().record_storage_read(elapsed_us(started));
-        value
+        if let Err(error) = &result {
+            self.health.record_failure(operation, error);
+        }
+        result
     }
 
-    pub async fn get_raw_async(&self, key: &[u8]) -> Option<Vec<u8>> {
+    pub fn get_raw(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         let started = Instant::now();
-        if let Some(value) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction get async")
-                    .map(|value| value.to_vec())
-            }),
-            || None,
-            "access transaction for async get",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return value;
-        }
-        let value = storage_read_or(
-            self.table.get_async(key, &ReadOptions::default()).await,
-            || None,
-            "get async",
-        )
-        .map(|value| value.to_vec());
-        global_metrics().record_storage_read(elapsed_us(started));
-        value
-    }
-
-    pub async fn get_raw_observed_async(&self, key: &[u8]) -> ObservedRawValue {
-        let started = Instant::now();
-        if let Some(value) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction observed get")
-            }),
-            || None,
-            "access transaction for observed get",
-        ) {
-            let observed = ObservedRawValue::from_transaction(key, value);
-            global_metrics().record_storage_read(elapsed_us(started));
-            return observed;
-        }
-        let observed = match self.table.get_observed_async(key).await {
-            Ok(observed) => observed,
-            Err(error) => {
-                crate::store::health::storage_health().record_failure("observed get async", error);
-                global_metrics().record_storage_read(elapsed_us(started));
-                return ObservedRawValue::from_transaction(key, None);
+        let result = (|| {
+            if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+                return value.map(|value| value.map(|bytes| bytes.to_vec()));
             }
-        };
-        global_metrics().record_storage_read(elapsed_us(started));
-        ObservedRawValue::from_engine(key, observed)
-    }
-
-    pub fn get_raw_observed(&self, key: &[u8]) -> ObservedRawValue {
-        let started = Instant::now();
-        if let Some(value) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction observed get")
-            }),
-            || None,
-            "access transaction for observed get",
-        ) {
-            let observed = ObservedRawValue::from_transaction(key, value);
-            global_metrics().record_storage_read(elapsed_us(started));
-            return observed;
-        }
-        let observed = match self.table.get_observed(key) {
-            Ok(observed) => observed,
-            Err(error) => {
-                crate::store::health::storage_health().record_failure("observed get", error);
-                global_metrics().record_storage_read(elapsed_us(started));
-                return ObservedRawValue::from_transaction(key, None);
-            }
-        };
-        global_metrics().record_storage_read(elapsed_us(started));
-        ObservedRawValue::from_engine(key, observed)
-    }
-
-    pub async fn observe_raw_key_state_async(&self, key: &[u8]) -> ObservedRawKeyState {
-        let started = Instant::now();
-        if let Some(exists) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction observe key state").is_some()
-            }),
-            || false,
-            "access transaction for key observation",
-        ) {
-            let observed = ObservedRawKeyState::from_transaction(key, exists);
-            global_metrics().record_storage_read(elapsed_us(started));
-            return observed;
-        }
-        let observed = match self.table.observe_key_state_async(key).await {
-            Ok(observed) => observed,
-            Err(error) => {
-                crate::store::health::storage_health().record_failure("observe key state", error);
-                global_metrics().record_storage_read(elapsed_us(started));
-                return ObservedRawKeyState::from_transaction(key, false);
-            }
-        };
-        global_metrics().record_storage_read(elapsed_us(started));
-        ObservedRawKeyState::from_engine(key, observed)
-    }
-
-    /// 直接从 kv_engine 读取原始 value，尽量保留底层返回的 Bytes，减少只读热路径拷贝。
-    pub fn get_raw_bytes(&self, key: &[u8]) -> Option<Bytes> {
-        let started = Instant::now();
-        if let Some(value) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction get bytes")
-            }),
-            || None,
-            "access transaction for byte get",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return value;
-        }
-        let value = storage_read_or(
-            self.table.get(key, &ReadOptions::default()),
-            || None,
-            "get bytes",
-        );
-        global_metrics().record_storage_read(elapsed_us(started));
-        value
-    }
-
-    pub async fn get_raw_bytes_async(&self, key: &[u8]) -> Option<Bytes> {
-        let started = Instant::now();
-        if let Some(value) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction get bytes async")
-            }),
-            || None,
-            "access transaction for async byte get",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return value;
-        }
-        let value = storage_read_or(
-            self.table.get_async(key, &ReadOptions::default()).await,
-            || None,
-            "get bytes async",
-        );
-        global_metrics().record_storage_read(elapsed_us(started));
-        value
-    }
-
-    /// 批量读取原始 value，用于批量命令避免逐 key 往返底层存储。
-    pub fn multi_get_raw(&self, keys: &[Vec<u8>]) -> Vec<Option<Vec<u8>>> {
-        if keys.is_empty() {
-            return Vec::new();
-        }
-        let started = Instant::now();
-        if let Some(values) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(
-                    txn.multi_get(keys),
-                    || vec![None; keys.len()],
-                    "transaction multi get",
-                )
-                .into_iter()
-                .map(|value| value.map(|bytes| bytes.to_vec()))
-                .collect()
-            }),
-            || vec![None; keys.len()],
-            "access transaction for multi get",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return values;
-        }
-        let values = storage_read_or(
-            self.table.multi_get(keys, &ReadOptions::default()),
-            || vec![None; keys.len()],
-            "multi get",
-        )
-            .into_iter()
-            .map(|value| value.map(|bytes| bytes.to_vec()))
-            .collect();
-        global_metrics().record_storage_read(elapsed_us(started));
-        values
-    }
-
-    pub async fn multi_get_raw_async(&self, keys: &[Vec<u8>]) -> Vec<Option<Vec<u8>>> {
-        if keys.is_empty() {
-            return Vec::new();
-        }
-        let started = Instant::now();
-        if let Some(values) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(
-                    txn.multi_get(keys),
-                    || vec![None; keys.len()],
-                    "transaction multi get async",
-                )
-                .into_iter()
-                .map(|value| value.map(|bytes| bytes.to_vec()))
-                .collect()
-            }),
-            || vec![None; keys.len()],
-            "access transaction for async multi get",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return values;
-        }
-        let values = storage_read_or(
-            self.table.multi_get_async(keys, &ReadOptions::default()).await,
-            || vec![None; keys.len()],
-            "multi get async",
-        )
-            .into_iter()
-            .map(|value| value.map(|bytes| bytes.to_vec()))
-            .collect();
-        global_metrics().record_storage_read(elapsed_us(started));
-        values
-    }
-
-    /// Batch-read values together with reusable compare-and-write observation tokens.
-    pub async fn multi_get_raw_observed_async(&self, keys: &[Vec<u8>]) -> Vec<ObservedRawValue> {
-        if keys.is_empty() {
-            return Vec::new();
-        }
-        let started = Instant::now();
-        if let Some(values) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(
-                    txn.multi_get(keys),
-                    || vec![None; keys.len()],
-                    "transaction multi observed get",
-                )
-            }),
-            || vec![None; keys.len()],
-            "access transaction for multi observed get",
-        ) {
-            let observed = keys
-                .iter()
-                .zip(values)
-                .map(|(key, value)| ObservedRawValue::from_transaction(key, value))
-                .collect();
-            global_metrics().record_storage_read(elapsed_us(started));
-            return observed;
-        }
-        let observed = match self.table.multi_get_observed_async(keys).await {
-            Ok(observed) => observed
-                .into_iter()
-                .zip(keys)
-                .map(|(observed, key)| ObservedRawValue::from_engine(key, observed))
-                .collect(),
-            Err(error) => {
-                crate::store::health::storage_health()
-                    .record_failure("multi observed get async", error);
-                keys.iter()
-                    .map(|key| ObservedRawValue::from_transaction(key, None))
-                    .collect()
-            }
-        };
-        global_metrics().record_storage_read(elapsed_us(started));
-        observed
-    }
-
-    pub fn contains_key(&self, key: &[u8]) -> bool {
-        let started = Instant::now();
-        if let Some(exists) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction contains key").is_some()
-            }),
-            || false,
-            "access transaction for contains key",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return exists;
-        }
-        let exists = storage_read_or(
             self.table
-                .observe_key_state(key)
-                .map(|state| state.exists()),
-            || false,
-            "contains key",
-        );
-        global_metrics().record_storage_read(elapsed_us(started));
-        exists
+                .get(key, &ReadOptions::default())
+                .map(|value| value.map(|bytes| bytes.to_vec()))
+        })();
+        self.finish_storage_read("get", started, result)
     }
 
-    pub async fn contains_key_async(&self, key: &[u8]) -> bool {
+    pub async fn get_raw_async(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         let started = Instant::now();
-        if let Some(exists) = self.transaction_access_or(
-            self.with_transaction_mut(|txn| {
-                storage_read_or(txn.get(key), || None, "transaction contains key async").is_some()
-            }),
-            || false,
-            "access transaction for async contains key",
-        ) {
-            global_metrics().record_storage_read(elapsed_us(started));
-            return exists;
-        }
-        let exists = storage_read_or(
+        let result = if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+            value.map(|value| value.map(|bytes| bytes.to_vec()))
+        } else {
+            self.table
+                .get_async(key, &ReadOptions::default())
+                .await
+                .map(|value| value.map(|bytes| bytes.to_vec()))
+        };
+        self.finish_storage_read("get async", started, result)
+    }
+
+    pub async fn get_raw_observed_async(&self, key: &[u8]) -> KvResult<ObservedRawValue> {
+        let started = Instant::now();
+        let result = if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+            value.map(|value| ObservedRawValue::from_transaction(key, value))
+        } else {
+            self.table
+                .get_observed_async(key)
+                .await
+                .map(|observed| ObservedRawValue::from_engine(key, observed))
+        };
+        self.finish_storage_read("observed get async", started, result)
+    }
+
+    pub fn get_raw_observed(&self, key: &[u8]) -> KvResult<ObservedRawValue> {
+        let started = Instant::now();
+        let result = (|| {
+            if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+                return value.map(|value| ObservedRawValue::from_transaction(key, value));
+            }
+            self.table
+                .get_observed(key)
+                .map(|observed| ObservedRawValue::from_engine(key, observed))
+        })();
+        self.finish_storage_read("observed get", started, result)
+    }
+
+    pub async fn observe_raw_key_state_async(
+        &self,
+        key: &[u8],
+    ) -> KvResult<ObservedRawKeyState> {
+        let started = Instant::now();
+        let result = if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+            value.map(|value| ObservedRawKeyState::from_transaction(key, value.is_some()))
+        } else {
             self.table
                 .observe_key_state_async(key)
                 .await
-                .map(|state| state.exists()),
-            || false,
-            "contains key async",
-        );
-        global_metrics().record_storage_read(elapsed_us(started));
-        exists
+                .map(|observed| ObservedRawKeyState::from_engine(key, observed))
+        };
+        self.finish_storage_read("observe key state", started, result)
     }
-}
 
-fn storage_read_or<T>(
-    result: KvResult<T>,
-    fallback: impl FnOnce() -> T,
-    operation: &str,
-) -> T {
-    match result {
-        Ok(value) => value,
-        Err(error) => {
-            crate::store::health::storage_health().record_failure(operation, error);
-            fallback()
+    /// Read the raw value while preserving the engine's `Bytes` allocation.
+    pub fn get_raw_bytes(&self, key: &[u8]) -> KvResult<Option<Bytes>> {
+        let started = Instant::now();
+        let result = (|| {
+            if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+                return value;
+            }
+            self.table.get(key, &ReadOptions::default())
+        })();
+        self.finish_storage_read("get bytes", started, result)
+    }
+
+    pub async fn get_raw_bytes_async(&self, key: &[u8]) -> KvResult<Option<Bytes>> {
+        let started = Instant::now();
+        let result = if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+            value
+        } else {
+            self.table.get_async(key, &ReadOptions::default()).await
+        };
+        self.finish_storage_read("get bytes async", started, result)
+    }
+
+    /// Batch-read raw values without hiding a partial or failed storage read.
+    pub fn multi_get_raw(&self, keys: &[Vec<u8>]) -> KvResult<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
         }
+        let started = Instant::now();
+        let result = (|| {
+            let values = if let Some(values) = self.with_transaction_mut(|txn| txn.multi_get(keys))?
+            {
+                values?
+            } else {
+                self.table.multi_get(keys, &ReadOptions::default())?
+            };
+            Ok(values
+                .into_iter()
+                .map(|value| value.map(|bytes| bytes.to_vec()))
+                .collect())
+        })();
+        self.finish_storage_read("multi get", started, result)
+    }
+
+    pub async fn multi_get_raw_async(
+        &self,
+        keys: &[Vec<u8>],
+    ) -> KvResult<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
+        let result = if let Some(values) = self.with_transaction_mut(|txn| txn.multi_get(keys))? {
+            values
+        } else {
+            self.table.multi_get_async(keys, &ReadOptions::default()).await
+        }
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|value| value.map(|bytes| bytes.to_vec()))
+                .collect()
+        });
+        self.finish_storage_read("multi get async", started, result)
+    }
+
+    /// Batch-read values together with reusable compare-and-write observation tokens.
+    pub async fn multi_get_raw_observed_async(
+        &self,
+        keys: &[Vec<u8>],
+    ) -> KvResult<Vec<ObservedRawValue>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
+        let result = if let Some(values) = self.with_transaction_mut(|txn| txn.multi_get(keys))? {
+            values.map(|values| {
+                keys.iter()
+                    .zip(values)
+                    .map(|(key, value)| ObservedRawValue::from_transaction(key, value))
+                    .collect()
+            })
+        } else {
+            self.table.multi_get_observed_async(keys).await.map(|observed| {
+                observed
+                    .into_iter()
+                    .zip(keys)
+                    .map(|(observed, key)| ObservedRawValue::from_engine(key, observed))
+                    .collect()
+            })
+        };
+        self.finish_storage_read("multi observed get async", started, result)
+    }
+
+    pub fn contains_key(&self, key: &[u8]) -> KvResult<bool> {
+        let started = Instant::now();
+        let result = (|| {
+            if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+                return value.map(|value| value.is_some());
+            }
+            self.table.observe_key_state(key).map(|state| state.exists())
+        })();
+        self.finish_storage_read("contains key", started, result)
+    }
+
+    pub async fn contains_key_async(&self, key: &[u8]) -> KvResult<bool> {
+        let started = Instant::now();
+        let result = if let Some(value) = self.with_transaction_mut(|txn| txn.get(key))? {
+            value.map(|value| value.is_some())
+        } else {
+            self.table
+                .observe_key_state_async(key)
+                .await
+                .map(|state| state.exists())
+        };
+        self.finish_storage_read("contains key async", started, result)
     }
 }

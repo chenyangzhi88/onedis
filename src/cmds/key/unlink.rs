@@ -18,17 +18,16 @@ impl Unlink {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let deleted = self
-            .keys
-            .into_iter()
-            .filter(|key| db.delete_key(key))
-            .count() as i64;
+        let mut deleted = 0i64;
+        for key in self.keys {
+            deleted += i64::from(db.delete_key(&key)?);
+        }
         Ok(Frame::Integer(deleted))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         Ok(Frame::Integer(
-            db.delete_keys_async(&self.keys).await as i64,
+            db.delete_keys_async(&self.keys).await? as i64,
         ))
     }
 }

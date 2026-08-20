@@ -16,42 +16,46 @@ fn json_attr_to_string(value: &JsonValue) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+struct VectorResultContext<'a> {
+    meta: &'a VectorIndexMeta,
+    query: &'a [f32],
+    query_norm_squared: f64,
+    return_attrs: &'a [String],
+    return_attrs_json: bool,
+    filters: &'a [FilterPredicate],
+}
+
 fn runtime_doc_to_search_result(
     id: &str,
     doc: &VectorDocRecord,
-    meta: &VectorIndexMeta,
-    query: &[f32],
-    query_norm_squared: f64,
     candidate_score: Option<f32>,
-    return_attrs: &[String],
-    return_attrs_json: bool,
-    filters: &[FilterPredicate],
+    context: &VectorResultContext<'_>,
 ) -> Result<Option<VectorSearchResult>, Error> {
-    let attrs = if filters.is_empty() && return_attrs.is_empty() {
+    let attrs = if context.filters.is_empty() && context.return_attrs.is_empty() {
         None
     } else {
         let attrs = parse_attrs(&doc.attrs_json)?;
-        if !matches_filters(&attrs, filters) {
+        if !matches_filters(&attrs, context.filters) {
             return Ok(None);
         }
         Some(attrs)
     };
-    let attrs_json = return_attrs_json.then(|| doc.attrs_json.clone());
+    let attrs_json = context.return_attrs_json.then(|| doc.attrs_json.clone());
     Ok(Some(VectorSearchResult {
         id: id.to_string(),
         score: candidate_score
             .map(Ok)
             .unwrap_or_else(|| {
                 distance_score_prepared(
-                    meta.distance,
-                    query,
-                    query_norm_squared,
+                    context.meta.distance,
+                    context.query,
+                    context.query_norm_squared,
                     &doc.vector,
                 )
             })?,
         attrs: attrs
             .as_ref()
-            .map(|attrs| collect_return_attrs(attrs, return_attrs))
+            .map(|attrs| collect_return_attrs(attrs, context.return_attrs))
             .unwrap_or_default(),
         attrs_json,
     }))

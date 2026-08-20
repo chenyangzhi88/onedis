@@ -9,7 +9,7 @@ impl Db {
         }
         let mut sets = Vec::with_capacity(keys.len());
         for key in keys {
-            let Some(set) = self.get(key) else {
+            let Some(set) = self.get(key)? else {
                 return Ok(0);
             };
             let Structure::Set(set) = set else {
@@ -58,14 +58,14 @@ impl Db {
             ));
         };
 
-        let mut difference = match self.get(first_key) {
+        let mut difference = match self.get(first_key)? {
             Some(Structure::Set(set)) => set,
             Some(_) => return Err(Error::msg(WRONG_TYPE_ERROR)),
             None => HashSet::new(),
         };
 
         for key in rest {
-            match self.get(key) {
+            match self.get(key)? {
                 Some(Structure::Set(set)) => {
                     for member in set {
                         difference.remove(&member);
@@ -95,9 +95,9 @@ impl Db {
         let difference = self.set_diff(keys)?;
         let len = difference.len();
         if len == 0 {
-            self.remove(destination);
+            self.remove(destination)?;
         } else {
-            self.insert(destination.to_string(), Structure::Set(difference));
+            self.insert(destination.to_string(), Structure::Set(difference))?;
         }
         Ok(len)
     }
@@ -118,14 +118,14 @@ impl Db {
             ));
         };
 
-        let mut intersection = match self.get(first_key) {
+        let mut intersection = match self.get(first_key)? {
             Some(Structure::Set(set)) => set,
             Some(_) => return Err(Error::msg(WRONG_TYPE_ERROR)),
             None => return Ok(HashSet::new()),
         };
 
         for key in rest {
-            match self.get(key) {
+            match self.get(key)? {
                 Some(Structure::Set(set)) => {
                     intersection = intersection.intersection(&set).cloned().collect();
                 }
@@ -156,9 +156,9 @@ impl Db {
         let intersection = self.set_intersection(keys)?;
         let len = intersection.len();
         if len == 0 {
-            self.delete_key(destination);
+            self.delete_key(destination)?;
         } else {
-            self.insert(destination.to_string(), Structure::Set(intersection));
+            self.insert(destination.to_string(), Structure::Set(intersection))?;
         }
         Ok(len)
     }
@@ -198,7 +198,7 @@ impl Db {
         members: HashSet<String>,
     ) -> Result<usize, Error> {
         let _write_guard = self.set_write_lock(destination).lock().await;
-        self.delete_key_internal_async(destination, true).await;
+        self.delete_key_internal_async(destination, true).await?;
         let len = members.len();
         if len == 0 {
             return Ok(0);

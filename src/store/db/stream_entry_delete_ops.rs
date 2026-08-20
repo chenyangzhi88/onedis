@@ -8,7 +8,7 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(0));
             };
@@ -46,7 +46,7 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(Some(0));
             };
@@ -142,7 +142,10 @@ impl Db {
             .iter()
             .map(|(_, _, key)| key.clone())
             .collect::<Vec<_>>();
-        let entry_values = self.store.multi_get_raw_async(&entry_keys).await;
+        let entry_values = match self.store.multi_get_raw_async(&entry_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(commands.len(), error),
+        };
         let mut existing_ids = vec![BTreeSet::<StreamId>::new(); keys.len()];
         for ((position, id, _), value) in entry_lookups.iter().zip(entry_values) {
             if value.is_some() {
@@ -204,14 +207,18 @@ impl Db {
                     .expect("write batch append invariant violated");
             }
         }
-        self.write_existing_version_batch_if_not_empty_async(&batch)
-            .await;
+        if let Err(error) = self
+            .write_existing_version_batch_if_not_empty_async(&batch)
+            .await
+        {
+            return fail_successful_batch_replies(replies, error);
+        }
         self.changes.fetch_add(changed_commands, Ordering::Relaxed);
         replies
     }
 
     pub fn stream_delete(&self, key: &str, ids: &[StreamId]) -> Result<usize, Error> {
-        self.expire_if_needed(key);
+        self.expire_if_needed(key)?;
         if let Some(deleted) = self.try_stream_delete_packed(key, ids)? {
             return Ok(deleted);
         }
@@ -226,7 +233,7 @@ impl Db {
                 continue;
             }
             let entry_key = stream_entry_key(self.db_index, key, meta.version, *id);
-            if self.store.get_raw(&entry_key).is_some() {
+            if self.store.get_raw(&entry_key)?.is_some() {
                 (batch.delete(&entry_key)).expect("write batch append invariant violated");
                 deleted += 1;
             }
@@ -235,7 +242,7 @@ impl Db {
             meta.length = meta.length.saturating_sub(deleted as u64);
             (batch.put(&self.mk(key), &encode_stream_meta(meta)))
                 .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(deleted)
@@ -251,7 +258,7 @@ impl Db {
         key: &str,
         ids: &[StreamId],
     ) -> Result<usize, Error> {
-        self.expire_if_needed_async(key).await;
+        self.expire_if_needed_async(key).await?;
         if let Some(deleted) = self.try_stream_delete_packed_async(key, ids).await? {
             return Ok(deleted);
         }
@@ -270,7 +277,7 @@ impl Db {
             .iter()
             .map(|id| stream_entry_key(self.db_index, key, meta.version, *id))
             .collect::<Vec<_>>();
-        let existing = self.store.multi_get_raw_async(&entry_keys).await;
+        let existing = self.store.multi_get_raw_async(&entry_keys).await?;
         for (entry_key, old_raw) in entry_keys.into_iter().zip(existing) {
             if old_raw.is_some() {
                 (batch.delete(&entry_key)).expect("write batch append invariant violated");
@@ -281,7 +288,7 @@ impl Db {
             meta.length = meta.length.saturating_sub(deleted as u64);
             (batch.put(&self.mk(key), &encode_stream_meta(meta)))
                 .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(deleted)
@@ -296,7 +303,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         (batch.put(&self.mk(key), &encode_stream_meta(meta)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -312,7 +319,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         (batch.put(&self.mk(key), &encode_stream_meta(meta)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -337,7 +344,7 @@ impl Db {
         let mut seen_pending_ids = std::collections::BTreeSet::new();
         for id in ids {
             let entry_key = stream_entry_key(self.db_index, key, meta.version, *id);
-            let exists = self.store.get_raw(&entry_key).is_some();
+            let exists = self.store.get_raw(&entry_key)?.is_some();
             statuses.push(if exists { 1 } else { -1 });
             if exists && seen_entry_ids.insert(*id) {
                 (batch.delete(&entry_key)).expect("write batch append invariant violated");
@@ -346,7 +353,7 @@ impl Db {
 
             if seen_pending_ids.insert(*id) {
                 let pending_key = stream_pel_key(self.db_index, key, meta.version, group, *id);
-                if self.store.get_raw(&pending_key).is_some() {
+                if self.store.get_raw(&pending_key)?.is_some() {
                     (batch.delete(&pending_key)).expect("write batch append invariant violated");
                 }
             }
@@ -357,7 +364,7 @@ impl Db {
                 .expect("write batch append invariant violated");
         }
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(statuses)
@@ -388,7 +395,7 @@ impl Db {
             .collect::<Vec<_>>();
         let mut lookup_keys = entry_keys.clone();
         lookup_keys.extend(pending_keys.iter().cloned());
-        let mut lookup_values = self.store.multi_get_raw_async(&lookup_keys).await;
+        let mut lookup_values = self.store.multi_get_raw_async(&lookup_keys).await?;
         let pending_values = lookup_values.split_off(entry_keys.len());
         let entry_values = lookup_values;
         let mut statuses = Vec::with_capacity(ids.len());
@@ -419,7 +426,7 @@ impl Db {
                 .expect("write batch append invariant violated");
         }
         if batch.count() > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(statuses)
@@ -440,7 +447,7 @@ impl Db {
         let mut seen_ids = std::collections::BTreeSet::new();
         for id in ids {
             let entry_key = stream_entry_key(self.db_index, key, meta.version, *id);
-            let exists = self.store.get_raw(&entry_key).is_some();
+            let exists = self.store.get_raw(&entry_key)?.is_some();
             statuses.push(if exists { 1 } else { -1 });
             if exists && seen_ids.insert(*id) {
                 (batch.delete(&entry_key)).expect("write batch append invariant violated");
@@ -451,7 +458,7 @@ impl Db {
             meta.length = meta.length.saturating_sub(deleted as u64);
             (batch.put(&self.mk(key), &encode_stream_meta(meta)))
                 .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(statuses)
@@ -471,7 +478,7 @@ impl Db {
             .iter()
             .map(|id| stream_entry_key(self.db_index, key, meta.version, *id))
             .collect::<Vec<_>>();
-        let entry_values = self.store.multi_get_raw_async(&entry_keys).await;
+        let entry_values = self.store.multi_get_raw_async(&entry_keys).await?;
         let mut statuses = Vec::with_capacity(ids.len());
         let mut deleted = 0usize;
         let mut batch = WriteBatch::new();
@@ -488,7 +495,7 @@ impl Db {
             meta.length = meta.length.saturating_sub(deleted as u64);
             (batch.put(&self.mk(key), &encode_stream_meta(meta)))
                 .expect("write batch append invariant violated");
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(statuses)

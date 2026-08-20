@@ -496,7 +496,7 @@ pub fn handle_command_async(db: &Db, command: Command) -> CommandFuture<'_> {
             Ok(Frame::Integer(if moved { 1 } else { 0 }))
         }),
         Command::Flushall(_) => box_command((), db, |(), db| async move {
-            db.clear_async().await;
+            db.clear_async().await?;
             Ok(Frame::Ok)
         }),
         Command::Info(info) => box_command(info, db, |info, db| info.apply_async(db)),

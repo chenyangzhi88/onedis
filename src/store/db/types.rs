@@ -245,10 +245,7 @@ impl CounterCommitState {
             .lock()
             .expect("counter commit progress mutex poisoned");
         progress.completed.insert(sequence);
-        loop {
-            let Some(next) = progress.committed_sequence.checked_add(1) else {
-                break;
-            };
+        while let Some(next) = progress.committed_sequence.checked_add(1) {
             if !progress.completed.remove(&next) {
                 break;
             }
@@ -614,6 +611,28 @@ pub struct StreamId {
     pub seq: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct ZsetScoreWindow<'a> {
+    pub key: &'a str,
+    pub min: f64,
+    pub min_inclusive: bool,
+    pub max: f64,
+    pub max_inclusive: bool,
+    pub reverse: bool,
+    pub limit: Option<(i64, i64)>,
+}
+
+#[derive(Clone, Copy)]
+pub struct StreamPendingRange<'a> {
+    pub key: &'a str,
+    pub group: &'a str,
+    pub start: StreamId,
+    pub end: StreamId,
+    pub count: usize,
+    pub consumer: Option<&'a str>,
+    pub min_idle_ms: Option<u64>,
+}
+
 impl StreamId {
     pub fn parse(text: &str) -> Option<Self> {
         parse_stream_id(text)
@@ -650,6 +669,36 @@ pub struct KeyMutationTracker {
     clock: AtomicU64,
     key_versions: DashMap<(u16, Vec<u8>), WatchedKeyMutation>,
     db_versions: DashMap<u16, u64>,
+    key_waiters: DashMap<(u16, Vec<u8>), Vec<Weak<Notify>>>,
+}
+
+pub(crate) struct KeyMutationWaiter {
+    tracker: Arc<KeyMutationTracker>,
+    keys: Vec<(u16, Vec<u8>)>,
+    signal: Arc<Notify>,
+}
+
+impl KeyMutationWaiter {
+    pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.signal.notified()
+    }
+}
+
+impl Drop for KeyMutationWaiter {
+    fn drop(&mut self) {
+        for key in &self.keys {
+            if let Entry::Occupied(mut entry) = self.tracker.key_waiters.entry(key.clone()) {
+                entry.get_mut().retain(|waiter| {
+                    waiter
+                        .upgrade()
+                        .is_some_and(|signal| !Arc::ptr_eq(&signal, &self.signal))
+                });
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -659,6 +708,64 @@ struct WatchedKeyMutation {
 }
 
 impl KeyMutationTracker {
+    pub(in crate::store::db) fn register_waiter(
+        self: &Arc<Self>,
+        keys: Vec<(u16, Vec<u8>)>,
+    ) -> KeyMutationWaiter {
+        let mut unique_keys = keys;
+        unique_keys.sort();
+        unique_keys.dedup();
+        let signal = Arc::new(Notify::new());
+        for key in &unique_keys {
+            self.key_waiters
+                .entry(key.clone())
+                .or_default()
+                .push(Arc::downgrade(&signal));
+        }
+        KeyMutationWaiter {
+            tracker: Arc::clone(self),
+            keys: unique_keys,
+            signal,
+        }
+    }
+
+    fn notify_key_waiters(&self, db_index: u16, key: &[u8]) {
+        if let Entry::Occupied(mut entry) = self.key_waiters.entry((db_index, key.to_vec())) {
+            entry.get_mut().retain(|waiter| {
+                let Some(signal) = waiter.upgrade() else {
+                    return false;
+                };
+                signal.notify_one();
+                true
+            });
+            if entry.get().is_empty() {
+                entry.remove();
+            }
+        }
+    }
+
+    fn notify_db_waiters(&self, db_index: u16) {
+        let keys = self
+            .key_waiters
+            .iter()
+            .filter(|entry| entry.key().0 == db_index)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for (_, key) in keys {
+            self.notify_key_waiters(db_index, &key);
+        }
+    }
+
+    pub(crate) fn notify_all_waiters(&self) {
+        for entry in &self.key_waiters {
+            for waiter in entry.value() {
+                if let Some(signal) = waiter.upgrade() {
+                    signal.notify_one();
+                }
+            }
+        }
+    }
+
     pub(in crate::store::db) fn register_key(&self, db_index: u16, key: Vec<u8>) {
         match self.key_versions.entry((db_index, key)) {
             Entry::Occupied(mut entry) => {
@@ -685,17 +792,19 @@ impl KeyMutationTracker {
     }
 
     pub(in crate::store::db) fn bump_key(&self, db_index: u16, key: Vec<u8>) {
+        self.notify_key_waiters(db_index, &key);
         if let Some(mut entry) = self.key_versions.get_mut(&(db_index, key)) {
             let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
             entry.version = version;
         }
     }
 
-    pub(in crate::store::db) fn has_watched_keys(&self) -> bool {
-        !self.key_versions.is_empty()
+    pub(in crate::store::db) fn has_observers(&self) -> bool {
+        !self.key_versions.is_empty() || !self.key_waiters.is_empty()
     }
 
     pub(in crate::store::db) fn bump_db(&self, db_index: u16) {
+        self.notify_db_waiters(db_index);
         let version = self.clock.fetch_add(1, Ordering::AcqRel) + 1;
         self.db_versions.insert(db_index, version);
     }

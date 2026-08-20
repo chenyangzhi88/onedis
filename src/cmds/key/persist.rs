@@ -19,7 +19,7 @@ impl Persist {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        if db.persist(&self.key) {
+        if db.persist(&self.key)? {
             Ok(Frame::Integer(1))
         } else {
             Ok(Frame::Integer(0))
@@ -27,7 +27,7 @@ impl Persist {
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        if db.persist_async(&self.key).await {
+        if db.persist_async(&self.key).await? {
             Ok(Frame::Integer(1))
         } else {
             Ok(Frame::Integer(0))

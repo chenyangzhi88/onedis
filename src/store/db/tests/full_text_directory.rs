@@ -54,7 +54,7 @@ fn chunked_directory_preserves_open_handles_and_incremental_manifest_bytes() {
         .atomic_write(Path::new("segment.bin"), &old)
         .unwrap();
     assert_eq!(
-        KvTantivyDirectory::storage_bytes(&store, 7, "idx"),
+        KvTantivyDirectory::storage_bytes(&store, 7, "idx").unwrap(),
         old.len()
     );
     let open_handle = directory.get_file_handle(Path::new("segment.bin")).unwrap();
@@ -67,7 +67,10 @@ fn chunked_directory_preserves_open_handles_and_incremental_manifest_bytes() {
     );
 
     directory.delete(Path::new("segment.bin")).unwrap();
-    assert_eq!(KvTantivyDirectory::storage_bytes(&store, 7, "idx"), 0);
+    assert_eq!(
+        KvTantivyDirectory::storage_bytes(&store, 7, "idx").unwrap(),
+        0
+    );
     assert_eq!(
         open_handle.read_bytes(0..old.len()).unwrap().as_slice(),
         old.as_slice()
@@ -88,10 +91,10 @@ fn chunked_directory_preserves_open_handles_and_incremental_manifest_bytes() {
     let mut chunk_root = crate::store::TABLE_LOCAL_INTERNAL_PREFIX.to_vec();
     chunk_root.extend_from_slice(&super::super::FULLTEXT_FILE_NAMESPACE);
     chunk_root.extend_from_slice(b"idx\0c\0");
-    let retained_chunks = store.scan_prefix_raw(&chunk_root).len();
+    let retained_chunks = store.scan_prefix_raw(&chunk_root).unwrap().len();
     assert!(retained_chunks >= 3);
     drop(open_handle);
-    assert!(store.scan_prefix_raw(&chunk_root).len() < retained_chunks);
+    assert!(store.scan_prefix_raw(&chunk_root).unwrap().len() < retained_chunks);
 }
 
 #[test]
@@ -153,7 +156,10 @@ fn tiered_directory_publishes_hot_files_before_durable_checkpoint() {
         b"hot-segment"
     );
     assert!(directory.has_hot_changes());
-    assert_eq!(KvTantivyDirectory::storage_bytes(&store, 9, "idx"), 0);
+    assert_eq!(
+        KvTantivyDirectory::storage_bytes(&store, 9, "idx").unwrap(),
+        0
+    );
     assert!(
         !KvTantivyDirectory::new(store.clone(), 9, "idx")
             .exists(Path::new("meta.json"))

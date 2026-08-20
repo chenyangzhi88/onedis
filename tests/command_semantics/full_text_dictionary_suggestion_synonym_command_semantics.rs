@@ -50,6 +50,8 @@ fn command_bytes(args: &[&[u8]]) -> Command {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     onedis_server::command_dispatch::handle_command(db, command(args)).expect("command failed")
 }
 

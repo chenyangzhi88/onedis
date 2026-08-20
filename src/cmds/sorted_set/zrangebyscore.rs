@@ -6,7 +6,7 @@ use crate::{
         zrange::{ScoreBound, flatten_entries, parse_score_bound},
     },
     frame::Frame,
-    store::db::Db,
+    store::db::{Db, ZsetScoreWindow},
 };
 
 pub struct Zrangebyscore {
@@ -28,15 +28,15 @@ impl Zrangebyscore {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        match db.zset_range_by_score_window(
-            &self.key,
-            self.min.value,
-            self.min.inclusive,
-            self.max.value,
-            self.max.inclusive,
-            self.reverse,
-            self.limit,
-        ) {
+        match db.zset_range_by_score_window(ZsetScoreWindow {
+            key: &self.key,
+            min: self.min.value,
+            min_inclusive: self.min.inclusive,
+            max: self.max.value,
+            max_inclusive: self.max.inclusive,
+            reverse: self.reverse,
+            limit: self.limit,
+        }) {
             Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),
             Err(err) => Ok(Frame::Error(err.to_string())),
         }
@@ -44,15 +44,15 @@ impl Zrangebyscore {
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         match db
-            .zset_range_by_score_window_async(
-                &self.key,
-                self.min.value,
-                self.min.inclusive,
-                self.max.value,
-                self.max.inclusive,
-                self.reverse,
-                self.limit,
-            )
+            .zset_range_by_score_window_async(ZsetScoreWindow {
+                key: &self.key,
+                min: self.min.value,
+                min_inclusive: self.min.inclusive,
+                max: self.max.value,
+                max_inclusive: self.max.inclusive,
+                reverse: self.reverse,
+                limit: self.limit,
+            })
             .await
         {
             Ok(entries) => Ok(Frame::Array(flatten_entries(entries, self.withscores)?)),

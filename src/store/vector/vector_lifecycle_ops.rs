@@ -69,13 +69,15 @@ impl Db {
         meta.snapshot_doc_version = 0;
         put_vector_marker_to_batch(
             &mut batch,
-            self.key_layout,
-            self.db_index,
-            index,
-            expire_ms,
-            version,
-            meta.dim,
-            meta.internal,
+            VectorMarker {
+                layout: self.key_layout,
+                db_index: self.db_index,
+                index,
+                expire_ms,
+                version,
+                dim: meta.dim,
+                internal: meta.internal,
+            },
         )?;
         batch.put(
             &vector_meta_key(self.key_layout, self.db_index, index, version),
@@ -100,7 +102,7 @@ impl Db {
             let prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
             let docs = self
                 .store
-                .scan_prefix_raw(&prefix)
+                .scan_prefix_raw(&prefix)?
                 .into_iter()
                 .map(|(_, raw)| decode_record::<VectorDocRecord>(&raw))
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -209,7 +211,8 @@ impl Db {
             // write can leave an unreachable blob, but never a visible segment
             // whose source is missing.
             self.store
-                .blob_put_raw(&source_key, &encode_record(source.as_ref())?);
+                .blob_put_raw(&source_key, &encode_record(source.as_ref())?)
+                .map_err(|error| Error::msg(error.to_string()))?;
             batch.put(
                 &vector_segment_key(
                     self.key_layout,
@@ -342,7 +345,7 @@ impl Db {
             original_segment.segment_id,
         );
         let original_segment_raw = encode_record(&original_segment)?;
-        if self.store.get_raw(&segment_key).as_deref() != Some(original_segment_raw.as_slice()) {
+        if self.store.get_raw(&segment_key)?.as_deref() != Some(original_segment_raw.as_slice()) {
             return Ok(false);
         }
         let index_key = vector_segment_index_key(
@@ -352,7 +355,9 @@ impl Db {
             version,
             original_segment.segment_id,
         );
-        self.store.blob_put_raw(&index_key, &encoded_index);
+        self.store
+            .blob_put_raw(&index_key, &encoded_index)
+            .map_err(|error| Error::msg(error.to_string()))?;
         let mut published_segment = original_segment;
         published_segment.index_key = index_key.clone();
         let mut batch = WriteBatch::new();
@@ -566,9 +571,11 @@ impl Db {
             );
             conditions.push(CompareCondition::absent(&segment_key));
             self.store
-                .blob_put_raw(&source_key, encoded_source.as_deref().unwrap());
+                .blob_put_raw(&source_key, encoded_source.as_deref().unwrap())
+                .map_err(|error| Error::msg(error.to_string()))?;
             self.store
-                .blob_put_raw(&index_key, encoded_index.as_deref().unwrap());
+                .blob_put_raw(&index_key, encoded_index.as_deref().unwrap())
+                .map_err(|error| Error::msg(error.to_string()))?;
             let replacement = VectorSegmentMeta {
                 segment_id,
                 level: replacement_level,
@@ -719,7 +726,7 @@ impl Db {
         );
         let previous_checkpoint = self
             .store
-            .get_raw(&checkpoint_key)
+            .get_raw(&checkpoint_key)?
             .map(|raw| decode_record::<VectorVersionCheckpoint>(&raw))
             .transpose()?;
         let checkpoint_through = previous_checkpoint
@@ -794,7 +801,7 @@ impl Db {
             let doc_prefix = vector_doc_prefix(self.key_layout, self.db_index, index, version);
             let mut live_count = 0u64;
             let mut tombstone_keys = Vec::new();
-            for (key, raw) in self.store.scan_prefix_raw(&doc_prefix) {
+            for (key, raw) in self.store.scan_prefix_raw(&doc_prefix)? {
                 if decode_record::<VectorDocRecord>(&raw)?.deleted {
                     tombstone_keys.push(key);
                 } else {
@@ -829,15 +836,15 @@ impl Db {
                 &vector_mutable_state_key(self.key_layout, self.db_index, index, version),
                 &encode_record(&VectorMutableState::from_meta(&meta))?,
             )?;
-            self.commit_vector_batch_with_state_if_unchanged(
+            self.commit_vector_batch_with_state_if_unchanged(VectorStateCommit {
                 index,
-                meta.internal,
+                internal: meta.internal,
                 version,
-                &expected_marker,
-                &expected_meta,
+                expected_marker: &expected_marker,
+                expected_meta: &expected_meta,
                 expected_state,
-                &batch,
-            )?;
+                batch: &batch,
+            })?;
             self.vector_runtimes.remove(self.db_index, index, version);
             return Ok(());
         }
@@ -849,7 +856,7 @@ impl Db {
         let mut live_docs = Vec::new();
         let mut tombstone_keys = Vec::new();
         let mut max_doc_version = 0u64;
-        for (key, raw) in self.store.scan_prefix_raw(&doc_prefix) {
+        for (key, raw) in self.store.scan_prefix_raw(&doc_prefix)? {
             let doc = decode_record::<VectorDocRecord>(&raw)?;
             max_doc_version = max_doc_version.max(doc.doc_version);
             if doc.deleted {
@@ -871,7 +878,7 @@ impl Db {
                 self.db_index,
                 index,
                 version,
-            ))
+            ))?
             .into_iter()
             .map(|(key, raw)| Ok((key, decode_record::<VectorSegmentMeta>(&raw)?)))
             .collect::<Result<Vec<_>, Error>>()?;
@@ -883,7 +890,7 @@ impl Db {
                 &VECTOR_GRAPH_NAMESPACE,
                 index,
                 version,
-            ))
+            ))?
             .into_iter()
             .map(|(key, _)| key)
             .collect::<Vec<_>>();
@@ -927,9 +934,11 @@ impl Db {
                 max_doc_version: chunk.last().unwrap().doc_version,
             };
             self.store
-                .blob_put_raw(&source_key, &encode_record(source.as_ref())?);
+                .blob_put_raw(&source_key, &encode_record(source.as_ref())?)
+                .map_err(|error| Error::msg(error.to_string()))?;
             self.store
-                .blob_put_raw(&index_key, &encode_record(persisted.as_ref())?);
+                .blob_put_raw(&index_key, &encode_record(persisted.as_ref())?)
+                .map_err(|error| Error::msg(error.to_string()))?;
             rebuilt_segments.push((segment, source, persisted));
         }
 
@@ -989,15 +998,15 @@ impl Db {
             &vector_mutable_state_key(self.key_layout, self.db_index, index, version),
             &encode_record(&VectorMutableState::from_meta(&meta))?,
         )?;
-        self.commit_vector_batch_with_state_if_unchanged(
+        self.commit_vector_batch_with_state_if_unchanged(VectorStateCommit {
             index,
-            meta.internal,
+            internal: meta.internal,
             version,
-            &expected_marker,
-            &expected_meta,
+            expected_marker: &expected_marker,
+            expected_meta: &expected_meta,
             expected_state,
-            &batch,
-        )?;
+            batch: &batch,
+        })?;
 
         let runtime_segments = rebuilt_segments
             .into_iter()
@@ -1029,9 +1038,11 @@ impl Db {
     }
 
     pub(crate) fn vector_maintenance_tick(&self) -> Result<(), Error> {
+        const INDEX_BUDGET: usize = 4;
         let indexes = self
             .vector_runtimes
-            .take_dirty_indexes_for_db(self.db_index);
+            .take_dirty_indexes_for_db(self.db_index, INDEX_BUDGET);
+        let mut first_error = None;
         for (index, expected_version) in indexes {
             let result = (|| -> Result<(), Error> {
                 // Advance an already-published source before flushing the
@@ -1059,10 +1070,14 @@ impl Db {
                         .remove(self.db_index, &index, expected_version);
                     continue;
                 }
-                return Err(err);
+                self.vector_runtimes
+                    .mark_dirty(self.db_index, &index, expected_version);
+                if first_error.is_none() {
+                    first_error = Some(Error::msg(format!("index {index}: {err}")));
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     pub(crate) async fn vector_maintenance_tick_async(&self) -> Result<(), Error> {

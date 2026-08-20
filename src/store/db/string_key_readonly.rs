@@ -2,7 +2,7 @@ use super::*;
 
 impl Db {
     pub fn get_string_entry_raw_bytes(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
-        let Some(raw) = self.read_live_raw_key_bytes(key) else {
+        let Some(raw) = self.read_live_raw_key_bytes(key)? else {
             return Ok(None);
         };
         if decode_string_bytes_slice(&raw).is_some() {
@@ -16,7 +16,7 @@ impl Db {
         &self,
         key: &[u8],
     ) -> Result<Option<Bytes>, Error> {
-        let Some(raw) = self.read_live_raw_key_bytes_async(key).await else {
+        let Some(raw) = self.read_live_raw_key_bytes_async(key).await? else {
             return Ok(None);
         };
         if decode_string_bytes_slice(&raw).is_some() {
@@ -30,15 +30,16 @@ impl Db {
     pub(crate) async fn read_live_raw_byte_keys_many_async(
         &self,
         keys: &[&[u8]],
-    ) -> Vec<Option<Vec<u8>>> {
+    ) -> Result<Vec<Option<Vec<u8>>>, Error> {
         let raw_keys = keys
             .iter()
             .map(|key| main_key_bytes(self.db_index, key))
             .collect::<Vec<_>>();
         let now = now_ms();
-        self.store
+        Ok(self
+            .store
             .multi_get_raw_async(&raw_keys)
-            .await
+            .await?
             .into_iter()
             .map(|raw| {
                 raw.filter(|raw| {
@@ -46,7 +47,7 @@ impl Db {
                     expire_ms == 0 || now < expire_ms
                 })
             })
-            .collect()
+            .collect())
     }
 
     pub(crate) fn ttl_millis_from_live_raw(raw: &[u8]) -> i64 {
@@ -113,7 +114,7 @@ impl Db {
         key: &str,
         expiration: Option<StringExpireUpdate>,
     ) -> Result<Option<Vec<u8>>, Error> {
-        let Some(raw) = self.read_live_raw(key) else {
+        let Some(raw) = self.read_live_raw(key)? else {
             return Ok(None);
         };
         let value = decode_string_bytes(&raw).ok_or_else(|| Error::msg(WRONG_TYPE_ERROR))?;
@@ -123,16 +124,16 @@ impl Db {
 
         match expiration {
             StringExpireUpdate::Persist => {
-                self.persist(key);
+                self.persist(key)?;
             }
             StringExpireUpdate::RelativeMs(ttl_ms) => {
-                self.expire(key.to_string(), ttl_ms);
+                self.expire(key.to_string(), ttl_ms)?;
             }
             StringExpireUpdate::AbsoluteMs(expire_ms) => {
                 if expire_ms <= now_ms() {
-                    self.delete_key_internal(key, false);
+                    self.delete_key_internal(key, false)?;
                 } else {
-                    self.expire(key.to_string(), expire_ms - now_ms());
+                    self.expire(key.to_string(), expire_ms - now_ms())?;
                 }
             }
         }
@@ -145,7 +146,7 @@ impl Db {
         expiration: Option<StringExpireUpdate>,
     ) -> Result<Option<Vec<u8>>, Error> {
         let Some(expiration) = expiration else {
-            let Some(raw) = self.read_live_raw_async(key).await else {
+            let Some(raw) = self.read_live_raw_async(key).await? else {
                 return Ok(None);
             };
             return decode_string_bytes(&raw)
@@ -156,8 +157,8 @@ impl Db {
         let _write_guard = self.set_write_lock(key).lock().await;
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            self.expire_if_needed_async(key).await;
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            self.expire_if_needed_async(key).await?;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(None);
             };
@@ -240,14 +241,14 @@ impl Db {
         Err(Error::msg("ERR GETEX write conflict"))
     }
 
-    pub fn type_name_readonly(&self, key: &str) -> &'static str {
-        let Some(raw) = self.read_live_raw(key) else {
-            return "none";
+    pub fn type_name_readonly(&self, key: &str) -> Result<&'static str, Error> {
+        let Some(raw) = self.read_live_raw(key)? else {
+            return Ok("none");
         };
         let Some(header) = decode_meta_header(&raw) else {
-            return "none";
+            return Ok("none");
         };
-        match header.type_tag {
+        Ok(match header.type_tag {
             TYPE_STRING => "string",
             TYPE_HASH => "hash",
             TYPE_SET => "set",
@@ -257,17 +258,17 @@ impl Db {
             TYPE_VECTOR => "vector",
             TYPE_JSON => "json",
             _ => "none",
-        }
+        })
     }
 
-    pub async fn type_name_readonly_async(&self, key: &str) -> &'static str {
-        let Some(raw) = self.read_live_raw_async(key).await else {
-            return "none";
+    pub async fn type_name_readonly_async(&self, key: &str) -> Result<&'static str, Error> {
+        let Some(raw) = self.read_live_raw_async(key).await? else {
+            return Ok("none");
         };
         let Some(header) = decode_meta_header(&raw) else {
-            return "none";
+            return Ok("none");
         };
-        match header.type_tag {
+        Ok(match header.type_tag {
             TYPE_STRING => "string",
             TYPE_HASH => "hash",
             TYPE_SET => "set",
@@ -277,25 +278,26 @@ impl Db {
             TYPE_VECTOR => "vector",
             TYPE_JSON => "json",
             _ => "none",
-        }
+        })
     }
 
-    pub fn exists_readonly(&self, key: &str) -> bool {
-        self.read_live_raw(key).is_some()
+    pub fn exists_readonly(&self, key: &str) -> Result<bool, Error> {
+        Ok(self.read_live_raw(key)?.is_some())
     }
 
-    pub async fn exists_readonly_async(&self, key: &str) -> bool {
-        self.read_live_raw_async(key).await.is_some()
+    pub async fn exists_readonly_async(&self, key: &str) -> Result<bool, Error> {
+        Ok(self.read_live_raw_async(key).await?.is_some())
     }
 
     /// Return per-key liveness with one storage multi-get. Duplicate keys intentionally
     /// retain duplicate results to match EXISTS/TOUCH semantics.
-    pub async fn exists_readonly_many_async(&self, keys: &[String]) -> Vec<bool> {
+    pub async fn exists_readonly_many_async(&self, keys: &[String]) -> Result<Vec<bool>, Error> {
         let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
         let now = now_ms();
-        self.store
+        Ok(self
+            .store
             .multi_get_raw_async(&raw_keys)
-            .await
+            .await?
             .into_iter()
             .map(|raw| {
                 raw.is_some_and(|raw| {
@@ -303,98 +305,114 @@ impl Db {
                     expire_ms == 0 || now < expire_ms
                 })
             })
-            .collect()
+            .collect())
     }
 
-    pub fn ttl_millis_readonly(&self, key: &str) -> i64 {
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
-            return -2;
+    pub fn ttl_millis_readonly(&self, key: &str) -> Result<i64, Error> {
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
+            return Ok(-2);
         };
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms == 0 {
-            return -1;
+            return Ok(-1);
         }
         let now = now_ms();
         if now >= expire_ms {
-            -2
+            Ok(-2)
         } else {
-            (expire_ms - now) as i64
+            Ok((expire_ms - now) as i64)
         }
     }
 
-    pub async fn ttl_millis_readonly_async(&self, key: &str) -> i64 {
-        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
-            return -2;
+    pub async fn ttl_millis_readonly_async(&self, key: &str) -> Result<i64, Error> {
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
+            return Ok(-2);
         };
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms == 0 {
-            return -1;
+            return Ok(-1);
         }
         let now = now_ms();
         if now >= expire_ms {
-            -2
+            Ok(-2)
         } else {
-            (expire_ms - now) as i64
+            Ok((expire_ms - now) as i64)
         }
     }
 
-    pub fn expire_time_millis_readonly(&self, key: &str) -> i64 {
-        let Some(raw) = self.read_live_raw(key) else {
-            return -2;
+    pub fn expire_time_millis_readonly(&self, key: &str) -> Result<i64, Error> {
+        let Some(raw) = self.read_live_raw(key)? else {
+            return Ok(-2);
         };
         let expire_ms = decode_expire_ms(&raw);
-        if expire_ms == 0 { -1 } else { expire_ms as i64 }
+        Ok(if expire_ms == 0 { -1 } else { expire_ms as i64 })
     }
 
-    pub async fn expire_time_millis_readonly_async(&self, key: &str) -> i64 {
-        let Some(raw) = self.read_live_raw_async(key).await else {
-            return -2;
+    pub async fn expire_time_millis_readonly_async(&self, key: &str) -> Result<i64, Error> {
+        let Some(raw) = self.read_live_raw_async(key).await? else {
+            return Ok(-2);
         };
         let expire_ms = decode_expire_ms(&raw);
-        if expire_ms == 0 { -1 } else { expire_ms as i64 }
+        Ok(if expire_ms == 0 { -1 } else { expire_ms as i64 })
     }
 
-    pub(in crate::store::db) fn read_live_raw(&self, key: &str) -> Option<Vec<u8>> {
-        let raw = self.store.get_raw(&self.mk(key))?;
+    pub(in crate::store::db) fn read_live_raw(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
+            return Ok(None);
+        };
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms > 0 && now_ms() >= expire_ms {
-            return None;
+            return Ok(None);
         }
-        Some(raw)
+        Ok(Some(raw))
     }
 
-    pub(in crate::store::db) async fn read_live_raw_async(&self, key: &str) -> Option<Vec<u8>> {
-        let raw = self.store.get_raw_async(&self.mk(key)).await?;
+    pub(in crate::store::db) async fn read_live_raw_async(
+        &self,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
+            return Ok(None);
+        };
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms > 0 && now_ms() >= expire_ms {
-            return None;
+            return Ok(None);
         }
-        Some(raw)
+        Ok(Some(raw))
     }
 
-    pub(in crate::store::db) fn read_live_raw_key_bytes(&self, key: &[u8]) -> Option<Bytes> {
-        let raw = self
+    pub(in crate::store::db) fn read_live_raw_key_bytes(
+        &self,
+        key: &[u8],
+    ) -> Result<Option<Bytes>, Error> {
+        let Some(raw) = self
             .store
-            .get_raw_bytes(&main_key_bytes(self.db_index, key))?;
+            .get_raw_bytes(&main_key_bytes(self.db_index, key))?
+        else {
+            return Ok(None);
+        };
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms > 0 && now_ms() >= expire_ms {
-            return None;
+            return Ok(None);
         }
-        Some(raw)
+        Ok(Some(raw))
     }
 
     pub(in crate::store::db) async fn read_live_raw_key_bytes_async(
         &self,
         key: &[u8],
-    ) -> Option<Bytes> {
-        let raw = self
+    ) -> Result<Option<Bytes>, Error> {
+        let Some(raw) = self
             .store
             .get_raw_bytes_async(&main_key_bytes(self.db_index, key))
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
         let expire_ms = decode_expire_ms(&raw);
         if expire_ms > 0 && now_ms() >= expire_ms {
-            return None;
+            return Ok(None);
         }
-        Some(raw)
+        Ok(Some(raw))
     }
 }

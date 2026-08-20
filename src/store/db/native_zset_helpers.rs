@@ -4,7 +4,7 @@ impl Db {
     pub(in crate::store::db) fn promote_packed_zset(&self, key: &str) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -42,7 +42,7 @@ impl Db {
     ) -> Result<(), Error> {
         let key_bytes = self.mk(key);
         for _ in 0..64 {
-            let observed = self.store.get_raw_observed_async(&key_bytes).await;
+            let observed = self.store.get_raw_observed_async(&key_bytes).await?;
             let Some(raw) = observed.value() else {
                 return Ok(());
             };
@@ -81,9 +81,9 @@ impl Db {
         &self,
         key: &str,
     ) -> Result<Option<(u64, u64)>, Error> {
-        self.expire_if_needed(key);
+        self.expire_if_needed(key)?;
 
-        let Some(raw) = self.store.get_raw(&self.mk(key)) else {
+        let Some(raw) = self.store.get_raw(&self.mk(key))? else {
             return Ok(None);
         };
 
@@ -101,9 +101,9 @@ impl Db {
         &self,
         key: &str,
     ) -> Result<Option<(u64, u64)>, Error> {
-        self.expire_if_needed_async(key).await;
+        self.expire_if_needed_async(key).await?;
 
-        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await else {
+        let Some(raw) = self.store.get_raw_async(&self.mk(key)).await? else {
             return Ok(None);
         };
 
@@ -121,11 +121,11 @@ impl Db {
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+    ) -> Result<Vec<RawKeyValue>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map(|entries| {
@@ -134,30 +134,31 @@ impl Db {
                         .map(|(member, score)| (member.into_bytes(), score.to_be_bytes().to_vec()))
                         .collect()
                 })
-                .unwrap_or_default();
+                .unwrap_or_default());
         }
         let prefix = zset_member_prefix(self.db_index, key, version);
-        self.store
-            .scan_prefix_raw(&prefix)
+        Ok(self
+            .store
+            .scan_prefix_raw(&prefix)?
             .into_iter()
             .filter_map(|(member_key, value)| {
                 member_key
                     .strip_prefix(prefix.as_slice())
                     .map(|member| (member.to_vec(), value))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn zset_members_raw_async(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+    ) -> Result<Vec<RawKeyValue>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map(|entries| {
@@ -166,30 +167,31 @@ impl Db {
                         .map(|(member, score)| (member.into_bytes(), score.to_be_bytes().to_vec()))
                         .collect()
                 })
-                .unwrap_or_default();
+                .unwrap_or_default());
         }
         let prefix = zset_member_prefix(self.db_index, key, version);
-        self.store
+        Ok(self
+            .store
             .scan_prefix_raw_async(&prefix)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(member_key, value)| {
                 member_key
                     .strip_prefix(prefix.as_slice())
                     .map(|member| (member.to_vec(), value))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) fn zset_rank_entries_raw(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+    ) -> Result<Vec<RawKeyValue>, Error> {
         if version == 0 {
             let mut entries = self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map(|entries| entries.into_iter().collect::<Vec<_>>())
@@ -199,7 +201,7 @@ impl Db {
                     .total_cmp(right_score)
                     .then_with(|| left_member.cmp(right_member))
             });
-            return entries
+            return Ok(entries
                 .into_iter()
                 .map(|(member, score)| {
                     (
@@ -207,22 +209,23 @@ impl Db {
                         INDEX_MARKER_VALUE.to_vec(),
                     )
                 })
-                .collect();
+                .collect());
         }
-        self.store
-            .scan_prefix_raw(&zset_rank_prefix(self.db_index, key, version))
+        Ok(self
+            .store
+            .scan_prefix_raw(&zset_rank_prefix(self.db_index, key, version))?)
     }
 
     pub(in crate::store::db) async fn zset_rank_entries_raw_async(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+    ) -> Result<Vec<RawKeyValue>, Error> {
         if version == 0 {
             let mut entries = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map(|entries| entries.into_iter().collect::<Vec<_>>())
@@ -232,7 +235,7 @@ impl Db {
                     .total_cmp(right_score)
                     .then_with(|| left_member.cmp(right_member))
             });
-            return entries
+            return Ok(entries
                 .into_iter()
                 .map(|(member, score)| {
                     (
@@ -240,22 +243,23 @@ impl Db {
                         INDEX_MARKER_VALUE.to_vec(),
                     )
                 })
-                .collect();
+                .collect());
         }
-        self.store
+        Ok(self
+            .store
             .scan_prefix_raw_async(&zset_rank_prefix(self.db_index, key, version))
-            .await
+            .await?)
     }
 
     pub(in crate::store::db) fn zset_ranked_members(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(String, f64)> {
+    ) -> Result<Vec<(String, f64)>, Error> {
         if version == 0 {
             let mut entries = self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map(PackedZsetEntries::into_iter)
@@ -267,28 +271,29 @@ impl Db {
                     .total_cmp(right_score)
                     .then_with(|| left_member.cmp(right_member))
             });
-            return entries;
+            return Ok(entries);
         }
-        self.zset_rank_entries_raw(key, version)
+        Ok(self
+            .zset_rank_entries_raw(key, version)?
             .into_iter()
             .filter_map(|(rank_key, _)| {
                 let score = self.decode_rank_score(key, version, &rank_key)?;
                 let member = self.decode_rank_member(key, version, &rank_key)?;
                 Some((member, score))
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn zset_ranked_members_async(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<(String, f64)> {
+    ) -> Result<Vec<(String, f64)>, Error> {
         if version == 0 {
             let mut entries = self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_zset)
                 .map(PackedZsetEntries::into_iter)
@@ -300,16 +305,17 @@ impl Db {
                     .total_cmp(right_score)
                     .then_with(|| left_member.cmp(right_member))
             });
-            return entries;
+            return Ok(entries);
         }
-        self.zset_rank_entries_raw_async(key, version)
-            .await
+        Ok(self
+            .zset_rank_entries_raw_async(key, version)
+            .await?
             .into_iter()
             .filter_map(|(rank_key, _)| {
                 let score = self.decode_rank_score(key, version, &rank_key)?;
                 let member = self.decode_rank_member(key, version, &rank_key)?;
                 Some((member, score))
             })
-            .collect()
+            .collect())
     }
 }

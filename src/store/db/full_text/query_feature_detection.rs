@@ -88,8 +88,3 @@ pub(super) fn fulltext_query_requires_source_validation(
         | FullTextQueryAst::VectorRange { .. } => false,
     }
 }
-
-pub(super) fn fulltext_query_has_vector_syntax(query: &str) -> bool {
-    let upper = query.to_ascii_uppercase();
-    upper.contains("KNN") || upper.contains("VECTOR_RANGE")
-}

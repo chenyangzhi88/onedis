@@ -32,10 +32,10 @@ impl Db {
     ) -> Result<Option<Vec<Result<usize, Error>>>, Error> {
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
             for key in keys {
-                self.expire_if_needed_async(key).await;
+                self.expire_if_needed_async(key).await?;
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await?;
             let mut states = Vec::with_capacity(keys.len());
             let mut has_split = false;
             for observed in &observations {
@@ -171,23 +171,19 @@ impl Db {
         // all relevant shards are held exclusively, the second read proves absence and makes both
         // per-key CAS conditions and hash-field locks redundant.
         let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-        if self
-            .store
-            .multi_get_raw_async(&raw_keys)
-            .await
-            .iter()
-            .all(Option::is_none)
-        {
+        let initial_values = match self.store.multi_get_raw_async(&raw_keys).await {
+            Ok(values) => values,
+            Err(error) => return storage_batch_error(mutations.len(), error),
+        };
+        if initial_values.iter().all(Option::is_none) {
             let structural_shards =
                 unique_key_write_lock_shards(self.db_index, keys.iter().map(|key| key.as_bytes()));
             let structural_guards = self.lock_write_shards(&structural_shards).await;
-            if self
-                .store
-                .multi_get_raw_async(&raw_keys)
-                .await
-                .iter()
-                .all(Option::is_none)
-            {
+            let locked_values = match self.store.multi_get_raw_async(&raw_keys).await {
+                Ok(values) => values,
+                Err(error) => return storage_batch_error(mutations.len(), error),
+            };
+            if locked_values.iter().all(Option::is_none) {
                 let mut packed_fields = vec![PackedHashFields::new(); keys.len()];
                 let mut replies = Vec::with_capacity(mutations.len());
                 for mutation in mutations {
@@ -233,8 +229,12 @@ impl Db {
                         .map(|_| Err(Error::msg(message.clone())))
                         .collect();
                 }
-                self.write_batch_with_logical_keys_owned_if_not_empty_async(batch, &keys)
-                    .await;
+                if let Err(error) = self
+                    .write_batch_with_logical_keys_owned_if_not_empty_async(batch, &keys)
+                    .await
+                {
+                    return fail_successful_batch_replies(replies, error);
+                }
                 self.changes
                     .fetch_add(mutations.len() as u64, Ordering::Relaxed);
                 drop(structural_guards);
@@ -275,7 +275,10 @@ impl Db {
 
         for _ in 0..64 {
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = match self.store.multi_get_raw_observed_async(&raw_keys).await {
+                Ok(observations) => observations,
+                Err(error) => return storage_batch_error(mutations.len(), error),
+            };
             let now = now_ms();
             let mut states = Vec::with_capacity(keys.len());
             let mut packed_keys = Vec::new();
@@ -368,15 +371,19 @@ impl Db {
                     lookup_keys.push(expire_key.clone());
                 }
             }
-            let lookup_values = self.store.multi_get_raw_async(&lookup_keys).await;
-            let mut value_offset = 0usize;
+            let lookup_values = match self.store.multi_get_raw_async(&lookup_keys).await {
+                Ok(values) => values,
+                Err(error) => return storage_batch_error(mutations.len(), error),
+            };
+            let mut lookup_values = lookup_values.into_iter();
             for (position, field, _, expire_key) in lookups {
-                let value = lookup_values[value_offset].clone();
-                value_offset += 1;
+                let value = lookup_values
+                    .next()
+                    .expect("pipeline hash value lookup count invariant");
                 let expire_raw = expire_key.as_ref().map(|_| {
-                    let value = lookup_values[value_offset].clone();
-                    value_offset += 1;
-                    value
+                    lookup_values
+                        .next()
+                        .expect("pipeline hash expiry lookup count invariant")
                 });
                 let expire_ms = expire_raw
                     .as_ref()
@@ -507,15 +514,13 @@ impl Db {
             }
             let conditions = dirty_positions
                 .iter()
-                .filter_map(|position| {
-                    states[*position]
-                        .meta
-                        .is_none()
-                        .then(|| CompareCondition::from_observed(&states[*position].observed_meta))
-                })
+                .filter(|position| states[**position].meta.is_none())
+                .map(|position| CompareCondition::from_observed(&states[*position].observed_meta))
                 .collect::<Vec<_>>();
             let committed = if conditions.is_empty() {
-                self.write_batch_if_not_empty_async(&batch).await;
+                if let Err(error) = self.write_batch_if_not_empty_async(&batch).await {
+                    return fail_successful_batch_replies(replies, error);
+                }
                 true
             } else {
                 match self
@@ -556,7 +561,7 @@ impl Db {
             return Ok(None);
         };
 
-        Ok(self.hash_live_field_value(key, version, field))
+        self.hash_live_field_value(key, version, field)
     }
 
     pub async fn hash_get_async(&self, key: &str, field: &str) -> Result<Option<String>, Error> {
@@ -578,21 +583,21 @@ impl Db {
             return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .and_then(|raw| decode_packed_hash(&raw))
                 .and_then(|fields| fields.get(field).cloned()));
         }
         if meta.may_have_field_ttl
             && !self
                 .hash_field_is_live_async(key, meta.version, field)
-                .await
+                .await?
         {
             return Ok(None);
         }
         Ok(self
             .store
             .get_raw_async(&hash_field_key(self.db_index, key, meta.version, field))
-            .await)
+            .await?)
     }
 
     /// 设置 hash field，返回是否为新字段。
@@ -614,7 +619,7 @@ impl Db {
         };
         let field_key = hash_field_key(self.db_index, key, version, field);
         let is_new_field =
-            meta.is_none() || self.hash_live_field_value(key, version, field).is_none();
+            meta.is_none() || self.hash_live_field_value(key, version, field)?.is_none();
 
         let mut batch = WriteBatch::new();
         if meta.is_none() {
@@ -629,7 +634,7 @@ impl Db {
 
         if batch.count() > 0 {
             self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -698,7 +703,7 @@ impl Db {
                 continue;
             }
             let field_key = hash_field_key(self.db_index, key, version, field);
-            if meta.is_none() || self.hash_live_field_value(key, version, field).is_none() {
+            if meta.is_none() || self.hash_live_field_value(key, version, field)?.is_none() {
                 added += 1;
             }
             (batch.put(&field_key, value)).expect("write batch append invariant violated");
@@ -710,7 +715,7 @@ impl Db {
 
         if batch.count() > 0 {
             self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -724,7 +729,7 @@ impl Db {
     ) -> Result<Option<usize>, Error> {
         let key_bytes = self.mk(key);
         for _ in 0..SMALL_INLINE_CAS_ATTEMPTS {
-            let observed = self.store.get_raw_observed(&key_bytes);
+            let observed = self.store.get_raw_observed(&key_bytes)?;
             let (expire_ms, mut packed) = match observed.value() {
                 None => (0, PackedHashFields::new()),
                 Some(raw) => {
@@ -868,7 +873,7 @@ impl Db {
         if self
             .store
             .get_raw_async(&self.mk(key))
-            .await
+            .await?
             .as_deref()
             .is_some_and(is_packed_hash_raw)
         {
@@ -892,7 +897,7 @@ impl Db {
         fields: &[(&str, &[u8])],
     ) -> Result<OrderedHashSetAttempt, Error> {
         let key_bytes = self.mk(key);
-        let raw_meta = self.store.get_raw_async(&key_bytes).await;
+        let raw_meta = self.store.get_raw_async(&key_bytes).await?;
         let mut expired_at = None;
         let (meta, version) = match raw_meta.as_deref() {
             Some(raw) => {
@@ -996,7 +1001,7 @@ impl Db {
             );
         }
         let existing = if meta.is_some() {
-            self.store.multi_get_raw_async(&read_keys).await
+            self.store.multi_get_raw_async(&read_keys).await?
         } else {
             vec![None; read_keys.len()]
         };
@@ -1074,7 +1079,7 @@ impl Db {
         }
         self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
         if conditions.is_empty() {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
         } else if !self
             .compare_and_write_batch_if_not_empty_async(&conditions, &batch)
             .await?
@@ -1094,7 +1099,7 @@ impl Db {
         };
         if version == 0 {
             let key_bytes = self.mk(key);
-            let Some(raw) = self.store.get_raw(&key_bytes) else {
+            let Some(raw) = self.store.get_raw(&key_bytes)? else {
                 return Ok(0);
             };
             let mut packed = decode_packed_hash(&raw)
@@ -1119,13 +1124,13 @@ impl Db {
                 (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
             return Ok(deleted);
         }
 
-        let existing_fields = self.hash_live_entries_raw(key, version);
+        let existing_fields = self.hash_live_entries_raw(key, version)?;
         let existing_field_keys: std::collections::HashSet<Vec<u8>> = existing_fields
             .iter()
             .map(|(field, _)| {
@@ -1159,7 +1164,7 @@ impl Db {
             } else {
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
         }
@@ -1210,7 +1215,7 @@ impl Db {
         };
         if meta.packed {
             let key_bytes = self.mk(key);
-            let Some(raw) = self.store.get_raw_async(&key_bytes).await else {
+            let Some(raw) = self.store.get_raw_async(&key_bytes).await? else {
                 return Ok(vec![false; fields.len()]);
             };
             let mut packed = decode_packed_hash(&raw)
@@ -1235,7 +1240,7 @@ impl Db {
                 (batch.put(&key_bytes, &encoded)).expect("write batch append invariant violated");
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
             return Ok(deleted_by_position);
@@ -1252,7 +1257,10 @@ impl Db {
         {
             cached.len
         } else {
-            let len = self.hash_live_entries_for_meta_async(key, meta).await.len();
+            let len = self
+                .hash_live_entries_for_meta_async(key, meta)
+                .await?
+                .len();
             if !meta.may_have_field_ttl {
                 self.counter_cache
                     .hash_ever_populated
@@ -1279,13 +1287,13 @@ impl Db {
             .iter()
             .map(|(field, _)| hash_field_key(self.db_index, key, meta.version, field))
             .collect::<Vec<_>>();
-        let values = self.store.multi_get_raw_async(&field_keys).await;
+        let values = self.store.multi_get_raw_async(&field_keys).await?;
         let expires = if meta.may_have_field_ttl {
             let expire_keys = unique_fields
                 .iter()
                 .map(|(field, _)| hash_field_expire_key(self.db_index, key, meta.version, field))
                 .collect::<Vec<_>>();
-            self.store.multi_get_raw_async(&expire_keys).await
+            self.store.multi_get_raw_async(&expire_keys).await?
         } else {
             vec![None; unique_fields.len()]
         };
@@ -1326,7 +1334,7 @@ impl Db {
             } else {
                 self.fulltext_enqueue_hash_upsert_to_batch(&mut batch, key)?;
             }
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
             self.fulltext_request_refresh(key)?;
             let new_epoch = self

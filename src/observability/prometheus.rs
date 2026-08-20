@@ -38,24 +38,32 @@ pub async fn spawn_prometheus_endpoint(
                 let path_is_ready = request[..read].starts_with(b"GET /readyz ")
                     || request[..read].starts_with(b"GET /readyz?");
                 let (status, content_type, body) = if path_is_metrics {
-                    let db_body = db_manager.render_observability_prometheus();
-                    let mut body = metrics.render_prometheus();
-                    body.push_str(&db_body);
-                    body.push_str(
-                        "# HELP onedis_ready Whether this process is ready for traffic.\n",
-                    );
-                    body.push_str("# TYPE onedis_ready gauge\n");
-                    body.push_str(&format!(
-                        "onedis_ready {}\n",
-                        u8::from(service_state.is_ready())
-                    ));
-                    body.push_str("# HELP onedis_storage_failures_total Fatal kv-engine operation failures observed by this process.\n");
-                    body.push_str("# TYPE onedis_storage_failures_total counter\n");
-                    body.push_str(&format!(
-                        "onedis_storage_failures_total {}\n",
-                        crate::store::health::storage_health().failure_count()
-                    ));
-                    ("200 OK", "text/plain; version=0.0.4; charset=utf-8", body)
+                    match db_manager.render_observability_prometheus() {
+                        Ok(db_body) => {
+                            let mut body = metrics.render_prometheus();
+                            body.push_str(&db_body);
+                            body.push_str(
+                                "# HELP onedis_ready Whether this process is ready for traffic.\n",
+                            );
+                            body.push_str("# TYPE onedis_ready gauge\n");
+                            body.push_str(&format!(
+                                "onedis_ready {}\n",
+                                u8::from(service_state.is_ready())
+                            ));
+                            body.push_str("# HELP onedis_storage_failures_total Fatal kv-engine operation failures observed by this process.\n");
+                            body.push_str("# TYPE onedis_storage_failures_total counter\n");
+                            body.push_str(&format!(
+                                "onedis_storage_failures_total {}\n",
+                                service_state.storage_health().failure_count()
+                            ));
+                            ("200 OK", "text/plain; version=0.0.4; charset=utf-8", body)
+                        }
+                        Err(error) => (
+                            "503 Service Unavailable",
+                            "text/plain; charset=utf-8",
+                            format!("metrics unavailable: {error}\n"),
+                        ),
+                    }
                 } else if path_is_health {
                     (
                         if service_state.is_healthy() {
@@ -170,6 +178,7 @@ maxclients = 1000
         assert!(body.contains("onedis_storage_reads_total"));
         assert!(body.contains("onedis_storage_engine_property"));
         assert!(body.contains("onedis_fulltext_outbox_pending"));
+        assert!(body.contains("onedis_background_task_running"));
         assert!(body.contains("onedis_stream_blocked_clients"));
         assert!(body.contains("onedis_vector_indexes_total"));
         endpoint.abort();

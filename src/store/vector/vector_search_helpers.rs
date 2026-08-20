@@ -1,17 +1,29 @@
+pub(in crate::store::db) struct VectorExactDistanceRequest<'a> {
+    pub(in crate::store::db) index: &'a str,
+    pub(in crate::store::db) query: &'a [f32],
+    pub(in crate::store::db) allow_doc_ids: Option<&'a HashSet<String>>,
+    pub(in crate::store::db) limit: Option<usize>,
+    pub(in crate::store::db) max_score: Option<f32>,
+    pub(in crate::store::db) memory_budget: usize,
+}
+
 impl Db {
     pub(super) fn vector_exact_distance_results<F>(
         &self,
-        index: &str,
-        query: &[f32],
-        allow_doc_ids: Option<&HashSet<String>>,
-        limit: Option<usize>,
-        max_score: Option<f32>,
-        memory_budget: usize,
+        request: VectorExactDistanceRequest<'_>,
         mut should_continue: F,
     ) -> Result<Vec<VectorSearchResult>, Error>
     where
         F: FnMut() -> Result<bool, Error>,
     {
+        let VectorExactDistanceRequest {
+            index,
+            query,
+            allow_doc_ids,
+            limit,
+            max_score,
+            memory_budget,
+        } = request;
         let (_, _, meta) = self.read_vector_meta(index)?;
         validate_vector(query, meta.dim as usize)?;
         validate_vector_for_distance(query, meta.distance)?;
@@ -114,11 +126,10 @@ impl Db {
         &self,
         context: &VectorSearchContext<'_>,
     ) -> Result<Vec<VectorSearchResult>, Error> {
-        self.ensure_vector_search_segments_loaded(context.index, context.version, context.meta)?;
         let runtime = self
             .vector_runtimes
             .get(self.db_index, context.index, context.version)
-            .ok_or_else(|| Error::msg("ERR vector runtime is not initialized"))?;
+            .ok_or_else(|| Error::msg("INDEX_NOT_READY vector runtime is loading"))?;
         let search_snapshot = runtime
             .read()
             .map_err(|_| Error::msg("ERR vector runtime lock poisoned"))?
@@ -238,7 +249,7 @@ impl Db {
                 )
             })
             .collect::<Vec<_>>();
-        let raws = self.store.multi_get_raw(&keys);
+        let raws = self.store.multi_get_raw(&keys)?;
         let mut reranked = Vec::with_capacity(candidates.len());
         let mut bytes = 0usize;
         for (mut candidate, raw) in candidates.into_iter().zip(raws) {
@@ -300,7 +311,10 @@ impl Db {
             .collect::<Vec<_>>();
         global_metrics().record_vector_kv_doc_reads(keys.len());
         let mut kv_doc_bytes = 0usize;
-        for (candidate, raw) in candidates.into_iter().zip(self.store.multi_get_raw(&keys)) {
+        for (candidate, raw) in candidates
+            .into_iter()
+            .zip(self.store.multi_get_raw(&keys)?)
+        {
             let Some(raw) = raw else {
                 continue;
             };
@@ -312,13 +326,15 @@ impl Db {
             if let Some(result) = runtime_doc_to_search_result(
                 &candidate.id,
                 &doc,
-                context.meta,
-                context.query,
-                context.query_norm_squared,
                 None,
-                &context.options.with_attrs,
-                context.options.with_attrs_json,
-                context.filters,
+                &VectorResultContext {
+                    meta: context.meta,
+                    query: context.query,
+                    query_norm_squared: context.query_norm_squared,
+                    return_attrs: &context.options.with_attrs,
+                    return_attrs_json: context.options.with_attrs_json,
+                    filters: context.filters,
+                },
             )? {
                 results.push(result)?;
             }
@@ -346,12 +362,14 @@ impl Db {
             && !context.options.with_attrs_json
         {
             return self.vector_exact_distance_results(
-                context.index,
-                context.query,
-                context.allow_doc_ids,
-                Some(context.options.k),
-                None,
-                vector_search_memory_budget_bytes(),
+                VectorExactDistanceRequest {
+                    index: context.index,
+                    query: context.query,
+                    allow_doc_ids: context.allow_doc_ids,
+                    limit: Some(context.options.k),
+                    max_score: None,
+                    memory_budget: vector_search_memory_budget_bytes(),
+                },
                 || Ok(true),
             );
         }
@@ -372,7 +390,7 @@ impl Db {
                     .collect::<Vec<_>>();
                 global_metrics().record_vector_kv_doc_reads(keys.len());
                 let mut kv_doc_bytes = 0usize;
-                for (id, raw) in ids.into_iter().zip(self.store.multi_get_raw(&keys)) {
+                for (id, raw) in ids.into_iter().zip(self.store.multi_get_raw(&keys)?) {
                     let Some(raw) = raw else {
                         continue;
                     };
@@ -384,13 +402,15 @@ impl Db {
                     if let Some(result) = runtime_doc_to_search_result(
                         id,
                         &doc,
-                        context.meta,
-                        context.query,
-                        context.query_norm_squared,
                         None,
-                        &context.options.with_attrs,
-                        context.options.with_attrs_json,
-                        context.filters,
+                        &VectorResultContext {
+                            meta: context.meta,
+                            query: context.query,
+                            query_norm_squared: context.query_norm_squared,
+                            return_attrs: &context.options.with_attrs,
+                            return_attrs_json: context.options.with_attrs_json,
+                            filters: context.filters,
+                        },
                     )? {
                         results.push(result)?;
                     }
@@ -404,7 +424,7 @@ impl Db {
                     context.index,
                     context.version,
                 );
-                let rows = self.store.scan_prefix_raw(&prefix);
+                let rows = self.store.scan_prefix_raw(&prefix)?;
                 global_metrics().record_vector_kv_doc_reads(rows.len());
                 global_metrics().record_vector_kv_doc_bytes(
                     rows.iter().map(|(_, raw)| raw.len()).sum(),
@@ -417,13 +437,15 @@ impl Db {
                     if let Some(result) = runtime_doc_to_search_result(
                         &doc.id,
                         &doc,
-                        context.meta,
-                        context.query,
-                        context.query_norm_squared,
                         None,
-                        &context.options.with_attrs,
-                        context.options.with_attrs_json,
-                        context.filters,
+                        &VectorResultContext {
+                            meta: context.meta,
+                            query: context.query,
+                            query_norm_squared: context.query_norm_squared,
+                            return_attrs: &context.options.with_attrs,
+                            return_attrs_json: context.options.with_attrs_json,
+                            filters: context.filters,
+                        },
                     )? {
                         results.push(result)?;
                     }
@@ -567,7 +589,7 @@ impl Db {
                 }
                 true
             },
-        );
+        )?;
         result?;
         Ok(ids)
     }
@@ -621,7 +643,7 @@ impl Db {
                     return false;
                 }
                 true
-            });
+            })?;
         result?;
         Ok(ids)
     }

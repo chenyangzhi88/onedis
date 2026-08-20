@@ -43,7 +43,7 @@ impl Setex {
             .seconds
             .checked_mul(1000)
             .ok_or_else(|| Error::msg("ERR invalid expire time in 'setex' command"))?;
-        db.insert_string_bytes(self.key, self.value, Some(ttl_ms));
+        db.insert_string_bytes(self.key, self.value, Some(ttl_ms))?;
         Ok(Frame::Ok)
     }
 

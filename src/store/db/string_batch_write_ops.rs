@@ -27,10 +27,15 @@ impl Db {
 
         for _ in 0..64 {
             for key in &keys {
-                self.expire_if_needed_async(key).await;
+                if let Err(error) = self.expire_if_needed_async(key).await {
+                    return storage_batch_error(mutations.len(), error);
+                }
             }
             let raw_keys = keys.iter().map(|key| self.mk(key)).collect::<Vec<_>>();
-            let observations = self.store.multi_get_raw_observed_async(&raw_keys).await;
+            let observations = match self.store.multi_get_raw_observed_async(&raw_keys).await {
+                Ok(observations) => observations,
+                Err(error) => return storage_batch_error(mutations.len(), error),
+            };
             let mut states = observations
                 .iter()
                 .map(|observed| StringBatchState::from_raw(observed.value().map(AsRef::as_ref)))
@@ -112,9 +117,12 @@ impl Db {
             .collect()
     }
 
-    pub async fn insert_string_bytes_refs_async(&self, key_vals: &[(&str, &[u8])]) {
+    pub async fn insert_string_bytes_refs_async(
+        &self,
+        key_vals: &[(&str, &[u8])],
+    ) -> Result<(), Error> {
         if key_vals.is_empty() {
-            return;
+            return Ok(());
         }
         let shards = unique_key_write_lock_shards(
             self.db_index,
@@ -127,7 +135,7 @@ impl Db {
             .iter()
             .map(|(key, _)| self.mk(key))
             .collect::<Vec<_>>();
-        let old_values = self.store.multi_get_raw_async(&keys).await;
+        let old_values = self.store.multi_get_raw_async(&keys).await?;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
             self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
@@ -140,15 +148,15 @@ impl Db {
             );
         }
         self.write_plain_string_batch_if_not_empty_async(&batch)
-            .await;
+            .await
     }
 
     pub async fn insert_string_bytes_refs_without_watch_publish_async(
         &self,
         key_vals: &[(&str, &[u8])],
-    ) {
+    ) -> Result<(), Error> {
         if key_vals.is_empty() {
-            return;
+            return Ok(());
         }
         let shards = unique_key_write_lock_shards(
             self.db_index,
@@ -161,7 +169,7 @@ impl Db {
             .iter()
             .map(|(key, _)| self.mk(key))
             .collect::<Vec<_>>();
-        let old_values = self.store.multi_get_raw_async(&keys).await;
+        let old_values = self.store.multi_get_raw_async(&keys).await?;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
             self.prepare_string_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
@@ -174,12 +182,15 @@ impl Db {
             );
         }
         self.write_plain_string_batch_if_not_empty_without_watch_publish_async(&batch)
-            .await;
+            .await
     }
 
-    pub async fn insert_string_byte_keys_async(&self, key_vals: &[(&[u8], &[u8])]) {
+    pub async fn insert_string_byte_keys_async(
+        &self,
+        key_vals: &[(&[u8], &[u8])],
+    ) -> Result<(), Error> {
         if key_vals.is_empty() {
-            return;
+            return Ok(());
         }
         let shards =
             unique_key_write_lock_shards(self.db_index, key_vals.iter().map(|(key, _)| *key));
@@ -190,7 +201,7 @@ impl Db {
             .iter()
             .map(|(key, _)| main_key_bytes(self.db_index, key))
             .collect::<Vec<_>>();
-        let old_values = self.store.multi_get_raw_async(&keys).await;
+        let old_values = self.store.multi_get_raw_async(&keys).await?;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
             self.prepare_string_byte_key_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
@@ -203,15 +214,15 @@ impl Db {
             );
         }
         self.write_plain_string_batch_owned_if_not_empty_async(batch)
-            .await;
+            .await
     }
 
     pub async fn insert_string_byte_keys_without_watch_publish_async(
         &self,
         key_vals: &[(&[u8], &[u8])],
-    ) {
+    ) -> Result<(), Error> {
         if key_vals.is_empty() {
-            return;
+            return Ok(());
         }
         let shards =
             unique_key_write_lock_shards(self.db_index, key_vals.iter().map(|(key, _)| *key));
@@ -222,7 +233,7 @@ impl Db {
             .iter()
             .map(|(key, _)| main_key_bytes(self.db_index, key))
             .collect::<Vec<_>>();
-        let old_values = self.store.multi_get_raw_async(&keys).await;
+        let old_values = self.store.multi_get_raw_async(&keys).await?;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.iter().zip(old_values) {
             self.prepare_string_byte_key_overwrite_to_batch(&mut batch, key, old_raw.as_deref());
@@ -235,34 +246,38 @@ impl Db {
             );
         }
         self.write_plain_string_batch_if_not_empty_async(&batch)
-            .await;
+            .await
     }
 
-    pub fn insert_strings(&self, key_vals: Vec<(String, String)>) {
+    pub fn insert_strings(&self, key_vals: Vec<(String, String)>) -> Result<(), Error> {
         self.insert_string_bytes_many(
             key_vals
                 .into_iter()
                 .map(|(key, value)| (key, value.into_bytes()))
                 .collect(),
-        );
+        )
     }
 
-    pub fn insert_string_bytes_many(&self, key_vals: Vec<(String, Vec<u8>)>) {
+    pub fn insert_string_bytes_many(&self, key_vals: Vec<(String, Vec<u8>)>) -> Result<(), Error> {
         if key_vals.is_empty() {
-            return;
+            return Ok(());
         }
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let mut batch = WriteBatch::new();
         for (key, value) in key_vals {
-            self.write_string_to_batch_with_old_raw(&mut batch, &key, &value, 0, None);
+            self.write_string_to_batch_with_old_raw(&mut batch, &key, &value, 0, None)?;
         }
-        self.write_plain_string_batch_if_not_empty(&batch);
+        self.write_plain_string_batch_if_not_empty(&batch)?;
+        Ok(())
     }
 
-    pub async fn insert_string_bytes_many_async(&self, key_vals: Vec<(String, Vec<u8>)>) {
+    pub async fn insert_string_bytes_many_async(
+        &self,
+        key_vals: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), Error> {
         if key_vals.is_empty() {
-            return;
+            return Ok(());
         }
         let shards = unique_key_write_lock_shards(
             self.db_index,
@@ -275,7 +290,7 @@ impl Db {
             .iter()
             .map(|(key, _)| self.mk(key))
             .collect::<Vec<_>>();
-        let old_values = self.store.multi_get_raw_async(&keys).await;
+        let old_values = self.store.multi_get_raw_async(&keys).await?;
         let mut batch = WriteBatch::new();
         for ((key, value), old_raw) in key_vals.into_iter().zip(old_values) {
             self.prepare_string_overwrite_to_batch(&mut batch, &key, old_raw.as_deref());
@@ -288,17 +303,20 @@ impl Db {
             );
         }
         self.write_plain_string_batch_if_not_empty_async(&batch)
-            .await;
+            .await
     }
 
-    pub fn insert_string_bytes_many_nx(&self, key_vals: Vec<(String, Vec<u8>)>) -> bool {
+    pub fn insert_string_bytes_many_nx(
+        &self,
+        key_vals: Vec<(String, Vec<u8>)>,
+    ) -> Result<bool, Error> {
         if key_vals.is_empty() {
-            return false;
+            return Ok(false);
         }
         for (key, _) in &key_vals {
-            self.expire_if_needed(key);
-            if self.store.contains_key(&self.mk(key)) {
-                return false;
+            self.expire_if_needed(key)?;
+            if self.store.contains_key(&self.mk(key))? {
+                return Ok(false);
             }
         }
 
@@ -306,18 +324,18 @@ impl Db {
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         let mut batch = WriteBatch::new();
         for (key, value) in key_vals {
-            self.write_string_to_batch(&mut batch, &key, &value, 0);
+            self.write_string_to_batch(&mut batch, &key, &value, 0)?;
         }
-        self.write_batch_if_not_empty(&batch);
-        true
+        self.write_batch_if_not_empty(&batch)?;
+        Ok(true)
     }
 
     pub async fn insert_string_bytes_many_nx_async(
         &self,
         key_vals: Vec<(String, Vec<u8>)>,
-    ) -> bool {
+    ) -> Result<bool, Error> {
         if key_vals.is_empty() {
-            return false;
+            return Ok(false);
         }
         let shards = unique_key_write_lock_shards(
             self.db_index,
@@ -325,13 +343,13 @@ impl Db {
         );
         let _write_guards = self.lock_write_shards(&shards).await;
         for (key, _) in &key_vals {
-            self.expire_if_needed_async(key).await;
+            self.expire_if_needed_async(key).await?;
         }
         let mut observations = Vec::with_capacity(key_vals.len());
         for (key, _) in &key_vals {
-            let observed = self.store.get_raw_observed_async(&self.mk(key)).await;
+            let observed = self.store.get_raw_observed_async(&self.mk(key)).await?;
             if observed.exists() {
-                return false;
+                return Ok(false);
             }
             observations.push(observed);
         }
@@ -351,13 +369,10 @@ impl Db {
             Ok(true) => {
                 self.changes
                     .fetch_add(observations.len() as u64, Ordering::Relaxed);
-                true
+                Ok(true)
             }
-            Ok(false) => false,
-            Err(error) => {
-                log::error!("failed to apply MSETNX batch: {error}");
-                false
-            }
+            Ok(false) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -372,12 +387,12 @@ impl Db {
             return Ok(false);
         }
         for (key, _) in &key_vals {
-            self.expire_if_needed(key);
+            self.expire_if_needed(key)?;
         }
         let old_values = key_vals
             .iter()
             .map(|(key, _)| self.store.get_raw(&self.mk(key)))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         if !batch_condition_matches(condition, &old_values) {
             return Ok(false);
         }
@@ -409,7 +424,7 @@ impl Db {
                 );
             }
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes
             .fetch_add(key_vals.len() as u64, Ordering::Relaxed);
         Ok(true)
@@ -432,11 +447,11 @@ impl Db {
         let _write_guards = self.lock_write_shards(&shards).await;
         for _ in 0..64 {
             for (key, _) in &key_vals {
-                self.expire_if_needed_async(key).await;
+                self.expire_if_needed_async(key).await?;
             }
             let mut observations = Vec::with_capacity(key_vals.len());
             for (key, _) in &key_vals {
-                observations.push(self.store.get_raw_observed_async(&self.mk(key)).await);
+                observations.push(self.store.get_raw_observed_async(&self.mk(key)).await?);
             }
             let old_values = observations
                 .iter()

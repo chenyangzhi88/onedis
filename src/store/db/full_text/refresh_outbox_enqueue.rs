@@ -61,7 +61,7 @@ impl Db {
                     .iter()
                     .any(|key| route.prefixes.iter().any(|prefix| key.starts_with(prefix)))
         }) {
-            if self.fulltext_index_expired(&route.index, &route.meta)
+            if self.fulltext_index_expired(&route.index, &route.meta)?
                 || matches!(route.meta.state, FullTextIndexState::Dropping)
             {
                 continue;
@@ -115,7 +115,7 @@ impl Db {
                     .iter()
                     .any(|(key, _)| route.prefixes.iter().any(|prefix| key.starts_with(prefix)))
         }) {
-            if self.fulltext_index_expired(&route.index, &route.meta)
+            if self.fulltext_index_expired(&route.index, &route.meta)?
                 || matches!(route.meta.state, FullTextIndexState::Dropping)
             {
                 continue;

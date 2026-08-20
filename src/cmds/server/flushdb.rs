@@ -28,12 +28,12 @@ impl Flushdb {
     }
 
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        db.clear();
+        db.clear()?;
         Ok(Frame::Ok)
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
-        db.clear_async().await;
+        db.clear_async().await?;
         Ok(Frame::Ok)
     }
 }

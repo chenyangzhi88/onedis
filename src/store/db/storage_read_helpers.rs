@@ -1,37 +1,39 @@
 use super::*;
 
 impl Db {
-    pub(in crate::store::db) fn logical_keys(&self) -> Vec<String> {
-        self.store
-            .scan_range_raw_limited(&[], None, usize::MAX)
+    pub(in crate::store::db) fn logical_keys(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .store
+            .scan_range_raw_limited(&[], None, usize::MAX)?
             .into_iter()
             .filter_map(|(k, _)| {
                 let key = logical_main_key_from_raw_key(self.key_layout, self.db_index, &k)?;
                 String::from_utf8(key).ok()
             })
-            .collect()
+            .collect())
     }
 
-    pub(in crate::store::db) async fn logical_keys_async(&self) -> Vec<String> {
-        self.store
+    pub(in crate::store::db) async fn logical_keys_async(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .store
             .scan_range_raw_limited_async(&[], None, usize::MAX)
-            .await
+            .await?
             .into_iter()
             .filter_map(|(k, _)| {
                 let key = logical_main_key_from_raw_key(self.key_layout, self.db_index, &k)?;
                 String::from_utf8(key).ok()
             })
-            .collect()
+            .collect())
     }
 
     pub async fn scan_string_prefix_async(
         &self,
         key_prefix: &str,
         limit: usize,
-    ) -> Vec<(String, Vec<u8>)> {
+    ) -> Result<Vec<(String, Vec<u8>)>, Error> {
         let prefix = main_key(self.db_index, key_prefix);
         let mut rows = Vec::new();
-        for (raw_key, _) in self.store.scan_prefix_raw_async(&prefix).await {
+        for (raw_key, _) in self.store.scan_prefix_raw_async(&prefix).await? {
             if rows.len() >= limit {
                 break;
             }
@@ -43,11 +45,11 @@ impl Db {
             let Ok(key) = String::from_utf8(key_bytes) else {
                 continue;
             };
-            if let Ok(Some(value)) = self.get_string_bytes_async(&key).await {
+            if let Some(value) = self.get_string_bytes_async(&key).await? {
                 rows.push((key, value));
             }
         }
-        rows
+        Ok(rows)
     }
 
     pub async fn scan_string_prefix_bounded_async(
@@ -60,7 +62,7 @@ impl Db {
         let prefix = main_key(self.db_index, key_prefix);
         let upper = prefix_exclusive_upper_bound(&prefix);
         let db = self.shared_task_view();
-        let candidates = tokio::task::spawn_blocking(move || {
+        let candidates = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
             let mut keys = Vec::with_capacity(limit.min(1024));
             let mut key_bytes = 0usize;
             db.store
@@ -85,15 +87,15 @@ impl Db {
                     key_bytes = next_bytes;
                     keys.push(key);
                     true
-                });
-            keys
+                })?;
+            Ok(keys)
         })
         .await
-        .map_err(|error| Error::msg(format!("wasm scan worker task failed: {error}")))?;
+        .map_err(|error| Error::msg(format!("wasm scan worker task failed: {error}")))??;
         let mut rows = Vec::with_capacity(candidates.len().min(1024));
         let mut total_bytes = 0usize;
         for key in candidates {
-            let Ok(Some(value)) = self.get_string_bytes_async(&key).await else {
+            let Some(value) = self.get_string_bytes_async(&key).await? else {
                 continue;
             };
             if key.len() > max_field_bytes || value.len() > max_field_bytes {
@@ -118,61 +120,64 @@ impl Db {
         &self,
         key: &str,
         version: u64,
-    ) -> HashMap<String, String> {
+    ) -> Result<HashMap<String, String>, Error> {
         let mut hash = HashMap::new();
 
-        for (field, value) in self.hash_entries_raw(key, version) {
+        for (field, value) in self.hash_entries_raw(key, version)? {
             if let (Ok(field), Ok(value)) = (String::from_utf8(field), String::from_utf8(value)) {
                 hash.insert(field, value);
             }
         }
 
-        hash
+        Ok(hash)
     }
 
     pub(in crate::store::db) async fn read_hash_fields_async(
         &self,
         key: &str,
         version: u64,
-    ) -> HashMap<String, String> {
+    ) -> Result<HashMap<String, String>, Error> {
         let mut hash = HashMap::new();
-        for (field, value) in self.hash_entries_raw_async(key, version).await {
+        for (field, value) in self.hash_entries_raw_async(key, version).await? {
             if let (Ok(field), Ok(value)) = (String::from_utf8(field), String::from_utf8(value)) {
                 hash.insert(field, value);
             }
         }
-        hash
+        Ok(hash)
     }
 
     pub(in crate::store::db) fn read_set_members(
         &self,
         key: &str,
         version: u64,
-    ) -> HashSet<String> {
-        self.set_members_raw(key, version)
+    ) -> Result<HashSet<String>, Error> {
+        Ok(self
+            .set_members_raw(key, version)?
             .into_iter()
             .filter_map(|member| String::from_utf8(member).ok())
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn read_set_members_async(
         &self,
         key: &str,
         version: u64,
-    ) -> HashSet<String> {
-        self.set_members_raw_async(key, version)
-            .await
+    ) -> Result<HashSet<String>, Error> {
+        Ok(self
+            .set_members_raw_async(key, version)
+            .await?
             .into_iter()
             .filter_map(|member| String::from_utf8(member).ok())
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) fn read_zset_members(
         &self,
         key: &str,
         version: u64,
-    ) -> BTreeMap<String, f64> {
-        self.zset_members_raw(key, version)
+    ) -> Result<BTreeMap<String, f64>, Error> {
+        Ok(self
+            .zset_members_raw(key, version)?
             .into_iter()
             .filter_map(|(member, value)| {
                 match (String::from_utf8(member), decode_zset_score(&value)) {
@@ -180,16 +185,17 @@ impl Db {
                     _ => None,
                 }
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) async fn read_zset_members_async(
         &self,
         key: &str,
         version: u64,
-    ) -> BTreeMap<String, f64> {
-        self.zset_members_raw_async(key, version)
-            .await
+    ) -> Result<BTreeMap<String, f64>, Error> {
+        Ok(self
+            .zset_members_raw_async(key, version)
+            .await?
             .into_iter()
             .filter_map(|(member, value)| {
                 match (String::from_utf8(member), decode_zset_score(&value)) {
@@ -197,7 +203,7 @@ impl Db {
                     _ => None,
                 }
             })
-            .collect()
+            .collect())
     }
 
     pub(in crate::store::db) fn decode_rank_score(
@@ -229,22 +235,26 @@ impl Db {
         String::from_utf8(suffix[9..].to_vec()).ok()
     }
 
-    pub(in crate::store::db) fn read_list_items(&self, key: &str, version: u64) -> Vec<String> {
+    pub(in crate::store::db) fn read_list_items(
+        &self,
+        key: &str,
+        version: u64,
+    ) -> Result<Vec<String>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
-                .get_raw(&self.mk(key))
+                .get_raw(&self.mk(key))?
                 .as_deref()
                 .and_then(decode_packed_list)
                 .into_iter()
                 .flatten()
                 .filter_map(|value| String::from_utf8(value).ok())
-                .collect();
+                .collect());
         }
         let prefix = list_item_prefix(self.db_index, key, version);
         let mut items: Vec<(i64, String)> = Vec::new();
 
-        for (key_bytes, value_bytes) in self.store.scan_prefix_raw(&prefix) {
+        for (key_bytes, value_bytes) in self.store.scan_prefix_raw(&prefix)? {
             let index_bytes = &key_bytes[prefix.len()..];
             if index_bytes.len() != 8 {
                 continue;
@@ -261,29 +271,29 @@ impl Db {
         }
 
         items.sort_by_key(|(index, _)| *index);
-        items.into_iter().map(|(_, value)| value).collect()
+        Ok(items.into_iter().map(|(_, value)| value).collect())
     }
 
     pub(in crate::store::db) async fn read_list_items_async(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, Error> {
         if version == 0 {
-            return self
+            return Ok(self
                 .store
                 .get_raw_async(&self.mk(key))
-                .await
+                .await?
                 .as_deref()
                 .and_then(decode_packed_list)
                 .into_iter()
                 .flatten()
                 .filter_map(|value| String::from_utf8(value).ok())
-                .collect();
+                .collect());
         }
         let prefix = list_item_prefix(self.db_index, key, version);
         let mut items: Vec<(i64, String)> = Vec::new();
-        for (key_bytes, value_bytes) in self.store.scan_prefix_raw_async(&prefix).await {
+        for (key_bytes, value_bytes) in self.store.scan_prefix_raw_async(&prefix).await? {
             let index_bytes = &key_bytes[prefix.len()..];
             if index_bytes.len() != 8 {
                 continue;
@@ -296,14 +306,14 @@ impl Db {
             }
         }
         items.sort_by_key(|(index, _)| *index);
-        items.into_iter().map(|(_, value)| value).collect()
+        Ok(items.into_iter().map(|(_, value)| value).collect())
     }
 
     pub(in crate::store::db) fn read_stream_entries(
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<StreamEntry> {
+    ) -> Result<Vec<StreamEntry>, Error> {
         self.stream_entries_between(
             key,
             version,
@@ -319,7 +329,7 @@ impl Db {
         &self,
         key: &str,
         version: u64,
-    ) -> Vec<StreamEntry> {
+    ) -> Result<Vec<StreamEntry>, Error> {
         self.stream_entries_between_async(
             key,
             version,

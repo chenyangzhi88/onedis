@@ -1,7 +1,13 @@
 use super::*;
-pub(super) fn parse_query_attributes(
-    raw: &str,
-) -> Result<(Option<f32>, Option<u32>, Option<bool>, Option<bool>), Error> {
+
+pub(super) struct QueryAttributes {
+    pub(super) weight: Option<f32>,
+    pub(super) slop: Option<u32>,
+    pub(super) inorder: Option<bool>,
+    pub(super) phonetic: Option<bool>,
+}
+
+pub(super) fn parse_query_attributes(raw: &str) -> Result<QueryAttributes, Error> {
     let mut weight = None;
     let mut slop = None;
     let mut inorder = None;
@@ -39,7 +45,12 @@ pub(super) fn parse_query_attributes(
             _ => return Err(Error::msg("ERR unsupported query attribute")),
         }
     }
-    Ok((weight, slop, inorder, phonetic))
+    Ok(QueryAttributes {
+        weight,
+        slop,
+        inorder,
+        phonetic,
+    })
 }
 
 fn parse_query_attribute_bool(raw: &str) -> Result<bool, Error> {

@@ -41,6 +41,8 @@ fn command(args: &[&str]) -> Result<Command, anyhow::Error> {
 }
 
 fn apply(db: &Db, args: &[&str]) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     onedis_server::command_dispatch::handle_command(
         db,
         command(args).expect("failed to parse command"),
@@ -49,6 +51,8 @@ fn apply(db: &Db, args: &[&str]) -> Frame {
 }
 
 fn apply_frames(db: &Db, args: Vec<Frame>) -> Frame {
+    db.maintain_fulltext_indexes()
+        .expect("embedded fulltext publisher failed");
     let command = Command::parse_from_frame(Frame::Array(args)).expect("failed to parse command");
     onedis_server::command_dispatch::handle_command(db, command).expect("command failed")
 }

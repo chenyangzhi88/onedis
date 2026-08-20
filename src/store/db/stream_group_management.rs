@@ -22,7 +22,7 @@ impl Db {
                 let mut batch = WriteBatch::new();
                 (batch.put(&self.mk(key), &encode_stream_meta(meta)))
                     .expect("write batch append invariant violated");
-                self.write_batch_if_not_empty(&batch);
+                self.write_batch_if_not_empty(&batch)?;
                 meta
             }
             None => {
@@ -37,7 +37,7 @@ impl Db {
             id
         };
         let group_key = stream_group_key(self.db_index, key, meta.version, group);
-        if self.store.get_raw(&group_key).is_some() {
+        if self.store.get_raw(&group_key)?.is_some() {
             return Err(Error::msg("BUSYGROUP Consumer Group name already exists"));
         }
         let id = if id.ms == u64::MAX && id.seq == u64::MAX {
@@ -52,7 +52,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         (batch.put(&group_key, &encode_stream_group_state(&state)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -93,7 +93,7 @@ impl Db {
             id
         };
         let group_key = stream_group_key(self.db_index, key, meta.version, group);
-        if self.store.get_raw_async(&group_key).await.is_some() {
+        if self.store.get_raw_async(&group_key).await?.is_some() {
             return Err(Error::msg("BUSYGROUP Consumer Group name already exists"));
         }
         let state = StreamGroupState {
@@ -102,7 +102,7 @@ impl Db {
         };
         (batch.put(&group_key, &encode_stream_group_state(&state)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -112,7 +112,7 @@ impl Db {
             .stream_meta(key)?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let group_key = stream_group_key(self.db_index, key, meta.version, group);
-        if self.store.get_raw(&group_key).is_none() {
+        if self.store.get_raw(&group_key)?.is_none() {
             return Err(Error::msg("NOGROUP No such key or consumer group"));
         }
         let state = StreamGroupState {
@@ -122,7 +122,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         (batch.put(&group_key, &encode_stream_group_state(&state)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -139,7 +139,7 @@ impl Db {
             .await?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let group_key = stream_group_key(self.db_index, key, meta.version, group);
-        if self.store.get_raw_async(&group_key).await.is_none() {
+        if self.store.get_raw_async(&group_key).await?.is_none() {
             return Err(Error::msg("NOGROUP No such key or consumer group"));
         }
         let state = StreamGroupState {
@@ -149,7 +149,7 @@ impl Db {
         let mut batch = WriteBatch::new();
         (batch.put(&group_key, &encode_stream_group_state(&state)))
             .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -159,7 +159,7 @@ impl Db {
             return Ok(0);
         };
         let group_key = stream_group_key(self.db_index, key, meta.version, group);
-        if self.store.get_raw(&group_key).is_none() {
+        if self.store.get_raw(&group_key)?.is_none() {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
@@ -173,7 +173,7 @@ impl Db {
             (batch.delete_range(&consumer_prefix, &end))
                 .expect("write batch append invariant violated");
         }
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(1)
     }
@@ -184,7 +184,7 @@ impl Db {
             return Ok(0);
         };
         let group_key = stream_group_key(self.db_index, key, meta.version, group);
-        if self.store.get_raw_async(&group_key).await.is_none() {
+        if self.store.get_raw_async(&group_key).await?.is_none() {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
@@ -198,7 +198,7 @@ impl Db {
             (batch.delete_range(&consumer_prefix, &end))
                 .expect("write batch append invariant violated");
         }
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(1)
     }
@@ -215,7 +215,7 @@ impl Db {
         self.stream_group_state(key, group)?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let consumer_key = stream_consumer_key(self.db_index, key, meta.version, group, consumer);
-        if self.store.get_raw(&consumer_key).is_some() {
+        if self.store.get_raw(&consumer_key)?.is_some() {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
@@ -226,7 +226,7 @@ impl Db {
             }),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty(&batch);
+        self.write_batch_if_not_empty(&batch)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(1)
     }
@@ -245,7 +245,7 @@ impl Db {
             .await?
             .ok_or_else(|| Error::msg("NOGROUP No such key or consumer group"))?;
         let consumer_key = stream_consumer_key(self.db_index, key, meta.version, group, consumer);
-        if self.store.get_raw_async(&consumer_key).await.is_some() {
+        if self.store.get_raw_async(&consumer_key).await?.is_some() {
             return Ok(0);
         }
         let mut batch = WriteBatch::new();
@@ -256,7 +256,7 @@ impl Db {
             }),
         ))
         .expect("write batch append invariant violated");
-        self.write_batch_if_not_empty_async(&batch).await;
+        self.write_batch_if_not_empty_async(&batch).await?;
         self.changes.fetch_add(1, Ordering::Relaxed);
         Ok(1)
     }
@@ -275,10 +275,10 @@ impl Db {
         let mut removed = 0usize;
         let mut batch = WriteBatch::new();
         let consumer_key = stream_consumer_key(self.db_index, key, meta.version, group, consumer);
-        if self.store.get_raw(&consumer_key).is_some() {
+        if self.store.get_raw(&consumer_key)?.is_some() {
             (batch.delete(&consumer_key)).expect("write batch append invariant violated");
         }
-        for (id, pel) in self.stream_pending_raw(key, meta.version, group) {
+        for (id, pel) in self.stream_pending_raw(key, meta.version, group)? {
             if pel.consumer == consumer {
                 (batch.delete(&stream_pel_key(self.db_index, key, meta.version, group, id)))
                     .expect("write batch append invariant violated");
@@ -286,7 +286,7 @@ impl Db {
             }
         }
         if batch.count() > 0 {
-            self.write_batch_if_not_empty(&batch);
+            self.write_batch_if_not_empty(&batch)?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(removed)
@@ -308,12 +308,12 @@ impl Db {
         let mut removed = 0usize;
         let mut batch = WriteBatch::new();
         let consumer_key = stream_consumer_key(self.db_index, key, meta.version, group, consumer);
-        if self.store.get_raw_async(&consumer_key).await.is_some() {
+        if self.store.get_raw_async(&consumer_key).await?.is_some() {
             (batch.delete(&consumer_key)).expect("write batch append invariant violated");
         }
         for (id, pel) in self
             .stream_pending_raw_async(key, meta.version, group)
-            .await
+            .await?
         {
             if pel.consumer == consumer {
                 (batch.delete(&stream_pel_key(self.db_index, key, meta.version, group, id)))
@@ -322,7 +322,7 @@ impl Db {
             }
         }
         if batch.count() > 0 {
-            self.write_batch_if_not_empty_async(&batch).await;
+            self.write_batch_if_not_empty_async(&batch).await?;
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(removed)

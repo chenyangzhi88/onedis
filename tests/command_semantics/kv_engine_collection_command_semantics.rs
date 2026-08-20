@@ -324,7 +324,7 @@ fn sdiffstore_writes_difference_to_destination() {
 
     let empty = apply_command(&db, &["sdiffstore", "out", "b", "b"]);
     assert!(matches!(empty, Frame::Integer(0)));
-    assert!(db.get("out").is_none());
+    assert!(db.get("out").unwrap().is_none());
 }
 
 #[test]

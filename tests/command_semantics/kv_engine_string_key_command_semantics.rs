@@ -5,14 +5,14 @@ use support::*;
 #[tokio::test]
 async fn transaction_async_scans_see_pending_writes_and_deletes() {
     let store = test_store(11);
-    store.put_raw(b"txn-scan:a", b"old");
-    store.put_raw(b"other:a", b"ignore");
+    store.put_raw(b"txn-scan:a", b"old").unwrap();
+    store.put_raw(b"other:a", b"ignore").unwrap();
 
     let txn_store = store.begin_transaction().unwrap();
-    txn_store.put_raw(b"txn-scan:b", b"new");
-    txn_store.delete_key(b"txn-scan:a");
+    txn_store.put_raw(b"txn-scan:b", b"new").unwrap();
+    txn_store.delete_key(b"txn-scan:a").unwrap();
 
-    let entries = txn_store.scan_prefix_raw_async(b"txn-scan:").await;
+    let entries = txn_store.scan_prefix_raw_async(b"txn-scan:").await.unwrap();
     assert_eq!(entries, vec![(b"txn-scan:b".to_vec(), b"new".to_vec())]);
 }
 
@@ -58,7 +58,8 @@ async fn transaction_async_copy_and_move_copy_complex_structures() {
 #[test]
 fn incrby_updates_numeric_string_in_kv_engine() {
     let db = test_db();
-    db.insert("counter".to_string(), Structure::String("40".to_string()));
+    db.insert("counter".to_string(), Structure::String("40".to_string()))
+        .unwrap();
 
     let frame = Incrby {
         key: "counter".to_string(),
@@ -69,7 +70,7 @@ fn incrby_updates_numeric_string_in_kv_engine() {
 
     assert!(matches!(frame, Frame::Integer(42)));
     assert!(matches!(
-        db.get("counter"),
+        db.get("counter").unwrap(),
         Some(Structure::String(value)) if value == "42"
     ));
 }
@@ -77,7 +78,8 @@ fn incrby_updates_numeric_string_in_kv_engine() {
 #[test]
 fn getset_replaces_string_and_returns_old_value() {
     let db = test_db();
-    db.insert("name".to_string(), Structure::String("alice".to_string()));
+    db.insert("name".to_string(), Structure::String("alice".to_string()))
+        .unwrap();
 
     let frame = GetSet {
         key: "name".to_string(),
@@ -88,7 +90,7 @@ fn getset_replaces_string_and_returns_old_value() {
 
     assert!(matches!(frame, Frame::BulkString(value) if value.as_slice() == b"alice"));
     assert!(matches!(
-        db.get("name"),
+        db.get("name").unwrap(),
         Some(Structure::String(value)) if value == "bob"
     ));
 }
@@ -96,7 +98,8 @@ fn getset_replaces_string_and_returns_old_value() {
 #[test]
 fn setrange_writes_sparse_string_into_kv_engine() {
     let db = test_db();
-    db.insert("blob".to_string(), Structure::String("abc".to_string()));
+    db.insert("blob".to_string(), Structure::String("abc".to_string()))
+        .unwrap();
 
     let frame = SetRange {
         key: "blob".to_string(),
@@ -108,7 +111,7 @@ fn setrange_writes_sparse_string_into_kv_engine() {
 
     assert!(matches!(frame, Frame::Integer(6)));
     assert!(matches!(
-        db.get("blob"),
+        db.get("blob").unwrap(),
         Some(Structure::String(value)) if value.as_bytes() == b"abc\0\0Z"
     ));
 }
@@ -116,7 +119,8 @@ fn setrange_writes_sparse_string_into_kv_engine() {
 #[test]
 fn rename_moves_value_within_same_kv_engine_db() {
     let db = test_db();
-    db.insert("old".to_string(), Structure::String("value".to_string()));
+    db.insert("old".to_string(), Structure::String("value".to_string()))
+        .unwrap();
 
     let frame = Rename {
         old_key: "old".to_string(),
@@ -126,9 +130,9 @@ fn rename_moves_value_within_same_kv_engine_db() {
     .unwrap();
 
     assert!(matches!(frame, Frame::Ok));
-    assert!(db.get("old").is_none());
+    assert!(db.get("old").unwrap().is_none());
     assert!(matches!(
-        db.get("new"),
+        db.get("new").unwrap(),
         Some(Structure::String(value)) if value == "value"
     ));
 }
@@ -323,8 +327,9 @@ fn ttl_and_persist_observe_same_backed_key() {
     db.insert(
         "session".to_string(),
         Structure::String("token".to_string()),
-    );
-    db.expire("session".to_string(), 2_000);
+    )
+    .unwrap();
+    db.expire("session".to_string(), 2_000).unwrap();
 
     let ttl_frame = Ttl::parse_from_frame(frame_args(&["ttl", "session"]))
         .unwrap()
@@ -358,10 +363,10 @@ fn expire_still_removes_key_after_command_level_write() {
     }
     .apply(&db)
     .unwrap();
-    db.expire("temp".to_string(), 20);
+    db.expire("temp".to_string(), 20).unwrap();
 
     std::thread::sleep(Duration::from_millis(30));
-    assert!(db.get("temp").is_none());
+    assert!(db.get("temp").unwrap().is_none());
 }
 
 #[test]
@@ -954,7 +959,7 @@ fn incr_and_decr_commands_update_same_numeric_value() {
     assert!(matches!(incrbyfloat_frame, Frame::BulkString(value) if value.as_slice() == b"7.5"));
 
     assert!(matches!(
-        db.get("counter"),
+        db.get("counter").unwrap(),
         Some(Structure::String(value)) if value == "7.5"
     ));
 }
@@ -970,7 +975,7 @@ fn integer_string_updates_preserve_ttl_and_report_overflow() {
 
     let decr = apply_command(&db, &["decr", "counter"]);
     assert!(matches!(decr, Frame::Integer(9223372036854775806)));
-    assert!(db.ttl_millis("counter") > 0);
+    assert!(db.ttl_millis("counter").unwrap() > 0);
 }
 
 #[test]
@@ -996,7 +1001,7 @@ fn setnx_setex_and_getdel_follow_string_semantics() {
     let setnx_existing = apply_command(&db, &["setnx", "lock", "token2"]);
     assert!(matches!(setnx_existing, Frame::Integer(0)));
     assert!(matches!(
-        db.get("lock"),
+        db.get("lock").unwrap(),
         Some(Structure::String(value)) if value == "token1"
     ));
 
@@ -1007,7 +1012,7 @@ fn setnx_setex_and_getdel_follow_string_semantics() {
 
     let getdel_frame = apply_command(&db, &["getdel", "lock"]);
     assert!(matches!(getdel_frame, Frame::BulkString(value) if value.as_slice() == b"token1"));
-    assert!(db.get("lock").is_none());
+    assert!(db.get("lock").unwrap().is_none());
 
     let missing_getdel = apply_command(&db, &["getdel", "lock"]);
     assert!(matches!(missing_getdel, Frame::Null));

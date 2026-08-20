@@ -32,18 +32,17 @@ impl Del {
      * @param db 数据库
      */
     pub fn apply(self, db: &Db) -> Result<Frame, Error> {
-        let deleted = self
-            .keys
-            .into_iter()
-            .filter(|key| db.delete_key(key))
-            .count() as i64;
+        let mut deleted = 0i64;
+        for key in self.keys {
+            deleted += i64::from(db.delete_key(&key)?);
+        }
 
         Ok(Frame::Integer(deleted))
     }
 
     pub async fn apply_async(self, db: &Db) -> Result<Frame, Error> {
         Ok(Frame::Integer(
-            db.delete_keys_async(&self.keys).await as i64,
+            db.delete_keys_async(&self.keys).await? as i64,
         ))
     }
 }
@@ -91,8 +90,10 @@ mod tests {
     #[test]
     fn del_returns_deleted_key_count() {
         let db = test_db();
-        db.insert("k1".to_string(), Structure::String("v1".to_string()));
-        db.insert("k2".to_string(), Structure::String("v2".to_string()));
+        db.insert("k1".to_string(), Structure::String("v1".to_string()))
+            .unwrap();
+        db.insert("k2".to_string(), Structure::String("v2".to_string()))
+            .unwrap();
 
         let frame = Del::new(vec![
             "k1".to_string(),
@@ -103,8 +104,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(frame, Frame::Integer(2)));
-        assert!(db.get("k1").is_none());
-        assert!(db.get("k2").is_none());
+        assert!(db.get("k1").unwrap().is_none());
+        assert!(db.get("k2").unwrap().is_none());
     }
 
     #[test]

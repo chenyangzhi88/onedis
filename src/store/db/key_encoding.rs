@@ -220,8 +220,7 @@ impl KeyEncodingLayout {
     pub(in crate::store::db) fn try_open_or_initialize_for_table(
         store: &KvStore,
     ) -> anyhow::Result<Self> {
-        let failures_before = crate::store::health::storage_health().failure_count();
-        if let Some(raw) = store.get_raw(KEY_ENCODING_LAYOUT_META_KEY) {
+        if let Some(raw) = store.get_raw(KEY_ENCODING_LAYOUT_META_KEY)? {
             return Self::decode(&raw).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unsupported onedis key encoding layout metadata: {:?}",
@@ -229,23 +228,7 @@ impl KeyEncodingLayout {
                 )
             });
         }
-        if crate::store::health::storage_health().failure_count() != failures_before {
-            return Err(anyhow::anyhow!(
-                "failed to read onedis key encoding layout: {}",
-                crate::store::health::storage_health()
-                    .last_error()
-                    .unwrap_or_else(|| "unknown storage failure".to_string())
-            ));
-        }
-        let table_has_data = !store.scan_range_raw_limited(&[], None, 1).is_empty();
-        if crate::store::health::storage_health().failure_count() != failures_before {
-            return Err(anyhow::anyhow!(
-                "failed to inspect onedis key encoding layout: {}",
-                crate::store::health::storage_health()
-                    .last_error()
-                    .unwrap_or_else(|| "unknown storage failure".to_string())
-            ));
-        }
+        let table_has_data = !store.scan_range_raw_limited(&[], None, 1)?.is_empty();
         if table_has_data && !store.is_canonical_db_table() {
             return Err(anyhow::anyhow!(
                 "onedis table contains data without key encoding metadata; remove old data before starting with TableLocalV2"
@@ -256,15 +239,9 @@ impl KeyEncodingLayout {
                 "initializing missing TableLocalV2 key encoding metadata for a recovered legacy onedis database table"
             );
         }
-        store.put_raw(KEY_ENCODING_LAYOUT_META_KEY, Self::TableLocalV2.encode());
-        if crate::store::health::storage_health().failure_count() != failures_before {
-            return Err(anyhow::anyhow!(
-                "failed to persist onedis key encoding layout: {}",
-                crate::store::health::storage_health()
-                    .last_error()
-                    .unwrap_or_else(|| "unknown storage failure".to_string())
-            ));
-        }
+        store
+            .put_raw(KEY_ENCODING_LAYOUT_META_KEY, Self::TableLocalV2.encode())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         Ok(Self::TableLocalV2)
     }
 }
@@ -308,19 +285,22 @@ impl TtlKeyEncoding {
     }
 }
 
-pub(crate) fn ttl_key_encoding_for_store(store: &KvStore) -> TtlKeyEncoding {
+pub(crate) fn ttl_key_encoding_for_store(
+    store: &KvStore,
+) -> common::types::status::Result<TtlKeyEncoding> {
     let layout = store
-        .get_raw(KEY_ENCODING_LAYOUT_META_KEY)
+        .get_raw(KEY_ENCODING_LAYOUT_META_KEY)?
         .map(|raw| {
-            KeyEncodingLayout::decode(&raw).unwrap_or_else(|| {
-                panic!(
+            KeyEncodingLayout::decode(&raw).ok_or_else(|| {
+                common::types::status::Status::InvalidArgument(format!(
                     "unsupported onedis key encoding layout metadata: {:?}",
                     String::from_utf8_lossy(&raw)
-                )
+                ))
             })
         })
+        .transpose()?
         .unwrap_or(KeyEncodingLayout::CURRENT);
-    TtlKeyEncoding { layout }
+    Ok(TtlKeyEncoding { layout })
 }
 
 /// 数据库索引前缀（2 字节大端序），用于兼容当前 DbPrefixedV1 磁盘格式。

@@ -120,7 +120,8 @@ async fn listing_wrappers_cover_blocking_move_pop_lmpop_lpos_and_error_edges() {
         Frame::Null
     ));
 
-    db.insert("plain".to_string(), Structure::String("value".to_string()));
+    db.insert("plain".to_string(), Structure::String("value".to_string()))
+        .unwrap();
     for args in [
         &["blpop", "plain", "0"][..],
         &["brpop", "plain", "0"][..],

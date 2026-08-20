@@ -70,7 +70,7 @@ impl Db {
         }
         let allow_doc_ids = indexed_allow_doc_ids
             .as_ref()
-            .or_else(|| external_allow_doc_ids.as_deref());
+            .or(external_allow_doc_ids.as_deref());
         let context = VectorSearchContext {
             index,
             version,
@@ -84,7 +84,13 @@ impl Db {
         let use_exact = if options.exact || meta.algorithm == VectorIndexAlgorithm::Flat {
             true
         } else {
-            self.ensure_vector_runtime(index, version, &meta)?;
+            if self
+                .vector_runtimes
+                .get(self.db_index, index, version)
+                .is_none()
+            {
+                return Err(Error::msg("INDEX_NOT_READY vector runtime is loading"));
+            }
             self.vector_should_use_exact(&context)?
         };
         global_metrics()
@@ -106,21 +112,11 @@ impl Db {
         query: &[f32],
         options: VectorSearchOptions,
     ) -> Result<Vec<VectorSearchResult>, Error> {
-        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            matches!(
-                handle.runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            )
-        }) {
-            // The command runtime is multi-threaded. `block_in_place` lets
-            // Tokio replace this worker while the CPU-heavy graph traversal
-            // runs, without paying a spawn_blocking queue and join round-trip
-            // for every short VSIM request.
-            return tokio::task::block_in_place(|| self.vector_search(index, query, options));
-        }
         let index = index.to_string();
         let query = query.to_vec();
-        self.run_blocking_store_task(move |db| db.vector_search(&index, &query, options))
+        let db = self.shared_task_view();
+        vector_search_executor()?
+            .execute(move || db.vector_search(&index, &query, options))
             .await
     }
 
@@ -142,19 +138,11 @@ impl Db {
         query: &[f32],
         options: VectorSearchOptions,
     ) -> Result<Vec<VectorSearchResult>, Error> {
-        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            matches!(
-                handle.runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            )
-        }) {
-            return tokio::task::block_in_place(|| {
-                self.vector_search_stored(index, query, options)
-            });
-        }
         let index = index.to_string();
         let query = query.to_vec();
-        self.run_blocking_store_task(move |db| db.vector_search_stored(&index, &query, options))
+        let db = self.shared_task_view();
+        vector_search_executor()?
+            .execute(move || db.vector_search_stored(&index, &query, options))
             .await
     }
 
@@ -170,4 +158,66 @@ impl Db {
         global_metrics().record_vector_search(elapsed_us(started), result.is_err());
         result
     }
+}
+
+struct VectorSearchExecutor {
+    _runtime: std::sync::Mutex<Option<tokio::runtime::Runtime>>,
+    handle: tokio::runtime::Handle,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl VectorSearchExecutor {
+    fn from_env() -> Result<Self, Error> {
+        let default_workers = std::thread::available_parallelism()
+            .map(|parallelism| (parallelism.get() / 2).max(1))
+            .unwrap_or(2);
+        let workers = std::env::var("ONEDIS_VECTOR_SEARCH_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default_workers);
+        let max_in_flight = std::env::var("ONEDIS_VECTOR_SEARCH_MAX_IN_FLIGHT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| workers.saturating_mul(4).max(workers));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .thread_name("onedis-vector")
+            .enable_all()
+            .build()?;
+        let handle = runtime.handle().clone();
+        Ok(Self {
+            _runtime: std::sync::Mutex::new(Some(runtime)),
+            handle,
+            permits: Arc::new(tokio::sync::Semaphore::new(max_in_flight)),
+        })
+    }
+
+    async fn execute<T, F>(&self, operation: F) -> Result<T, Error>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, Error> + Send + 'static,
+    {
+        let permit = self
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::msg("BUSY vector search executor is saturated"))?;
+        self.handle
+            .spawn_blocking(move || {
+                let _permit = permit;
+                operation()
+            })
+            .await
+            .map_err(|error| Error::msg(format!("vector search worker failed: {error}")))?
+    }
+}
+
+fn vector_search_executor() -> Result<&'static VectorSearchExecutor, Error> {
+    static EXECUTOR: OnceLock<Result<VectorSearchExecutor, String>> = OnceLock::new();
+    EXECUTOR
+        .get_or_init(|| VectorSearchExecutor::from_env().map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|error| Error::msg(format!("failed to initialize vector executor: {error}")))
 }
